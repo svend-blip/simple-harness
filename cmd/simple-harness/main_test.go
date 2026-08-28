@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/svend-blip/simple-harness/internal/tools"
+	"github.com/svend-blip/simple-harness/internal/tools/builtins"
 )
 
 // TestVersionFlag pins the behaviour TG1 measures: ./bin/simple-harness
@@ -333,6 +334,58 @@ func TestToolsSubcommand_EmptyRegistry(t *testing.T) {
 	trimmed := strings.TrimSpace(string(out))
 	if trimmed != "" && trimmed != "(no tools registered)" {
 		t.Fatalf("simple-harness tools output = %q, want empty or \"(no tools registered)\"", trimmed)
+	}
+}
+
+// TestToolsSubcommand_ListsRegisteredTools pins handoff 014's
+// partial TG1: after RegisterBuiltins(globalRegistry), the
+// `simple-harness tools` subcommand prints the registered tool
+// names sorted, one per line. Handoff 014 registers exactly two
+// tools (read_file + list_directory); handoff 015 will add
+// search_files + grep and update this test (the same shape, more
+// entries).
+//
+// The test snapshots and restores globalRegistry around the call
+// so the test does not depend on whether RegisterBuiltins has
+// already been called by another test (the existing
+// TestToolsSubcommand_EmptyRegistry uses the same pattern).
+// RegisterBuiltins is invoked on the saved registry (the post-
+// restore registry) so the listing is reproducible.
+func TestToolsSubcommand_ListsRegisteredTools(t *testing.T) {
+	saved := globalRegistry
+	t.Cleanup(func() { globalRegistry = saved })
+
+	// Build a fresh registry, register the builtins, swap it
+	// in. This isolates the test from any other test that may
+	// have mutated globalRegistry.
+	fresh := tools.NewRegistry()
+	builtins.RegisterBuiltins(fresh)
+	globalRegistry = fresh
+
+	origStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = origStdout })
+
+	code := run([]string{"tools"})
+
+	_ = w.Close()
+	out, _ := io.ReadAll(r)
+	if code != 0 {
+		t.Fatalf("run(tools) returned %d, want 0 (output: %q)", code, out)
+	}
+
+	// Expected output: one tool name per line, sorted. The
+	// exact expected output for handoff 014 is the two-tool
+	// listing. (After handoff 015 ships, update this test to
+	// the four-tool listing.)
+	expected := "list_directory\nread_file\n"
+	if got := string(out); got != expected {
+		t.Fatalf("simple-harness tools output = %q, want %q",
+			got, expected)
 	}
 }
 

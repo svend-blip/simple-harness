@@ -42,6 +42,7 @@ import (
 	"github.com/svend-blip/simple-harness/internal/loop"
 	"github.com/svend-blip/simple-harness/internal/model"
 	"github.com/svend-blip/simple-harness/internal/tools"
+	"github.com/svend-blip/simple-harness/internal/tools/builtins"
 )
 
 // Version is the runtime version literal. It is a package-level const so
@@ -49,7 +50,7 @@ import (
 // without shelling out or reading the binary itself. The format is a
 // single line, project-name first, so an external parser does not need to
 // interpret it to extract the version.
-const Version = "simple-harness 0.1.0-dev (Run 003, handoff 013)"
+const Version = "simple-harness 0.1.0-dev (Run 003, handoff 014)"
 
 // globalRegistry is the tool registry the `simple-harness tools`
 // subcommand lists. Handoff 013 leaves it EMPTY; Run 014 / Run 015 will
@@ -427,5 +428,6 @@ func runTools(args []string) int {
 }
 
 func main() {
+	builtins.RegisterBuiltins(globalRegistry)
 	os.Exit(run(os.Args[1:]))
 }
