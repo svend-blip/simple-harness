@@ -1,0 +1,14 @@
+#!/bin/sh
+# bin/simple-harness — committed POSIX sh wrapper for Simple Harness.
+# Final act: exec the runtime binary so signals propagate
+# (docs/ARCHITECTURE.md §"Distribution shape"; RUNS-BACKLOG §"Cross-run
+# bound decisions"; SCOPE §§25, 26).
+#
+# The wrapper is shape (a) from the handoff: it execs a pre-built runtime
+# binary that is committed alongside it. ./bin/simple-harness works
+# immediately after a fresh clone without requiring a Go toolchain on
+# PATH; the runtime is rebuilt from source via
+# `go build -o bin/simple-harness-runtime ./cmd/simple-harness` on
+# developer machines and in CI.
+set -eu
+exec "$(dirname "$0")/simple-harness-runtime" "$@"

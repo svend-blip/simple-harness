@@ -1,0 +1,10 @@
+# Go build artifacts
+# bin/simple-harness-runtime is the COMMITTED runtime binary and is NOT
+# ignored — it is the binary the wrapper execs. The paths below are for
+# developer-machine / CI build outputs.
+*.test
+*.out
+coverage.out
+coverage.html
+/simple-harness
+/simple-harness-runtime
