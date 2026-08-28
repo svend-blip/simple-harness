@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/svend-blip/simple-harness/internal/tools"
 )
 
 // TestVersionFlag pins the behaviour TG1 measures: ./bin/simple-harness
@@ -291,6 +293,47 @@ func driveInteractive(t *testing.T, stdinInput string, extraArgs ...string) (int
 	var buf bytes.Buffer
 	_, _ = io.Copy(&buf, outR)
 	return code, buf.String()
+}
+
+// TestToolsSubcommand_EmptyRegistry pins handoff 013's foundation-state
+// behaviour: `simple-harness tools` exits 0 and produces either empty
+// stdout or the literal "(no tools registered)" line. The handoff
+// accepts both; this Run's implementer chose empty stdout. The test
+// pins whichever choice is in effect so a future regression that emits
+// something else fails.
+//
+// The test calls run() directly with a captured stdout (mirroring the
+// TestConfigShowDoesNotLeakAPIKey pipe pattern above). The empty
+// registry is reached by saving and restoring globalRegistry around
+// the call — handoff 013 leaves the global registry empty, but the
+// snapshot+restore pattern keeps the test robust against future
+// handoffs that pre-populate the registry at package init time.
+func TestToolsSubcommand_EmptyRegistry(t *testing.T) {
+	saved := globalRegistry
+	t.Cleanup(func() { globalRegistry = saved })
+
+	// Force an empty registry for this test.
+	globalRegistry = tools.NewRegistry()
+
+	origStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = origStdout })
+
+	code := run([]string{"tools"})
+
+	_ = w.Close()
+	out, _ := io.ReadAll(r)
+	if code != 0 {
+		t.Fatalf("run(tools) returned %d, want 0 (output: %q)", code, out)
+	}
+	trimmed := strings.TrimSpace(string(out))
+	if trimmed != "" && trimmed != "(no tools registered)" {
+		t.Fatalf("simple-harness tools output = %q, want empty or \"(no tools registered)\"", trimmed)
+	}
 }
 
 // TestInteractiveMode_DoesNotPolluteSourceTree pins verdict 010's

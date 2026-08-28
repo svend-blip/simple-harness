@@ -41,6 +41,7 @@ import (
 	"github.com/svend-blip/simple-harness/internal/event"
 	"github.com/svend-blip/simple-harness/internal/loop"
 	"github.com/svend-blip/simple-harness/internal/model"
+	"github.com/svend-blip/simple-harness/internal/tools"
 )
 
 // Version is the runtime version literal. It is a package-level const so
@@ -48,7 +49,16 @@ import (
 // without shelling out or reading the binary itself. The format is a
 // single line, project-name first, so an external parser does not need to
 // interpret it to extract the version.
-const Version = "simple-harness 0.1.0-dev (Run 002, handoff 010)"
+const Version = "simple-harness 0.1.0-dev (Run 003, handoff 013)"
+
+// globalRegistry is the tool registry the `simple-harness tools`
+// subcommand lists. Handoff 013 leaves it EMPTY; Run 014 / Run 015 will
+// populate it at startup with the read/search tools.
+//
+// The variable lives at package scope (not inside run()) so it survives
+// across invocations and so a future init() / RegisterAll helper can
+// populate it before run() is called.
+var globalRegistry = tools.NewRegistry()
 
 // usage is the brief usage summary printed by --help and by the
 // interactive-mode /help command. Kept short on purpose; later
@@ -97,9 +107,13 @@ type interactiveOpts struct {
 // in main_test.go can drive the same code path the CLI uses without
 // forking the binary.
 func run(args []string) int {
-	// Subcommand dispatch: "config show" is the only subcommand in V1.
+	// Subcommand dispatch: "config show" and "tools" are the V1
+	// subcommands; everything else falls through to flag parsing.
 	if len(args) > 0 && args[0] == "config" {
 		return runConfig(args[1:])
+	}
+	if len(args) > 0 && args[0] == "tools" {
+		return runTools(args[1:])
 	}
 
 	// No args: enter interactive mode (deliverable 4). The REPL
@@ -381,6 +395,35 @@ func newSessionID() (string, error) {
 	b[8] = (b[8] & 0x3F) | 0x80 // variant 10
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
 		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
+}
+
+// runTools prints the registered tool names, one per line, sorted, to
+// stdout. Exit 0 on success.
+//
+// The handoff 013 contract accepts either "empty stdout" or the literal
+// "(no tools registered)" line for the empty-registry case. This Run's
+// implementer chose empty stdout (no output) for the empty case so the
+// subcommand produces zero output when the registry is empty; Run 014 /
+// Run 015 will register tools and the listing will be one tool name per
+// line. The choice is recorded in the handoff 013 result's "Tool
+// inventory state" subsection.
+//
+// args is reserved for future flags (e.g. `--json`); the V1 surface
+// ignores it.
+func runTools(args []string) int {
+	_ = args // future: filter / json / etc.
+
+	names := globalRegistry.Names()
+	if len(names) == 0 {
+		// Empty registry — exit 0 with no output. The choice (vs the
+		// literal "(no tools registered)" line) is documented in the
+		// handoff 013 result file's "Tool inventory state" subsection.
+		return 0
+	}
+	for _, name := range names {
+		fmt.Println(name)
+	}
+	return 0
 }
 
 func main() {
