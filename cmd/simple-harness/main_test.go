@@ -379,7 +379,8 @@ func TestToolsSubcommand_ListsRegisteredTools(t *testing.T) {
 	}
 
 	// Expected output: one tool name per line, sorted.
-	expected := "grep\nlist_directory\nread_file\nsearch_files\n"
+	// Handoff 017 added write_file; handoff 018 will add apply_patch.
+	expected := "grep\nlist_directory\nread_file\nsearch_files\nwrite_file\n"
 	if got := string(out); got != expected {
 		t.Fatalf("simple-harness tools output = %q, want %q",
 			got, expected)

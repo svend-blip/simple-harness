@@ -2,7 +2,8 @@
 // Harness registers against the foundation's tool registry
 // (internal/tools). Handoff 014 registered the first two of the four
 // V1 read-only tools (read_file and list_directory); handoff 015
-// registers the remaining two (search_files and grep) via the same
+// registers the remaining two (search_files and grep); handoff 017
+// adds the first mutation tool (write_file) via the same
 // RegisterBuiltins registrar.
 //
 // The package is a thin layer over internal/tools: each builtin
@@ -23,17 +24,19 @@ package builtins
 
 import "github.com/svend-blip/simple-harness/internal/tools"
 
-// RegisterBuiltins registers the V1 read-only builtin tools against
-// the given registry. The tools are registered in alphabetical-name
-// order so the simple-harness tools listing is deterministic
-// regardless of the order the source calls them — Registry.Names
-// sorts on output, but the registration list itself is the human-
-// readable documentation of "what's wired up".
+// RegisterBuiltins registers the V1 builtin tools against the given
+// registry. The tools are registered in alphabetical-name order so
+// the simple-harness tools listing is deterministic regardless of
+// the order the source calls them — Registry.Names sorts on output,
+// but the registration list itself is the human-readable
+// documentation of "what's wired up".
 //
-// Run 003 (handoffs 014 + 015) registers all four V1 read-only
-// tools: grep, list_directory, read_file, search_files. The write
-// tools (write_file, apply_patch, shell) belong to Run 004 / Run
-// 005 and are NOT registered here.
+// Run 003 (handoffs 014 + 015) registered all four V1 read-only
+// tools: grep, list_directory, read_file, search_files. Run 004
+// handoff 017 adds the first mutation tool: write_file (SCOPE §10
+// "Support direct file writing where appropriate"). The remaining
+// mutation tool (apply_patch) lands on Run 004 handoff 018 and is
+// NOT registered here.
 //
 // RegisterBuiltins is idempotent only in the sense that calling it
 // twice on the same registry PANICS — Registry.Register panics on
@@ -47,4 +50,5 @@ func RegisterBuiltins(r *tools.Registry) {
 	r.Register(ListDirectory{})
 	r.Register(ReadFile{})
 	r.Register(SearchFiles{})
+	r.Register(WriteFile{})
 }
