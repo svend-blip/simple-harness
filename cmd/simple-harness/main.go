@@ -15,10 +15,14 @@
 // No tools, no permission enforcement, no multi-turn, no sessions
 // persistence beyond the events.jsonl sidecar. The headless
 // `simple-harness run` subcommand is the Run 006 deliverable
-// (handoff 022 lands the flag parser + config-error exit-2 path
-// + the `model_request` event; handoff 024 lands the run-execution
-// path + JSONL stdout + final TGs). Each remaining gap is a future
-// Run per the architecture.
+// (handoff 024 lands the run-execution path + JSONL stdout +
+// final TGs). The headless signal/interrupt semantics are the
+// Run 007 deliverable (handoff 025 lands SIGINT/SIGTERM ->
+// cancellation -> interrupted event -> exit 6 per SCOPE §26;
+// handoff 028 lands the interactive first/second-press Ctrl+C
+// behavior + `/exit` command + repeated-Ctrl+C documented
+// termination per SCOPE §§25, 28). Each remaining gap is a
+// future Run per the architecture.
 //
 // Architectural boundary: this is a Simple Harness component. It does not
 // import orchestration, harness selection, GPU/VRAM allocation,
@@ -39,6 +43,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -56,7 +61,7 @@ import (
 // without shelling out or reading the binary itself. The format is a
 // single line, project-name first, so an external parser does not need to
 // interpret it to extract the version.
-const Version = "simple-harness 0.1.0-dev (Run 006, handoff 024)"
+const Version = "simple-harness 0.1.0-dev (Run 007, handoff 029)"
 
 // globalRegistry is the tool registry the `simple-harness tools`
 // subcommand lists. Handoff 013 leaves it EMPTY; Run 014 / Run 015 will
@@ -101,7 +106,9 @@ Subcommands:
 Interactive mode (the default when no flags or subcommands are given)
 reads prompts from stdin and streams responses to stdout. Built-in
 commands at the prompt: /help, /version, /exit, /quit. EOF on stdin
-or Ctrl+C exits cleanly.
+exits cleanly. Ctrl+C cancels the active request and returns to the
+prompt with the session preserved; a second Ctrl+C terminates with
+exit code 6 (documented behavior per SCOPE §28).
 
 Exit codes (SCOPE §28):
   0  clean exit
@@ -306,10 +313,18 @@ func runConfig(args []string) int {
 // runInteractive is the testable inner entry point for interactive
 // mode. The signature takes stdin/stdout/stderr as parameters so
 // tests can drive the loop end-to-end against os.Pipe readers /
-// writers, and the variadic opts lets the bare-invocation path pass
-// nothing (so the existing tests stay simple). When opts is empty,
-// the defaults are applied: workspace=cwd, permission=READ_ONLY
-// (matching the flag defaults).
+// writers. The variadic seams ...any seam (added by handoff 028)
+// accepts either a <-chan os.Signal (the testability seam — tests
+// pass their own signal channel that the goroutine reads from
+// instead of the default signal.Notify-installed channel) or an
+// interactiveOpts (the existing seam from earlier handoffs for the
+// workspace). The zero-args path keeps both defaults: signal from
+// signal.Notify, opts at the empty-zero-value.
+//
+// Go permits only one variadic, so the seam collapses the
+// signalChs and opts variadics into a single any-typed variadic.
+// Type discrimination happens at the top of the body; the order
+// of the seam values (signalCh first vs opts first) is irrelevant.
 //
 // The permission mode is read from the package-level
 // activePermissionMode var (set by parsePermissionGlobal in run()).
@@ -317,10 +332,45 @@ func runConfig(args []string) int {
 // ("READ_ONLY" / "WORKSPACE_WRITE" / "FULL_ACCESS") to keep the
 // Run-002 sidecar contract intact; the config-show JSON and the
 // --permission CLI surface use the Mode.String() lower-case form.
-func runInteractive(stdin io.Reader, stdout, stderr io.Writer, opts ...interactiveOpts) int {
-	var o interactiveOpts
-	if len(opts) > 0 {
-		o = opts[0]
+//
+// Run 007 / handoff 028 changes the signal handling from "first
+// signal exits 6" to "first signal cancels active request and returns
+// to prompt; second signal terminates 6". The cancellation context
+// runCtx (cancellable context.WithCancel of context.Background())
+// is plumbed into r.RunOne(ctx, prompt); the model client maps
+// context.Canceled to *model.ModelError{ErrTimeout} at
+// internal/model/client.go lines 224, 256, 326, and the prompt loop
+// uses errors.Is(me.Err, context.Canceled) to distinguish signal-
+// triggered cancellation (the new GOAL §2 path) from model-timeout
+// cancellation (the existing handoff 024 path).
+func runInteractive(stdin io.Reader, stdout, stderr io.Writer, seams ...any) int {
+	// Type-discriminate the variadic seam. The bare-invocation path
+	// (no args at all) keeps the existing default behaviour; the
+	// flag-parsed path passes one interactiveOpts; the new test
+	// path passes an additional <-chan os.Signal.
+	//
+	// Note: Go's type switch matches against the exact type
+	// INCLUDING directionality. The test passes a bidirectional
+	// `chan os.Signal` (the only shape the test can construct);
+	// the runInteractive signature stores it as `<-chan os.Signal`
+	// (the seam the goroutine reads from). The bidirectional form
+	// in the case clause is therefore the correct match — using
+	// `case <-chan os.Signal` would silently fail to match because
+	// directionality is part of the type identity at the dynamic-
+	// type level even though it is assignable across directions.
+	var (
+		sigCh       <-chan os.Signal
+		o           interactiveOpts
+		customSigCh bool
+	)
+	for _, s := range seams {
+		switch v := s.(type) {
+		case chan os.Signal:
+			sigCh = v
+			customSigCh = true
+		case interactiveOpts:
+			o = v
+		}
 	}
 
 	// Validate the workspace. Default to cwd when empty; reject
@@ -387,22 +437,55 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, opts ...interacti
 	fmt.Fprintf(stderr, "workspace:  %s\n", o.workspace)
 	fmt.Fprintf(stderr, "permission: %s\n", permissionStr)
 	fmt.Fprintf(stderr, "events:     %s\n", sidecarPath)
-	fmt.Fprintf(stderr, "(type /help for built-in commands, /exit to quit, Ctrl+D to exit)\n")
+	// Handoff 028: banner updated to mention the first/second-press Ctrl+C
+	// behavior. The exact wording is the implementer's choice; the
+	// substantive content (first-press cancels; second-press terminates)
+	// MUST be present.
+	fmt.Fprintf(stderr, "(type /help for built-in commands, /exit to quit, Ctrl+D to exit, Ctrl+C cancels the active request — second Ctrl+C terminates)\n")
 	fmt.Fprintln(stderr)
 
-	// Wire SIGINT/SIGTERM to exit 6 (SCOPE §28 interrupted). The
-	// goroutine emits the two-status sequence to the sidecar before
-	// exiting so an external controller sees the interruption state
-	// per SCOPE §21 invariant.
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(sigCh)
+	// Handoff 028: cancellation context for the in-flight RunOne.
+	// First Ctrl+C cancels via this context (the model client maps
+	// context.Canceled to ErrTimeout; the prompt loop distinguishes
+	// signal-triggered from model-timeout via errors.Is).
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+
+	// Handoff 028: SIGINT/SIGTERM handler with two-press state
+	// machine. cancelPressed: first press fires; interruptRequested:
+	// second press fires and the main loop terminates. The signal
+	// channel is parameterizable via the seams variadic for
+	// testability; the zero-args path uses the default
+	// signal.Notify-installed channel.
+	if !customSigCh {
+		c := make(chan os.Signal, 1)
+		signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
+		defer signal.Stop(c)
+		sigCh = c
+	}
+	// interruptDone is the buffered channel the goroutine sends on
+	// the second-press (size 1 so the goroutine never blocks on
+	// send). It is reserved for future extensions (e.g. a select
+	// wait at the bottom of the loop); the main loop currently
+	// terminates via the interruptRequested flag check at the top.
+	interruptDone := make(chan struct{}, 1)
+	var cancelPressed atomic.Bool
+	var interruptRequested atomic.Bool
 	go func() {
-		<-sigCh
-		_ = em.Status("INTERRUPTING")
-		_ = em.Status("INTERRUPTED")
-		fmt.Fprintln(stderr, "interrupted")
-		os.Exit(6)
+		for range sigCh {
+		if !cancelPressed.Load() {
+			cancelPressed.Store(true)
+			cancelRun()
+			fmt.Fprintln(stderr, "(cancel requested — Ctrl+C again to terminate)")
+			continue
+		}
+		if !interruptRequested.Load() {
+			interruptRequested.Store(true)
+				_ = em.Interrupted(sessionID)
+				fmt.Fprintln(stderr, "interrupted")
+				interruptDone <- struct{}{}
+			}
+		}
 	}()
 
 	// Build the loop.
@@ -430,21 +513,72 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, opts ...interacti
 	scanner := bufio.NewScanner(stdin)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
+	// Handoff 028: drive the scanner from a goroutine so the main
+	// loop can select on BOTH (a) the next scanner line and (b)
+	// interruptDone. Without this split, scanner.Scan blocks the
+	// main loop and the second-press interrupt (which sets
+	// interruptRequested + sends on interruptDone) cannot
+	// propagate to the return-6 path until the user types the
+	// next prompt — which contradicts the documented "second Ctrl+C
+	// terminates" behavior.
+	//
+	// The scanner goroutine runs the bufio.Scanner over stdin and
+	// pushes one scanResult per line; on EOF or error it pushes a
+	// terminal result and exits. The main loop selects on
+	// (scanCh, interruptDone).
+	type scanResult struct {
+		line string
+		eof  bool
+		err  error
+	}
+	scanCh := make(chan scanResult, 1)
+	go func() {
+		for scanner.Scan() {
+			scanCh <- scanResult{line: scanner.Text()}
+		}
+		if err := scanner.Err(); err != nil {
+			scanCh <- scanResult{err: err}
+			return
+		}
+		scanCh <- scanResult{eof: true}
+	}()
+
 	var accum strings.Builder
 	for {
+		// Handoff 028: check for second-press termination at the top
+		// of the loop. The goroutine flips interruptRequested and
+		// emits the `interrupted` event before sending on
+		// interruptDone; this guard returns 6 on the next loop
+		// iteration without invoking the model client again.
+		if interruptRequested.Load() {
+			_ = sidecar.Sync()
+			return 6
+		}
+
 		if accum.Len() > 0 {
 			fmt.Fprint(stderr, "> ")
 		} else {
 			fmt.Fprint(stderr, "simple-harness> ")
 		}
-		if !scanner.Scan() {
-			if err := scanner.Err(); err != nil {
-				fmt.Fprintf(stderr, "stdin error: %v\n", err)
+		var line string
+		select {
+		case res := <-scanCh:
+			if res.err != nil {
+				fmt.Fprintf(stderr, "stdin error: %v\n", res.err)
 				return 1
 			}
-			return 0 // clean EOF
+			if res.eof {
+				return 0 // clean EOF
+			}
+			line = res.line
+		case <-interruptDone:
+			// Second-press termination path — the goroutine has
+			// already emitted the `interrupted` event and flipped
+			// interruptRequested; the top-of-loop guard on the next
+			// iteration (or the implicit return path here) returns 6.
+			_ = sidecar.Sync()
+			return 6
 		}
-		line := scanner.Text()
 		if accum.Len() == 0 {
 			// First line of a (possibly multi-line) prompt —
 			// check for built-in commands and empty-line skip.
@@ -473,7 +607,7 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, opts ...interacti
 		prompt := accum.String()
 		accum.Reset()
 
-		if _, err := r.RunOne(context.Background(), prompt); err != nil {
+		if _, err := r.RunOne(runCtx, prompt); err != nil {
 			var me *model.ModelError
 			if errors.As(err, &me) {
 				switch me.Kind {
@@ -481,6 +615,20 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, opts ...interacti
 					fmt.Fprintf(stderr, "\nmodel error: %v\n", err)
 					return 3
 				case model.ErrTimeout:
+					// Handoff 028: distinguish signal-triggered from
+					// model-timeout. If the underlying error chain
+					// contains context.Canceled AND cancelPressed is
+					// true, treat as user-cancellation (continue loop).
+					// Note: cancelPressed is NOT reset here — a second
+					// SIGINT arriving while the prompt loop is back at
+					// scanner.Scan() must reach the goroutine's
+					// interruptRequested branch (the second-press
+					// terminates per GOAL §2). The reset happens after
+					// a successful prompt completion, when the user has
+					// moved on to a new prompt.
+				if cancelPressed.Load() && errors.Is(me.Err, context.Canceled) {
+					continue
+				}
 					fmt.Fprintln(stderr, "\ninterrupted")
 					return 6
 				}
@@ -488,6 +636,12 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, opts ...interacti
 			fmt.Fprintf(stderr, "\nerror: %v\n", err)
 			return 1
 		}
+		// Handoff 028: a clean prompt completion clears the
+		// cancelPressed flag in case a SIGINT arrived between the
+		// previous prompt's cancellation and the next prompt's
+		// dispatch. The second-press flag (interruptRequested) is
+		// sticky and is checked at the top of the loop.
+		cancelPressed.Store(false)
 		fmt.Fprintln(stdout) // newline after the streamed response
 	}
 }

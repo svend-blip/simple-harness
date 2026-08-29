@@ -8,9 +8,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/svend-blip/simple-harness/internal/event"
 	"github.com/svend-blip/simple-harness/internal/perm"
@@ -635,14 +638,14 @@ func TestRun_Help(t *testing.T) {
 
 // TestRun_Version pins the `simple-harness run --version` path:
 // exit 0 and stdout is the new Version literal. The exact literal
-// is the handoff 024 advance from "Run 006, handoff 022" to
-// "Run 006, handoff 024".
+// is the handoff 028 advance from "Run 006, handoff 024" to
+// "Run 007, handoff 028".
 func TestRun_Version(t *testing.T) {
 	code, out, errOut := driveRun(t, "--version")
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 006, handoff 024)"
+	want := "simple-harness 0.1.0-dev (Run 007, handoff 029)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}
@@ -857,8 +860,494 @@ func TestRun_Version_AdvancesToHandoff024(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 006, handoff 024)"
+	want := "simple-harness 0.1.0-dev (Run 007, handoff 029)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
+	}
+}
+
+// TestRun_SIGTERM_Headless_EmitsInterruptedAndExits6 is the TG1 +
+// TG2 path: SIGTERM on a headless run yields exit 6 (SCOPE §28
+// interrupted) AND emits an `interrupted` event with `session_id`
+// per SCOPE §26's sequence. The test spawns the rebuilt
+// bin/simple-harness-runtime binary with the non-routable 10.255.255.1:9
+// endpoint (so the model request hangs in connect, the process
+// stays alive to receive the signal), sends SIGTERM after a
+// brief wait, and asserts (a) the harness exit code is 6 and
+// (b) the JSONL output file contains `protocol_version`, an
+// `event` field, and an event with `interrupt` in its name (the
+// `interrupted` event the SCOPE §26 sequence names).
+//
+// The test is marked to skip in -short mode (the spawned-process
+// test takes ~2-3 seconds and is not appropriate for the -short
+// fast path).
+func TestRun_SIGTERM_Headless_EmitsInterruptedAndExits6(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires spawned harness process; skipped in -short mode")
+	}
+
+	binPath, err := filepath.Abs(filepath.Join("..", "..", "bin", "simple-harness-runtime"))
+	if err != nil {
+		t.Fatalf("abs binPath: %v", err)
+	}
+	if _, err := os.Stat(binPath); err != nil {
+		t.Fatalf("rebuilt binary missing at %s — run `go build -o bin/simple-harness-runtime ./cmd/simple-harness` first: %v", binPath, err)
+	}
+
+	promptDir := t.TempDir()
+	promptFile := filepath.Join(promptDir, "prompt.md")
+	if err := os.WriteFile(promptFile, []byte("say hi"), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+
+	outPath := "/tmp/sh-tg7-out.jsonl"
+	_ = os.Remove(outPath)
+
+	cmd := exec.Command(binPath,
+		"run",
+		"--base-url", "http://10.255.255.1:9",
+		"--model", "tg",
+		"--workspace", t.TempDir(),
+		"--permission", "read_only",
+		"--prompt-file", promptFile,
+		"--output", "jsonl",
+	)
+	jsonlFile, err := os.Create(outPath)
+	if err != nil {
+		t.Fatalf("create %s: %v", outPath, err)
+	}
+	cmd.Stdout = jsonlFile
+	cmd.Stderr = jsonlFile
+
+	if err := cmd.Start(); err != nil {
+		jsonlFile.Close()
+		t.Fatalf("start harness: %v", err)
+	}
+
+	time.Sleep(2 * time.Second)
+
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("signal: %v", err)
+	}
+
+	waitErr := cmd.Wait()
+	jsonlFile.Close()
+
+	if waitErr == nil {
+		t.Fatalf("harness exited cleanly (rc=0); want rc=6 (interrupted) — signal handler did not run")
+	}
+	exitErr, ok := waitErr.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("harness wait error: %v (not *exec.ExitError)", waitErr)
+	}
+	if exitErr.ExitCode() != 6 {
+		t.Fatalf("harness exit code = %d, want 6 (interrupted); stderr/stdout combined at %s", exitErr.ExitCode(), outPath)
+	}
+
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", outPath, err)
+	}
+	if !strings.Contains(string(data), "protocol_version") {
+		t.Errorf("JSONL output missing `protocol_version` substring: %s", data)
+	}
+	if !strings.Contains(string(data), `"event"`) {
+		t.Errorf("JSONL output missing `\"event\"` substring: %s", data)
+	}
+	if !strings.Contains(strings.ToLower(string(data)), "interrupt") {
+		t.Errorf("JSONL output missing case-insensitive `interrupt` substring (the `interrupted` event): %s", data)
+	}
+}
+
+// driveInteractiveWithSeams is the test helper for handoff 028's
+// interactive-interrupt tests. It mirrors driveInteractive's stdin /
+// stdout / stderr redirect, but it ALSO (a) accepts a caller-supplied
+// signal channel (wired into runInteractive's seams variadic so the
+// test can drive the signal handler deterministically without
+// touching the real process-group signal table) and (b) returns the
+// longer-lived stderr body in addition to the captured stdout so the
+// tests can assert on the "cancel requested" / "interrupted"
+// diagnostic lines.
+//
+// The helper redirects the global os.Stdout / os.Stderr (the run()
+// call path goes through these — the runInteractive signature
+// accepts any io.Reader / io.Writer but run() still calls
+// runInteractive(os.Stdin, os.Stdout, os.Stderr) on the bare-invocation
+// path; for the test we use the seams variadic to bypass that and
+// pass our own pipes, so the global redirects are belt-and-braces).
+func driveInteractiveWithSeams(t *testing.T, stdinInput string, sigCh chan<- os.Signal, workspace string) (int, string, string) {
+	t.Helper()
+
+	origStdin := os.Stdin
+	origStdout := os.Stdout
+	origStderr := os.Stderr
+	t.Cleanup(func() {
+		os.Stdin = origStdin
+		os.Stdout = origStdout
+		os.Stderr = origStderr
+	})
+
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	os.Stdin = inR
+	go func() {
+		_, _ = io.WriteString(inW, stdinInput)
+		_ = inW.Close()
+	}()
+
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	os.Stdout = outW
+
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stderr pipe: %v", err)
+	}
+	os.Stderr = errW
+
+	code := runInteractive(inR, outW, errW, sigCh,
+		interactiveOpts{workspace: workspace})
+
+	_ = outW.Close()
+	_ = errW.Close()
+	var outBuf, errBuf bytes.Buffer
+	_, _ = io.Copy(&outBuf, outR)
+	_, _ = io.Copy(&errBuf, errR)
+	return code, outBuf.String(), errBuf.String()
+}
+
+// findSidecarPath returns the absolute path of the events.jsonl
+// sidecar the harness created under workspace/sessions/. The session
+// id is dynamic (UUIDv7 generated inside runInteractive), so the
+// helper lists the directory and returns the only events.jsonl entry.
+// The workspace is expected to contain exactly one session at the
+// moment the helper is called (the test runs only one
+// runInteractive call).
+func findSidecarPath(t *testing.T, workspace string) string {
+	t.Helper()
+	sessionsDir := filepath.Join(workspace, "sessions")
+	entries, err := os.ReadDir(sessionsDir)
+	if err != nil {
+		t.Fatalf("readdir %s: %v", sessionsDir, err)
+	}
+	var jsonlPath string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		candidate := filepath.Join(sessionsDir, e.Name(), "events.jsonl")
+		if _, err := os.Stat(candidate); err == nil {
+			if jsonlPath != "" {
+				t.Fatalf("workspace %s has multiple events.jsonl sidecars; cannot determine the active session", workspace)
+			}
+			jsonlPath = candidate
+		}
+	}
+	if jsonlPath == "" {
+		t.Fatalf("no events.jsonl sidecar found under %s", sessionsDir)
+	}
+	return jsonlPath
+}
+
+// sidecarHasEvent returns true if the sidecar file contains a JSONL
+// line whose Event matches want AND whose SessionID matches
+// sessionID. The session_id pin disambiguates from any sidecar that
+// might (hypothetically) conflate multiple sessions in the same
+// workspace; the implementation reads line-by-line so a partial
+// write at EOF does not confuse it.
+func sidecarHasEvent(t *testing.T, sidecarPath, want, sessionID string) bool {
+	t.Helper()
+	data, err := os.ReadFile(sidecarPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", sidecarPath, err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		var ev event.Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			continue
+		}
+		if ev.Event == want && (sessionID == "" || ev.SessionID == sessionID) {
+			return true
+		}
+	}
+	return false
+}
+
+// sidecarSessionID returns the session_id stamped on the first
+// parseable JSONL line of the sidecar file. The session_id is set
+// at session-creation time and stamped on every event by the
+// emitter, so any event line carries it.
+func sidecarSessionID(t *testing.T, sidecarPath string) string {
+	t.Helper()
+	data, err := os.ReadFile(sidecarPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", sidecarPath, err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		var ev event.Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			continue
+		}
+		if ev.SessionID != "" {
+			return ev.SessionID
+		}
+	}
+	t.Fatalf("no parseable JSONL line with session_id found in %s", sidecarPath)
+	return ""
+}
+
+// TestInteractiveMode_FirstCtrlC_CancelsActiveRequestAndReturnsToPrompt
+// pins GOAL §2's first-press behavior: Ctrl+C cancels the in-flight
+// model request and the prompt loop continues. The test uses the
+// seams ...any testability seam (handoff 028) and a slow httptest
+// server (the server blocks on a make(chan struct{}) that the test
+// holds open until after asserting cancellation) to make the
+// in-flight timing deterministic — this avoids the timing flakiness
+// that TestRun_SIGTERM_Headless_EmitsInterruptedAndExits6 suffers
+// from (the SIGTERM test's 2-second fixed sleep against an
+// unreachable address is not deterministic; this test's blocking
+// server IS).
+//
+// The test calls runInteractive on the test goroutine, and a
+// driver goroutine drives the input events (stdin writes, sigCh
+// sends, server release) — the test goroutine is the one that
+// reads from doneCh and asserts on the captured state.
+func TestInteractiveMode_FirstCtrlC_CancelsActiveRequestAndReturnsToPrompt(t *testing.T) {
+	releaseSrv := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		// Block until the test releases the channel — guarantees the
+		// model request is in-flight when we send the SIGINT.
+		<-releaseSrv
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"too late"}}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+	t.Setenv("SIMPLE_HARNESS_BASE_URL", srv.URL+"/v1")
+
+	sigCh := make(chan os.Signal, 1)
+	workspace := t.TempDir()
+
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stderr pipe: %v", err)
+	}
+
+	doneCh := make(chan int)
+
+	// Driver goroutine: feed stdin, send SIGINT, release server,
+	// then send /exit. Runs in parallel with runInteractive so the
+	// harness reaches its in-flight state before the signal lands.
+	go func() {
+		// Give the harness time to set up its signal goroutine and
+		// read "hello" from stdin, dispatch the model request, and
+		// reach the blocked server handler.
+		_, _ = io.WriteString(inW, "hello\n")
+		time.Sleep(200 * time.Millisecond)
+		// First (and only) SIGINT.
+		sigCh <- syscall.SIGINT
+		// Wait for cancellation to propagate and the loop to return
+		// to scanner.Scan().
+		time.Sleep(300 * time.Millisecond)
+		// Release the server (so its goroutine exits) and send /exit.
+		close(releaseSrv)
+		_, _ = io.WriteString(inW, "/exit\n")
+		_ = inW.Close()
+	}()
+
+	go func() {
+		code := runInteractive(inR, outW, errW, sigCh,
+			interactiveOpts{workspace: workspace})
+		doneCh <- code
+	}()
+
+	var code int
+	select {
+	case code = <-doneCh:
+	case <-time.After(15 * time.Second):
+		t.Fatalf("first-press Ctrl+C test timed out after 15s")
+	}
+
+	_ = outW.Close()
+	_ = errW.Close()
+	var outBuf, errBuf bytes.Buffer
+	_, _ = io.Copy(&outBuf, outR)
+	_, _ = io.Copy(&errBuf, errR)
+	capturedErr := errBuf.String()
+
+	if code != 0 {
+		t.Fatalf("first-press Ctrl+C: runInteractive returned %d, want 0 (first-press should cancel and continue); stderr=%q stdout=%q",
+			code, capturedErr, outBuf.String())
+	}
+	// The first-press diagnostic must be present.
+	if !strings.Contains(capturedErr, "cancel requested") {
+		t.Errorf("first-press Ctrl+C: stderr missing %q; got %q",
+			"cancel requested", capturedErr)
+	}
+	// The second-press diagnostic MUST NOT appear on a first-press
+	// test (would indicate the goroutine mis-routed the first
+	// SIGINT to the interruptRequested branch).
+	if strings.Contains(capturedErr, "interrupted\n") {
+		t.Errorf("first-press emitted second-press 'interrupted' message: stderr=%q", capturedErr)
+	}
+
+	// Sidecar must NOT contain an `interrupted` event (first-press
+	// only cancels; the event is reserved for the second-press
+	// terminate path).
+	sidecar := findSidecarPath(t, workspace)
+	if sidecarHasEvent(t, sidecar, "interrupted", "") {
+		data, _ := os.ReadFile(sidecar)
+		t.Fatalf("first-press Ctrl+C: sidecar contains `interrupted` event (first-press is cancel-only); sidecar=%s", data)
+	}
+}
+
+// TestInteractiveMode_SecondCtrlC_TerminatesWithExit6 pins GOAL §2's
+// second-press behavior: a second SIGINT after the first cancels
+// terminates the harness with exit 6 (the SCOPE §28 interrupted
+// code) and emits an `interrupted` event to the sidecar with the
+// active session_id. The test reuses the slow-server pattern from
+// the first-press test and sends two SIGINTs with a sufficient gap
+// for the first-press cancellation to complete before the second
+// press arrives.
+func TestInteractiveMode_SecondCtrlC_TerminatesWithExit6(t *testing.T) {
+	releaseSrv := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		<-releaseSrv
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"too late"}}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+	t.Setenv("SIMPLE_HARNESS_BASE_URL", srv.URL+"/v1")
+
+	sigCh := make(chan os.Signal, 1)
+	workspace := t.TempDir()
+
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stderr pipe: %v", err)
+	}
+
+	doneCh := make(chan int)
+
+	// Driver: feed "hello", wait, send SIGINT (first), wait for the
+	// cancellation to complete, send SIGINT (second — terminates),
+	// release server (cleanup), close stdin.
+	go func() {
+		_, _ = io.WriteString(inW, "hello\n")
+		time.Sleep(200 * time.Millisecond)
+		sigCh <- syscall.SIGINT
+		// Long enough for the model client to return ErrTimeout and
+		// the prompt loop to return to scanner.Scan(). The
+		// cancelPressed flag stays true (not reset on cancellation),
+		// so the goroutine's next read sees the second-press.
+		time.Sleep(400 * time.Millisecond)
+		sigCh <- syscall.SIGINT
+		time.Sleep(300 * time.Millisecond)
+		close(releaseSrv)
+		_ = inW.Close()
+	}()
+
+	go func() {
+		code := runInteractive(inR, outW, errW, sigCh,
+			interactiveOpts{workspace: workspace})
+		doneCh <- code
+	}()
+
+	var code int
+	select {
+	case code = <-doneCh:
+	case <-time.After(15 * time.Second):
+		t.Fatalf("second-press Ctrl+C test timed out after 15s")
+	}
+
+	_ = outW.Close()
+	_ = errW.Close()
+	var outBuf, errBuf bytes.Buffer
+	_, _ = io.Copy(&outBuf, outR)
+	_, _ = io.Copy(&errBuf, errR)
+	capturedErr := errBuf.String()
+
+	if code != 6 {
+		t.Fatalf("second-press Ctrl+C: runInteractive returned %d, want 6 (second-press terminates per SCOPE §28); stderr=%q stdout=%q",
+			code, capturedErr, outBuf.String())
+	}
+	// Both diagnostics should appear: "cancel requested" from the
+	// first press and "interrupted" from the second.
+	if !strings.Contains(capturedErr, "cancel requested") {
+		t.Errorf("second-press Ctrl+C: stderr missing %q; got %q",
+			"cancel requested", capturedErr)
+	}
+	if !strings.Contains(capturedErr, "interrupted\n") {
+		t.Errorf("second-press Ctrl+C: stderr missing %q; got %q",
+			"interrupted\n", capturedErr)
+	}
+
+	// Sidecar must contain the `interrupted` event with the active
+	// session_id (the second-press path emits it before returning 6).
+	sidecar := findSidecarPath(t, workspace)
+	sid := sidecarSessionID(t, sidecar)
+	if sid == "" {
+		data, _ := os.ReadFile(sidecar)
+		t.Fatalf("second-press Ctrl+C: sidecar has no parseable session_id; sidecar=%s", data)
+	}
+	if !sidecarHasEvent(t, sidecar, "interrupted", sid) {
+		data, _ := os.ReadFile(sidecar)
+		t.Fatalf("second-press Ctrl+C: sidecar missing `interrupted` event with session_id=%q; sidecar=%s",
+			sid, data)
+	}
+}
+
+// TestInteractiveMode_ExitCommand_StillExits0 is the regression pin
+// for `/exit`: piping "/exit\n" through stdin exits 0 cleanly
+// without emitting an `interrupted` event to the sidecar. The test
+// is distinct from the existing TestInteractiveMode_ExitCommand_Exits0
+// (which only asserts the exit code) because handoff 028's contract
+// also requires the sidecar to be free of interruption events after
+// a clean /exit — a regression that mis-routed /exit through the
+// signal-handling code path would emit "interrupted" and fail this
+// test while passing the existing one.
+func TestInteractiveMode_ExitCommand_StillExits0(t *testing.T) {
+	sigCh := make(chan os.Signal, 1)
+	workspace := t.TempDir()
+
+	code, _, _ := driveInteractiveWithSeams(t, "/exit\n", sigCh, workspace)
+	if code != 0 {
+		t.Fatalf("runInteractive(/exit) returned %d, want 0 (clean exit)", code)
+	}
+
+	// No `interrupted` event MAY appear — /exit is the clean path,
+	// not the interrupt path.
+	sidecar := findSidecarPath(t, workspace)
+	if sidecarHasEvent(t, sidecar, "interrupted", "") {
+		data, _ := os.ReadFile(sidecar)
+		t.Fatalf("`/exit` emitted `interrupted` event (should be reserved for the second-press terminate path); sidecar=%s",
+			data)
 	}
 }

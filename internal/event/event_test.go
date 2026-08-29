@@ -235,3 +235,41 @@ func TestEmit_ModelRequest_ProducesCorrectEventType(t *testing.T) {
 		t.Errorf("Timestamp empty, want non-empty RFC3339 UTC")
 	}
 }
+
+// TestEmit_Interrupted_ProducesCorrectEventType verifies the
+// SCOPE §26 `interrupted` event: one JSONL line, protocol_version
+// "1", event "interrupted", session_id populated from the call's
+// argument, no exit_code (the omitempty-tagged field stays zero).
+func TestEmit_Interrupted_ProducesCorrectEventType(t *testing.T) {
+	var buf bytes.Buffer
+	em := NewEmitter(&buf, "default-sid")
+
+	if err := em.Interrupted("sid-tg7"); err != nil {
+		t.Fatalf("Interrupted: %v", err)
+	}
+
+	line := strings.TrimRight(buf.String(), "\n")
+	if line == "" {
+		t.Fatal("buffer empty after Interrupted; want one JSONL line")
+	}
+	if strings.Count(buf.String(), "\n") != 1 {
+		t.Errorf("buffer has %d newlines, want exactly 1 (one JSONL line)", strings.Count(buf.String(), "\n"))
+	}
+
+	var ev Event
+	if err := json.Unmarshal([]byte(line), &ev); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if ev.ProtocolVersion != "1" {
+		t.Errorf("ProtocolVersion = %q, want \"1\"", ev.ProtocolVersion)
+	}
+	if ev.Event != "interrupted" {
+		t.Errorf("Event = %q, want \"interrupted\"", ev.Event)
+	}
+	if ev.SessionID != "sid-tg7" {
+		t.Errorf("SessionID = %q, want \"sid-tg7\"", ev.SessionID)
+	}
+	if ev.ExitCode != 0 {
+		t.Errorf("ExitCode = %d, want 0 (omitempty-tagged; the interrupted event has no exit_code)", ev.ExitCode)
+	}
+}

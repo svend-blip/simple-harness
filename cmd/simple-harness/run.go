@@ -41,7 +41,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 
 	"github.com/svend-blip/simple-harness/internal/config"
 	"github.com/svend-blip/simple-harness/internal/event"
@@ -99,6 +101,10 @@ Exit codes (SCOPE §28):
   3  model/API failure (unreachable endpoint, HTTP 5xx, malformed
      SSE; the JSONL stream carries a 'status: FAILED' event and a
      'completed(exit_code: 3)' event before the process exits)
+  6  interrupted (SIGINT/SIGTERM on the harness process; the
+     JSONL stream carries an interrupted event with session_id
+     before the process exits; this is distinct from model-
+     timeout exit 6 which carries completed(exit_code: 6))
 
 See docs/ARCHITECTURE.md §"Distribution shape" for the full
 contract and the V1 event protocol.
@@ -327,6 +333,7 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode string) in
 
 	var em *event.Emitter
 	var loopOut io.Writer
+	var sidecar *os.File
 	switch outputMode {
 	case "jsonl":
 		em = event.NewEmitter(os.Stdout, sessionID)
@@ -338,12 +345,12 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode string) in
 			return 1
 		}
 		sidecarPath := filepath.Join(sidecarDir, "events.jsonl")
-		sidecar, err := os.Create(sidecarPath)
+		sf, err := os.Create(sidecarPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "internal error: cannot create %s: %v\n", sidecarPath, err)
 			return 1
 		}
-		defer sidecar.Close()
+		sidecar = sf
 		em = event.NewEmitter(sidecar, sessionID)
 		loopOut = os.Stdout
 	default:
@@ -353,6 +360,25 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode string) in
 		fmt.Fprintf(os.Stderr, "config error: --output must be 'terminal' or 'jsonl', got %q\n", outputMode)
 		return 2
 	}
+
+	// SCOPE §26 cancellation plumbing: SIGINT/SIGTERM cancel the
+	// in-flight context. The model.Client already maps ctx
+	// cancellation to *model.ModelError{ErrTimeout} (internal/model
+	// client.go lines 224, 256, 326); the loop's RunOne propagates
+	// that error to the cmd. The `interrupted` flag distinguishes
+	// signal-triggered cancellation (the SCOPE §26 path; this
+	// handoff's NEW behavior — emit `interrupted` event + exit 6)
+	// from model-timeout cancellation (the SCOPE §28 path; the
+	// existing handoff-024 mapping — emit `completed(6)` + exit 6).
+	ctx, cancel := context.WithCancel(context.Background())
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	interrupted := false
+	go func() {
+		<-sigCh
+		interrupted = true
+		cancel()
+	}()
 
 	normalizedBase := loop.NormalizeBaseURL(baseURL)
 	permissionStr := modeToLoopString(activePermissionMode)
@@ -372,18 +398,49 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode string) in
 		Permission: permissionStr,
 	}, client, em, loopOut)
 
-	_, err = r.RunOne(context.Background(), prompt)
+	_, err = r.RunOne(ctx, prompt)
+
+	// If the signal fired, the SCOPE §26 sequence is: emit
+	// `interrupted` event -> flush sidecar (if terminal) -> exit 6.
+	// The success path (err == nil) and the existing handoff-024
+	// error mapping (errors.As -> SCOPE §28 exit codes) are
+	// unchanged; only the NEW `interrupted` branch is added.
+	if interrupted {
+		signal.Stop(sigCh)
+		_ = em.Interrupted(sessionID)
+		if sidecar != nil {
+			_ = sidecar.Sync()
+			_ = sidecar.Close()
+		}
+		return 6
+	}
+
+	// Stop the signal handler — the in-flight operation has
+	// completed (success or error); no further signals matter.
+	signal.Stop(sigCh)
+
 	if err == nil {
-		// Success path: RunOne already emitted Completed(0)
-		// from inside (loop.go lines 161-166). Return 0 — do
-		// NOT emit a second Completed.
+		// Success path: RunOne already emitted Completed(0) from
+		// inside (loop.go lines 161-166). Close the sidecar if
+		// terminal mode and return 0 — do NOT emit a second
+		// Completed.
+		if sidecar != nil {
+			_ = sidecar.Sync()
+			_ = sidecar.Close()
+		}
 		return 0
 	}
 
-	// Error path: RunOne emitted a Status(FAILED|INTERRUPTED)
-	// but NOT a Completed event (loop.go lines 142-159). Emit
-	// Completed(exit_code) here so the wire has the terminal
-	// event the SCOPE §21 protocol requires.
+	// Error path: RunOne emitted a Status(FAILED|INTERRUPTED) but
+	// NOT a Completed event (loop.go lines 142-159). Emit
+	// Completed(exit_code) here so the wire has the terminal event
+	// the SCOPE §21 protocol requires. Close the sidecar before
+	// returning.
+	if sidecar != nil {
+		_ = sidecar.Sync()
+		_ = sidecar.Close()
+	}
+
 	var me *model.ModelError
 	if errors.As(err, &me) {
 		switch me.Kind {

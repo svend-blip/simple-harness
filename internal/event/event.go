@@ -170,6 +170,27 @@ func (e *Emitter) ModelRequest() error {
 	})
 }
 
+// Interrupted emits the "interrupted" event per SCOPE §26's headless
+// signal sequence: SIGINT/SIGTERM cancel the in-flight operation,
+// the harness emits this event with the session_id, flushes the
+// output stream, and exits 6 (SCOPE §28 interrupted). The event
+// carries no payload beyond the base fields (protocol_version,
+// event, timestamp, session_id) — it is the terminal signal of the
+// interruption sequence, distinct from `completed(exit_code: 6)`
+// which is the SCOPE §28 model-timeout terminal event.
+//
+// If sessionID is non-empty, it overrides the emitter's default
+// session_id for this event (matching the loop's session identity
+// at the moment of interruption). If sessionID is empty, the
+// emitter's session_id is used.
+func (e *Emitter) Interrupted(sessionID string) error {
+	ev := Event{Event: "interrupted"}
+	if sessionID != "" {
+		ev.SessionID = sessionID
+	}
+	return e.Emit(ev)
+}
+
 // SessionID returns the session_id this emitter stamps onto events.
 func (e *Emitter) SessionID() string {
 	return e.sessionID
