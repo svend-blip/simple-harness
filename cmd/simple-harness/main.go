@@ -26,7 +26,11 @@
 // messages.jsonl is the SCOPE §17 "execution history" record only.
 // Inspection subcommands (`simple-harness sessions list` /
 // `sessions show`) are the Run 008 inspection work slot (handoff
-// 031). Each remaining gap is a future Run per the architecture.
+// 031). Skills (`simple-harness --skill NAME`, `--skills-dir DIR`)
+// are the Run 009 foundation work slot (handoff 032): the cold-start
+// reference skill and discovery machinery. Composition into the
+// model context (SCOPE §14) lands on handoff 033. Each remaining
+// gap is a future Run per the architecture.
 //
 // Architectural boundary: this is a Simple Harness component. It does not
 // import orchestration, harness selection, GPU/VRAM allocation,
@@ -66,7 +70,7 @@ import (
 // without shelling out or reading the binary itself. The format is a
 // single line, project-name first, so an external parser does not need to
 // interpret it to extract the version.
-const Version = "simple-harness 0.1.0-dev (Run 008, handoff 031)"
+const Version = "simple-harness 0.1.0-dev (Run 009, handoff 032)"
 
 // globalRegistry is the tool registry the `simple-harness tools`
 // subcommand lists. Handoff 013 leaves it EMPTY; Run 014 / Run 015 will

@@ -50,6 +50,7 @@ import (
 	"github.com/svend-blip/simple-harness/internal/loop"
 	"github.com/svend-blip/simple-harness/internal/model"
 	"github.com/svend-blip/simple-harness/internal/session"
+	"github.com/svend-blip/simple-harness/internal/skill"
 )
 
 // runUsage is the help text printed by `simple-harness run --help`
@@ -76,6 +77,15 @@ Flags:
   --workspace <dir>       workspace directory (defaults to cwd)
   --state-dir <dir>       state directory for session persistence
                           (defaults to ~/.simple-harness/sessions)
+  --skills-dir <dir>      skills directory override (defaults to
+                          ~/.simple-harness/skills and <workspace>/.simple-harness/skills;
+                          the test-only deterministic handle per GOAL §2)
+  --skill <name>          skill name to load; SKILL.md is read from the
+                          resolved skills dir; an unknown name is a
+                          configuration error (exit 2). Skill content
+                          is loaded but NOT YET injected into the model
+                          context (composition lands on a future handoff).
+                          SCOPE §15, SCOPE §16.
   --prompt-file <path>    path to the prompt file; use "-" to read
                           from stdin (required; the "-" value is
                           accepted but stdin handling is a future
@@ -156,6 +166,8 @@ func runRun(args []string) int {
 	model := fs.String("model", "", "model name to send in the chat request (required, non-empty)")
 	workspace := fs.String("workspace", "", "workspace directory (defaults to cwd)")
 	stateDir := fs.String("state-dir", "", "state directory for session persistence (defaults to ~/.simple-harness/sessions)")
+	skillsDir := fs.String("skills-dir", "", "skills directory override (defaults to ~/.simple-harness/skills + <workspace>/.simple-harness/skills; this is the test-only deterministic handle per GOAL §2)")
+	skillName := fs.String("skill", "", "skill name to load; SKILL.md is read from the resolved skills dir; an unknown name is a configuration error (exit 2). Composition into the model context lands on handoff 033. SCOPE §15.")
 	promptFile := fs.String("prompt-file", "", "path to the prompt file; use - for stdin (required)")
 	systemFile := fs.String("system-file", "", "optional path to a system prompt file")
 	output := fs.String("output", "terminal", `output mode: "terminal" or "jsonl" (default "terminal")`)
@@ -251,6 +263,44 @@ func runRun(args []string) int {
 	if *systemFile != "" {
 		if err := validateReadableFile(*systemFile); err != nil {
 			fmt.Fprintf(os.Stderr, "config error: cannot read system-file %q: %v\n", *systemFile, err)
+			return 2
+		}
+	}
+
+	// --skill + --skills-dir: optional. --skills-dir is the
+	// test-only override (when non-empty, REPLACES BOTH search
+	// roots); --skill is the skill name to load. An unknown
+	// --skill name is a configuration error (SCOPE §15: "V1
+	// skills should primarily inject reusable instructions/context")
+	// and exits 2 per GOAL §2 and TG1. Composition into the model
+	// context is deferred to a future handoff; this handoff only
+	// validates the skill name resolves and the file is readable.
+	// The validation runs BEFORE the --prompt-file check so a
+	// missing prompt file doesn't mask a missing skill (and so the
+	// error message is about the skill, not the prompt).
+	if *skillName != "" {
+		var resolvedSkillsDir string
+		var resolvedHome string
+		if *skillsDir != "" {
+			resolvedSkillsDir = *skillsDir
+		} else {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "config error: cannot determine home directory: %v\n", err)
+				return 2
+			}
+			resolvedHome = home
+		}
+		if _, err := skill.Load(*skillName, skill.LoadOptions{
+			SkillsDir:    resolvedSkillsDir,
+			WorkspaceDir: *workspace,
+			HomeDir:      resolvedHome,
+		}); err != nil {
+			if errors.Is(err, skill.ErrSkillNotFound) {
+				fmt.Fprintf(os.Stderr, "config error: unknown skill %q\n", *skillName)
+				return 2
+			}
+			fmt.Fprintf(os.Stderr, "config error: load skill %q: %v\n", *skillName, err)
 			return 2
 		}
 	}
