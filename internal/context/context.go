@@ -204,11 +204,18 @@ func (l *Ledger) Overflow() error {
 }
 
 // Report returns the SCOPE §19 accounting report as a multi-line
-// string. One line per entry (sorted by Category then Name), a
-// "-----------------------------------------" separator line, a
+// string. One line per Category (all seven categories, in
+// canonical alphabetical order; zero-entry categories are rendered
+// as "<category>:" with 0 tokens so the report lists every SCOPE
+// §18 category — per SCOPE §19's "the report lists at least the
+// categories" sketch). Within a category, one line per entry
+// (sorted by Name); for zero-entry categories a single zero-tokens
+// line is emitted. After the per-category lines a
+// "-----------------------------------------" separator, a
 // "Total" line, and a "Context limit" line if Limit > 0. Each
-// entry line format: "%-30s %6d tokens" where the first column is
-// "<Category>: <Name>" padded to 30 chars.
+// line format: "%-30s %6d tokens" where the first column is
+// "<Category>: <Name>" (or "<Category>:" for zero-entry) padded
+// to 30 chars.
 //
 // The exact width (30) and column alignment are binding for
 // handoff 036's `context show` output (the GOAL §6 TG1 grep is
@@ -224,10 +231,36 @@ func (l *Ledger) Report() string {
 		return entries[i].Name < entries[j].Name
 	})
 
-	var b strings.Builder
+	// Group entries by category so we can render all seven
+	// SCOPE §18 categories (zero-entry categories emit a single
+	// zero-tokens line per SCOPE §19's "lists at least the
+	// categories" requirement).
+	byCategory := make(map[Category][]Entry)
 	for _, e := range entries {
-		label := fmt.Sprintf("%s: %s", e.Category, e.Name)
-		fmt.Fprintf(&b, "%-30s %6d tokens\n", label, e.TokenEstimate)
+		byCategory[e.Category] = append(byCategory[e.Category], e)
+	}
+	allCategories := []Category{
+		Conversation,
+		ExternalSystem,
+		HarnessSystem,
+		Skill,
+		Task,
+		ToolResults,
+		ToolSchemas,
+	}
+
+	var b strings.Builder
+	for _, cat := range allCategories {
+		catEntries := byCategory[cat]
+		if len(catEntries) == 0 {
+			label := fmt.Sprintf("%s:", cat)
+			fmt.Fprintf(&b, "%-30s %6d tokens\n", label, 0)
+			continue
+		}
+		for _, e := range catEntries {
+			label := fmt.Sprintf("%s: %s", e.Category, e.Name)
+			fmt.Fprintf(&b, "%-30s %6d tokens\n", label, e.TokenEstimate)
+		}
 	}
 	b.WriteString("-----------------------------------------\n")
 	fmt.Fprintf(&b, "%-30s %6d tokens\n", "Total", l.Total())

@@ -418,6 +418,106 @@ func TestInteractive_SkillCommand_LoadsSkill(t *testing.T) {
 	}
 }
 
+// TestInteractive_ContextCommand_PrintsReport is the binding
+// pin for handoff 036 (Run 010 / ACCOUNTING REPORT): the
+// in-session `/context` REPL command must render the SCOPE §19
+// accounting report to stderr. The handler is the new case in
+// runInteractive's `switch trimmed` block that calls
+// `fmt.Fprintln(stderr, r.Ledger().Report())` (stderr, NOT
+// stdout, so streamed responses stay clean).
+//
+// Test mechanics:
+//   - spin up an httptest.NewServer capture server (the model
+//     server is NOT invoked by `/context` itself; the server is
+//     set up for cleanliness — if a future regression accidentally
+//     invokes RunOne from the /context handler, the test fails
+//     with a "no server" or "decode fail" error rather than
+//     hanging).
+//   - point SIMPLE_HARNESS_BASE_URL at the test server's URL via
+//     t.Setenv.
+//   - wire stdin / stdout / stderr via os.Pipe (the same dance as
+//     TestInteractive_SkillCommand_LoadsSkill).
+//   - feed "/context\n" to stdin and close the pipe so the scanner
+//     sees EOF after the /context line is dispatched.
+//   - drive runInteractive with interactiveOpts{skill: nil}.
+//   - assert: (i) exit code 0 (clean EOF after /context); (ii)
+//     the captured stderr contains "harness system" AND "task"
+//     AND "Total" AND "tool schemas" (the four grep tokens from
+//     GOAL §6 TG1, adapted to the REPL surface).
+//
+// The test runs against the in-process runInteractive entry
+// point (NOT via the spawned-binary path), because the binding
+// pin is the /context REPL handler inside runInteractive and
+// the test must execute that code path directly.
+func TestInteractive_ContextCommand_PrintsReport(t *testing.T) {
+	var captured capturedChatRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Errorf("decode request body: %v", err)
+			http.Error(w, "decode fail", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+	t.Setenv("SIMPLE_HARNESS_BASE_URL", srv.URL+"/v1")
+
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stderr pipe: %v", err)
+	}
+
+	origStdin := os.Stdin
+	origStdout := os.Stdout
+	origStderr := os.Stderr
+	t.Cleanup(func() {
+		os.Stdin = origStdin
+		os.Stdout = origStdout
+		os.Stderr = origStderr
+	})
+
+	os.Stdin = inR
+	os.Stdout = outW
+	os.Stderr = errW
+
+	go func() {
+		_, _ = io.WriteString(inW, "/context\n")
+		_ = inW.Close()
+	}()
+
+	code := runInteractive(inR, outW, errW, interactiveOpts{
+		workspace: t.TempDir(),
+		stateDir:  t.TempDir(),
+		skill:     nil,
+	})
+
+	_ = outW.Close()
+	_ = errW.Close()
+	var outBuf, errBuf bytes.Buffer
+	_, _ = io.Copy(&outBuf, outR)
+	_, _ = io.Copy(&errBuf, errR)
+	capturedErr := errBuf.String()
+
+	if code != 0 {
+		t.Fatalf("runInteractive returned %d, want 0 (stderr=%q stdout=%q)",
+			code, capturedErr, outBuf.String())
+	}
+	for _, want := range []string{"harness system", "task", "Total", "tool schemas"} {
+		if !strings.Contains(capturedErr, want) {
+			t.Errorf("stderr missing %q (the /context REPL command's report output); got stderr=%q", want, capturedErr)
+		}
+	}
+}
+
 // driveInteractive is the shared test helper: it sets up os.Stdin
 // from the given input string, sets up os.Stdout and os.Stderr
 // capture, calls run(args), and returns the exit code plus the
@@ -847,7 +947,7 @@ func TestRun_Version(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 010, handoff 035)"
+	want := "simple-harness 0.1.0-dev (Run 010, handoff 036)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}
@@ -1062,7 +1162,7 @@ func TestRun_Version_AdvancesToHandoff024(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 010, handoff 035)"
+	want := "simple-harness 0.1.0-dev (Run 010, handoff 036)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}
@@ -1771,7 +1871,7 @@ func TestRun_Version_AdvancesToHandoff030(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 010, handoff 035)"
+	want := "simple-harness 0.1.0-dev (Run 010, handoff 036)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}

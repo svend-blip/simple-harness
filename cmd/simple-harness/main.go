@@ -31,8 +31,17 @@
 // reference skill and discovery machinery. Composition into the
 // model context (SCOPE §14) lands on handoff 033 (composition +
 // interactive `/skill` command + new `--system <text>` flag +
-// reviewer duties 2+3 + TG4). Each remaining gap is a future Run
-// per the architecture.
+// reviewer duties 2+3 + TG4).
+//
+// Run 010 (handoff 036) introduces the cmd-side accounting
+// surface: `simple-harness context show` headless command
+// (renders the SCOPE §19 accounting report without invoking
+// the model client) and the `/context` interactive REPL
+// command (renders the cumulative ledger snapshot to stderr).
+// The /context-doctor command + the `context doctor`
+// subcommand + the `--limit <n>` flag wiring + the overflow
+// enforcement land in handoff 037. Each remaining gap is a
+// future Run per the architecture.
 //
 // Architectural boundary: this is a Simple Harness component. It does not
 // import orchestration, harness selection, GPU/VRAM allocation,
@@ -73,7 +82,7 @@ import (
 // without shelling out or reading the binary itself. The format is a
 // single line, project-name first, so an external parser does not need to
 // interpret it to extract the version.
-const Version = "simple-harness 0.1.0-dev (Run 010, handoff 035)"
+const Version = "simple-harness 0.1.0-dev (Run 010, handoff 036)"
 
 // globalRegistry is the tool registry the `simple-harness tools`
 // subcommand lists. Handoff 013 leaves it EMPTY; Run 014 / Run 015 will
@@ -127,11 +136,12 @@ Subcommands:
   config show           print the resolved configuration (secrets redacted)
   sessions list         enumerate session ids under --state-dir (one per line)
   sessions show <id>    print session.json for <id> (pretty-printed)
+  context show          print the SCOPE §19 accounting report (no model call)
   run                   execute one turn non-interactively, emit JSONL events
 
 Interactive mode (the default when no flags or subcommands are given)
 reads prompts from stdin and streams responses to stdout. Built-in
-commands at the prompt: /help, /version, /exit, /quit, /skill <name>.
+commands at the prompt: /help, /version, /exit, /quit, /skill <name>, /context.
 EOF on stdin exits cleanly. Ctrl+C cancels the active request and
 returns to the prompt with the session preserved; a second Ctrl+C
 terminates with exit code 6 (documented behavior per SCOPE §28).
@@ -207,6 +217,9 @@ func run(args []string) int {
 	}
 	if len(args) > 0 && args[0] == "sessions" {
 		return runSessions(args[1:])
+	}
+	if len(args) > 0 && args[0] == "context" {
+		return runContext(args[1:])
 	}
 	if len(args) > 0 && args[0] == "run" {
 		return runRun(args[1:])
@@ -788,6 +801,22 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, seams ...any) int
 				// above — the defect verdict 033 named.
 				r.SetSkills([]skill.Skill{*loaded})
 				fmt.Fprintf(stderr, "skill loaded: %s (source: %s)\n", loaded.Name, loaded.Source)
+				continue
+			case strings.HasPrefix(trimmed, "/context"):
+				// Run 010 / handoff 036: in-session /context command.
+				// Renders the SCOPE §19 accounting report from the current
+				// Ledger snapshot. Each prior RunOne call has populated
+				// HarnessSystem + ExternalSystem + Skill(s) + Task entries
+				// (handoff 035's wiring), so /context prints the cumulative
+				// report to stderr (so stdout stays clean for streamed
+				// responses). The /context command takes no arguments; any
+				// trailing tokens are ignored (the surface's contract is
+				// "print the current ledger's Report()"; flag configuration
+				// happens via the startup --limit flag, which lands in
+				// handoff 037 with the overflow enforcement). The session
+				// continues — /context is informational, not a session-
+				// changing command.
+				fmt.Fprintln(stderr, r.Ledger().Report())
 				continue
 			}
 		}

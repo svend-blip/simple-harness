@@ -160,6 +160,51 @@ func (r *Run) Ledger() *contextpkg.Ledger {
 	return r.ledger
 }
 
+// PopulateLedger records the four SCOPE §18 content categories
+// that are about to be (or have been) sent to the model, on the
+// Run's per-Run context accounting ledger. The categories are
+// populated in the canonical SCOPE §14 order: HarnessSystem
+// (loop.Config.System, if non-empty) + ExternalSystem
+// (loop.Config.SystemExternal, if non-empty) + each Skill
+// (loop.Config.Skills[i] with non-empty Content) + Task
+// (prompt). Empty categories are skipped (matches
+// ComposeMessages semantics — a zero-byte skill body
+// contributes neither a message nor a ledger entry).
+//
+// PopulateLedger is the cmd-side accounting seam: the
+// `simple-harness context show` command (Run 010 / handoff 036)
+// constructs a *Run via loop.New, calls PopulateLedger to
+// populate the ledger WITHOUT invoking the model client, then
+// prints r.Ledger().Report() to stdout. The surface's contract
+// is "inspect a composition without executing it" (GOAL §2
+// bound decision 1).
+//
+// RunOne calls PopulateLedger exactly once per call, between
+// the Started/ModelRequest events and the ChatStream
+// invocation, so the ledger snapshot matches the messages
+// that went to the wire. Calling PopulateLedger multiple
+// times accumulates entries; the existing TestRun_Ledger_*
+// tests verify the single-call semantics.
+//
+// NOT safe for concurrent use with an in-flight RunOne call.
+// The interactive REPL is single-goroutine; no locking
+// required.
+func (r *Run) PopulateLedger(prompt string) {
+	if r.cfg.System != "" {
+		r.ledger.Add(contextpkg.HarnessSystem, "harness", r.cfg.System)
+	}
+	if r.cfg.SystemExternal != "" {
+		r.ledger.Add(contextpkg.ExternalSystem, "external", r.cfg.SystemExternal)
+	}
+	for _, s := range r.cfg.Skills {
+		if s.Content == "" {
+			continue
+		}
+		r.ledger.Add(contextpkg.Skill, s.Name, s.Content)
+	}
+	r.ledger.Add(contextpkg.Task, "task", prompt)
+}
+
 // RunOne executes one turn: emits started, calls
 // model.Client.ChatStream with the prompt as a one-message
 // [user, prompt] list, emits status: STREAMING on first non-empty
@@ -218,19 +263,9 @@ func (r *Run) RunOne(ctx context.Context, prompt string) (string, error) {
 	// that is about to be sent to the model. V1 tracks
 	// HarnessSystem + ExternalSystem + Skill(s) + Task. Empty
 	// categories are skipped (matches ComposeMessages semantics).
-	if r.cfg.System != "" {
-		r.ledger.Add(contextpkg.HarnessSystem, "harness", r.cfg.System)
-	}
-	if r.cfg.SystemExternal != "" {
-		r.ledger.Add(contextpkg.ExternalSystem, "external", r.cfg.SystemExternal)
-	}
-	for _, s := range r.cfg.Skills {
-		if s.Content == "" {
-			continue
-		}
-		r.ledger.Add(contextpkg.Skill, s.Name, s.Content)
-	}
-	r.ledger.Add(contextpkg.Task, "task", prompt)
+	// The PopulateLedger helper is the cmd-side accounting seam
+	// (handoff 036); RunOne calls it once per RunOne invocation.
+	r.PopulateLedger(prompt)
 
 	err := r.client.ChatStream(ctx, model.ChatRequest{
 		Messages: ComposeMessages(r.cfg, prompt),

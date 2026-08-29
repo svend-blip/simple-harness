@@ -868,3 +868,197 @@ func TestRun_Ledger_ConcurrentReads_NotGuardedByLock(t *testing.T) {
 		t.Errorf("ledger read returned Total=0, want > 0")
 	}
 }
+
+// --- handoff 036: TestRun_PopulateLedger_* tests ---
+
+// TestRun_PopulateLedger_EmptyConfig_PopulatesHarnessSystemAndTask
+// is the binding pin for the cmd-side `context show` path:
+// calling r.PopulateLedger(prompt) DIRECTLY (without invoking
+// RunOne) on a Run constructed with only HarnessSystem set must
+// produce EXACTLY two entries — HarnessSystem + Task — in the
+// canonical SCOPE §14 order. This is the contract the new
+// `simple-harness context show` cmd-side surface relies on.
+func TestRun_PopulateLedger_EmptyConfig_PopulatesHarnessSystemAndTask(t *testing.T) {
+	var sidecar bytes.Buffer
+	em := event.NewEmitter(&sidecar, "sess-populate-empty")
+	var stdout bytes.Buffer
+	// Use an unreachable base URL; the model client is NEVER
+	// invoked by PopulateLedger so the unreachable URL is just a
+	// type-seam value.
+	client := model.NewClient(model.Options{
+		BaseURL:        "http://127.0.0.1:9",
+		Model:          "qwen",
+		RequestTimeout: 1 * time.Second,
+	})
+	r := New(Config{
+		Model:      model.Options{BaseURL: "http://127.0.0.1:9", Model: "qwen"},
+		Workspace:  "/tmp/ws",
+		Permission: "READ_ONLY",
+		System:     HarnessSystem,
+	}, client, em, &stdout)
+
+	r.PopulateLedger("hi")
+
+	led := r.Ledger()
+	if led == nil {
+		t.Fatal("Ledger() returned nil")
+	}
+	if len(led.Entries) != 2 {
+		t.Fatalf("len(Entries) = %d, want 2 (got=%+v)", len(led.Entries), led.Entries)
+	}
+	if led.Entries[0].Category != contextpkg.HarnessSystem {
+		t.Errorf("Entries[0].Category = %q, want %q", led.Entries[0].Category, contextpkg.HarnessSystem)
+	}
+	if led.Entries[0].Name != "harness" {
+		t.Errorf("Entries[0].Name = %q, want %q", led.Entries[0].Name, "harness")
+	}
+	if led.Entries[1].Category != contextpkg.Task {
+		t.Errorf("Entries[1].Category = %q, want %q", led.Entries[1].Category, contextpkg.Task)
+	}
+	if led.Entries[1].Name != "task" {
+		t.Errorf("Entries[1].Name = %q, want %q", led.Entries[1].Name, "task")
+	}
+}
+
+// TestRun_PopulateLedger_AllSlotsPopulated is the binding pin
+// that the helper preserves the canonical SCOPE §14 ordering
+// across all four populated slots when called DIRECTLY (without
+// invoking RunOne). The ledger must contain FOUR entries in
+// canonical order: HarnessSystem + ExternalSystem + Skill + Task.
+func TestRun_PopulateLedger_AllSlotsPopulated(t *testing.T) {
+	var sidecar bytes.Buffer
+	em := event.NewEmitter(&sidecar, "sess-populate-all")
+	var stdout bytes.Buffer
+	client := model.NewClient(model.Options{
+		BaseURL:        "http://127.0.0.1:9",
+		Model:          "qwen",
+		RequestTimeout: 1 * time.Second,
+	})
+	r := New(Config{
+		Model:          model.Options{BaseURL: "http://127.0.0.1:9", Model: "qwen"},
+		Workspace:      "/tmp/ws",
+		Permission:     "READ_ONLY",
+		System:         HarnessSystem,
+		SystemExternal: "governance-text",
+		Skills:         []skill.Skill{{Name: "cold-start", Content: "skill-body"}},
+	}, client, em, &stdout)
+
+	r.PopulateLedger("hi")
+
+	led := r.Ledger()
+	if len(led.Entries) != 4 {
+		t.Fatalf("len(Entries) = %d, want 4 (got=%+v)", len(led.Entries), led.Entries)
+	}
+	want := []struct {
+		cat contextpkg.Category
+		nm  string
+	}{
+		{contextpkg.HarnessSystem, "harness"},
+		{contextpkg.ExternalSystem, "external"},
+		{contextpkg.Skill, "cold-start"},
+		{contextpkg.Task, "task"},
+	}
+	for i, w := range want {
+		if led.Entries[i].Category != w.cat {
+			t.Errorf("Entries[%d].Category = %q, want %q", i, led.Entries[i].Category, w.cat)
+		}
+		if led.Entries[i].Name != w.nm {
+			t.Errorf("Entries[%d].Name = %q, want %q", i, led.Entries[i].Name, w.nm)
+		}
+	}
+}
+
+// TestRun_PopulateLedger_DoesNotCallModel is the binding pin
+// that the cmd-side `runContextShow`'s r.PopulateLedger(prompt)
+// call does NOT invoke the model client. The test constructs a
+// Run with an unreachable base URL + a bytes.Buffer as the
+// sidecar writer, calls r.PopulateLedger("hi"), and asserts:
+// (i) no panic; (ii) the ledger has the expected entries; (iii)
+// the sidecar buffer is EMPTY (no events emitted, since
+// PopulateLedger does NOT call r.em.Started / r.em.ModelRequest
+// — those are RunOne's responsibility); (iv) r.out (the stdout
+// buffer) is EMPTY (no streamed text).
+func TestRun_PopulateLedger_DoesNotCallModel(t *testing.T) {
+	var sidecar bytes.Buffer
+	em := event.NewEmitter(&sidecar, "sess-populate-nomodel")
+	var stdout bytes.Buffer
+	client := model.NewClient(model.Options{
+		BaseURL:        "http://127.0.0.1:9",
+		Model:          "qwen",
+		RequestTimeout: 1 * time.Second,
+	})
+	r := New(Config{
+		Model:      model.Options{BaseURL: "http://127.0.0.1:9", Model: "qwen"},
+		Workspace:  "/tmp/ws",
+		Permission: "READ_ONLY",
+		System:     HarnessSystem,
+	}, client, em, &stdout)
+
+	// If PopulateLedger accidentally invoked the model client,
+	// the unreachable base URL would surface a network error
+	// (the connection would fail). The test asserts no such
+	// error surfaced: PopulateLedger is a pure ledger-populate
+	// function that does NOT call the model client.
+	r.PopulateLedger("hi")
+
+	led := r.Ledger()
+	if len(led.Entries) == 0 {
+		t.Fatal("ledger has 0 entries, want > 0")
+	}
+	if sidecar.Len() != 0 {
+		t.Errorf("sidecar buffer has %d bytes, want 0 (PopulateLedger must NOT emit events); got=%q",
+			sidecar.Len(), sidecar.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout buffer has %d bytes, want 0 (PopulateLedger must NOT write to r.out); got=%q",
+			stdout.Len(), stdout.String())
+	}
+}
+
+// TestRun_PopulateLedger_RunOneCallsHelper is the regression
+// tripwire that RunOne continues to populate via the
+// PopulateLedger helper after the handoff 036 refactor. The
+// existing TestRun_Ledger_* tests already cover this
+// end-to-end; the new test makes the refactor explicit and
+// produces a test that fails by name if a future change drops
+// the r.PopulateLedger(prompt) call from RunOne's body. The
+// test drives RunOne once with a Config{System: HarnessSystem,
+// ...} and a known prompt, then verifies r.Ledger().Entries is
+// populated identically to the standalone
+// TestRun_PopulateLedger_EmptyConfig_PopulatesHarnessSystemAndTask
+// case (same two entries, same names, same categories).
+func TestRun_PopulateLedger_RunOneCallsHelper(t *testing.T) {
+	srv := newCaptureServer(t)
+	defer srv.Close()
+
+	var sidecar bytes.Buffer
+	em := event.NewEmitter(&sidecar, "sess-populate-via-runone")
+	var stdout bytes.Buffer
+	client := model.NewClient(model.Options{
+		BaseURL:        srv.URL,
+		Model:          "qwen",
+		RequestTimeout: 2 * time.Second,
+	})
+	r := New(Config{
+		Model:      model.Options{BaseURL: srv.URL, Model: "qwen"},
+		Workspace:  "/tmp/ws",
+		Permission: "READ_ONLY",
+		System:     HarnessSystem,
+	}, client, em, &stdout)
+
+	if _, err := r.RunOne(context.Background(), "hi"); err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+
+	led := r.Ledger()
+	if len(led.Entries) != 2 {
+		t.Fatalf("len(Entries) = %d, want 2 (RunOne must call r.PopulateLedger); got=%+v",
+			len(led.Entries), led.Entries)
+	}
+	if led.Entries[0].Category != contextpkg.HarnessSystem || led.Entries[0].Name != "harness" {
+		t.Errorf("Entries[0] = {%q, %q}, want {HarnessSystem, harness}", led.Entries[0].Category, led.Entries[0].Name)
+	}
+	if led.Entries[1].Category != contextpkg.Task || led.Entries[1].Name != "task" {
+		t.Errorf("Entries[1] = {%q, %q}, want {Task, task}", led.Entries[1].Category, led.Entries[1].Name)
+	}
+}
