@@ -32,8 +32,11 @@ func TestDefaultsOnly(t *testing.T) {
 		t.Fatalf("loadFrom: %v", err)
 	}
 	want := Default()
-	if cfg != want {
-		t.Fatalf("defaults-only config = %+v, want %+v", cfg, want)
+	if cfg.Model != want.Model {
+		t.Fatalf("defaults-only Model = %+v, want %+v", cfg.Model, want.Model)
+	}
+	if len(cfg.MCPServers) != 0 {
+		t.Fatalf("defaults-only MCPServers = %+v, want empty", cfg.MCPServers)
 	}
 }
 
@@ -150,8 +153,12 @@ func TestMissingConfigFilesAreNotErrors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadFrom: %v (missing files should not be errors)", err)
 	}
-	if cfg != Default() {
-		t.Fatalf("missing-file config = %+v, want defaults", cfg)
+	want := Default()
+	if cfg.Model != want.Model {
+		t.Fatalf("missing-file config Model = %+v, want defaults %+v", cfg.Model, want.Model)
+	}
+	if len(cfg.MCPServers) != 0 {
+		t.Fatalf("missing-file config MCPServers = %+v, want empty", cfg.MCPServers)
 	}
 }
 
@@ -303,5 +310,134 @@ func TestEnvAppliesProvider(t *testing.T) {
 	}
 	if cfg.Model.Provider != "custom_provider" {
 		t.Errorf("Provider = %q, want custom_provider", cfg.Model.Provider)
+	}
+}
+
+// TestMCP_ConfigShow_IncludesMcpServers is handoff 058's pin for
+// SCOPE §43's `config show` rendering: when MCPServers is populated
+// with both http and stdio entries, the rendered JSON output includes
+// the `mcp_servers` field, the entry names, transports, endpoints /
+// commands, and permissions. The pin is the config-layer contribution
+// to TG1; the end-to-end `bin/simple-harness config show` verification
+// lands at WORK 4 (handoff 059) when the cmd-side wiring + the
+// runtime binary rebuild co-ship.
+//
+// Construct a Config directly (not via Load()) so the test is
+// white-box against Render() and does not depend on the file
+// precedence chain.
+func TestMCP_ConfigShow_IncludesMcpServers(t *testing.T) {
+	cfg := Default()
+	cfg.MCPServers = []MCPServerConfig{
+		{
+			Name:       "weather",
+			Transport:  "http",
+			Endpoint:   "http://127.0.0.1:7777/mcp",
+			Permission: "read_only",
+			Allowlist:  []string{"tool_alpha", "tool_beta"},
+		},
+		{
+			Name:       "local-stdio",
+			Transport:  "stdio",
+			Command:    []string{"/usr/local/bin/local-mcp", "--quiet"},
+			Permission: "workspace_write",
+		},
+	}
+	var buf bytes.Buffer
+	if err := cfg.Render(&buf); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	out := buf.String()
+
+	for _, want := range []string{
+		`"mcp_servers"`,
+		`"weather"`,
+		`"local-stdio"`,
+		`"transport"`,
+		`"http"`,
+		`"stdio"`,
+		`"endpoint"`,
+		`"http://127.0.0.1:7777/mcp"`,
+		`"command"`,
+		`"/usr/local/bin/local-mcp"`,
+		`"--quiet"`,
+		`"permission"`,
+		`"read_only"`,
+		`"workspace_write"`,
+		`"allowlist"`,
+		`"tool_alpha"`,
+		`"tool_beta"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Render output missing %q (output=%s)", want, out)
+		}
+	}
+}
+
+// TestMCP_SecretRedaction pins SCOPE §30's redaction contract on
+// `mcp_servers.api_key` and `mcp_servers.headers`: api_key's
+// non-empty value is replaced with "<redacted>"; each headers VALUE
+// is replaced with "<redacted>" while the keys stay visible so the
+// operator can see WHICH headers are configured. Marker strings are
+// unique to this test so an accidental leak would be caught on the
+// next CI run.
+//
+// The pin parallels the existing `TestRenderRedactsAPIKey` for the
+// model.api_key field. The model.* + mcp_servers pair gives
+// `config show` a consistent redaction shape across both surfaces.
+func TestMCP_SecretRedaction(t *testing.T) {
+	cfg := Default()
+	cfg.MCPServers = []MCPServerConfig{
+		{
+			Name:      "weather",
+			Transport: "http",
+			Endpoint:  "http://127.0.0.1:7777/mcp",
+			APIKey:    "sk-secret-marker-XYZ",
+			Headers: map[string]string{
+				"Authorization": "Bearer sk-secret-marker-ABC",
+				"X-Custom-ID":   "marker-header-public",
+			},
+		},
+	}
+	var buf bytes.Buffer
+	if err := cfg.Render(&buf); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	out := buf.String()
+
+	for _, leak := range []string{
+		"sk-secret-marker-XYZ",
+		"sk-secret-marker-ABC",
+	} {
+		if strings.Contains(out, leak) {
+			t.Fatalf("Render output leaked secret marker %q (output=%s)", leak, out)
+		}
+	}
+
+	// api_key field carries the <redacted> marker.
+	if !strings.Contains(out, `"api_key": "<redacted>"`) {
+		t.Errorf("Render output missing redacted api_key form (output=%s)", out)
+	}
+
+	// Authorization HEADER VALUE is <redacted>; the KEY is visible.
+	// The X-Custom-ID header has a non-secret value but is also
+	// redacted per SCOPE §30 — header VALUES are redacted
+	// unconditionally (the operator-visible distinction is "which
+	// keys", not "which secrets").
+	if !strings.Contains(out, `"Authorization": "<redacted>"`) {
+		t.Errorf("Render output missing redacted Authorization header (output=%s)", out)
+	}
+	if !strings.Contains(out, `"X-Custom-ID": "<redacted>"`) {
+		t.Errorf("Render output missing redacted X-Custom-ID header (output=%s)", out)
+	}
+	if !strings.Contains(out, `"Authorization"`) || !strings.Contains(out, `"X-Custom-ID"`) {
+		t.Errorf("Render output stripped header keys (keys must stay visible per SCOPE §30; output=%s)", out)
+	}
+
+	// The marker-marker-public value is ALSO redacted (per the
+	// "headers values redacted unconditionally" rule) but the
+	// substring "marker-header-public" does NOT appear in the
+	// output (the value is replaced wholesale).
+	if strings.Contains(out, "marker-header-public") {
+		t.Fatalf("Render output leaked header VALUE marker \"marker-header-public\" (output=%s)", out)
 	}
 }

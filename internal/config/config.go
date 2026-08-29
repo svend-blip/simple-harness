@@ -24,10 +24,49 @@ import (
 
 // Config is the resolved configuration after the precedence chain has
 // been applied. The fields below are the V1 minimum enumerated in
-// GOAL §3 (config core) and SCOPE §29 (configuration). New fields
-// land with their owning component in a later Run.
+// GOAL §3 (config core) and SCOPE §29 (configuration) plus the
+// Run 019 WORK 3 amendment (SCOPE §43 + Out-§11 replacement).
+//
+// MCPServers is the resolved list of MCP server declarations
+// configuration-pinned under the `mcp_servers` key. The slice is
+// empty when no servers are declared; the harness treats "no servers"
+// as "no MCP tools available". The cmd-side wiring in WORK 4
+// converts each MCPServerConfig to an mcp.Server at session start;
+// the config layer does NOT import internal/mcp/ (the two are
+// decoupled per SCOPE §29's "small predictable configuration
+// hierarchy" + the no-new-abstractions principle).
 type Config struct {
-	Model ModelConfig `json:"model"`
+	Model      ModelConfig       `json:"model"`
+	MCPServers []MCPServerConfig `json:"mcp_servers,omitempty"`
+}
+
+// MCPServerConfig is the resolved shape of one entry under the
+// `mcp_servers` key. The JSON tags mirror SCOPE §43's configuration
+// contract:
+//
+//   - server name (stable identifier)
+//   - transport: stdio | http
+//   - endpoint or command
+//   - permission mode the server's tools map into
+//   - optional tool allowlist (subset of what the server offers)
+//
+// Optional fields follow SCOPE §30's "credentials may be supplied
+// using suitable mechanisms such as environment variables /
+// configuration / CLI" — api_key (per-server authentication header
+// value) and headers (per-server custom HTTP headers). Both are
+// REDACTED in Render() output per SCOPE §30 binding ("Sensitive
+// headers must be redacted"; "Secrets must not appear in normal
+// startup output / JSONL events / session logs / context
+// diagnostics / HTTP diagnostic dumps").
+type MCPServerConfig struct {
+	Name       string            `json:"name"`
+	Transport  string            `json:"transport"`
+	Endpoint   string            `json:"endpoint,omitempty"`
+	Command    []string          `json:"command,omitempty"`
+	Permission string            `json:"permission,omitempty"`
+	Allowlist  []string          `json:"allowlist,omitempty"`
+	APIKey     string            `json:"api_key,omitempty"`
+	Headers    map[string]string `json:"headers,omitempty"`
 }
 
 // ModelConfig is the OpenAI-compatible endpoint configuration.
@@ -121,6 +160,15 @@ func loadFrom(homeDir, projectRoot string, env []string) (Config, error) {
 		return cfg, err
 	}
 
+	// Post-load validation of the mcp_servers slice. A misconfigured
+	// server entry returns a structured error the caller maps to
+	// exit 2 (WORK 4's cmd-side wiring). Validation runs AFTER the
+	// precedence chain has merged every source so the operator
+	// sees the final shape that will be passed to session start.
+	if err := validateMCPServers(cfg.MCPServers); err != nil {
+		return Config{}, err
+	}
+
 	return cfg, nil
 }
 
@@ -153,12 +201,16 @@ func applyFile(cfg *Config, path string) error {
 	if err != nil {
 		return fmt.Errorf("parse %s: %w", path, err)
 	}
+	mcpServersPresent, err := presenceForTopKey(data, "mcp_servers")
+	if err != nil {
+		return fmt.Errorf("parse %s: %w", path, err)
+	}
 
 	var overlay configOverlay
 	if err := json.Unmarshal(data, &overlay); err != nil {
 		return fmt.Errorf("parse %s: %w", path, err)
 	}
-	if err := applyOverlay(cfg, overlay, modelPresent); err != nil {
+	if err := applyOverlay(cfg, overlay, modelPresent, mcpServersPresent); err != nil {
 		return fmt.Errorf("apply %s: %w", path, err)
 	}
 	return nil
@@ -190,6 +242,24 @@ func presenceSetFor(data []byte, key string) (map[string]struct{}, error) {
 		out[k] = struct{}{}
 	}
 	return out, nil
+}
+
+// presenceForTopKey reports whether the top-level key is present in
+// the JSON object in data. Present-but-null keys count as present.
+// Returns (false, nil) for an absent key. The function is the
+// coarse-grained analog of presenceSetFor for the `mcp_servers`
+// array key — the array overlay does not need per-field
+// null-vs-absent tracking (every entry is fully replaced when the
+// key is present, matching SCOPE §43's "declarative pinned"
+// shape), only the key-vs-absent distinction the `*[]mcpServerOverlay`
+// pointer cannot make on its own.
+func presenceForTopKey(data []byte, key string) (bool, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return false, err
+	}
+	_, ok := raw[key]
+	return ok, nil
 }
 
 // findProjectConfig walks upward from projectRoot looking for
@@ -275,6 +345,95 @@ func setEnvField(cfg *Config, field, val string) error {
 	return nil
 }
 
+// validateMCPServers enforces the SCOPE §43 + §30 contract on each
+// resolved MCPServerConfig entry. The rules:
+//
+//   - Name non-empty (the stable identifier; no MCP tool is
+//     registerable without it).
+//   - Transport is exactly "http" or "stdio" (case-sensitive; the
+//     SCOPE §43 enumeration shape).
+//   - For transport="http": Endpoint non-empty AND Command is empty
+//     (a streamable-http server has an endpoint, no child-process
+//     command).
+//   - For transport="stdio": Command is non-empty (len ≥ 1) AND
+//     Endpoint is empty (a stdio server's command is the canonical
+//     address).
+//   - Permission is one of "read_only" | "workspace_write" |
+//     "full_access", or empty (the cmd-side maps empty to the
+//     harness's active permission mode at session start).
+//   - Allowlist, if non-empty, contains no empty strings.
+//
+// A failed validation returns an error of the form
+//
+//	mcp_servers[%d] %q: <rule>: %s
+//
+// where %d is the entry's position, %q is the entry's Name (if set),
+// and <rule> names which contract clause failed. The caller
+// (loadFrom) wraps the error with the source-file path so the operator
+// can see exactly which entry + which source is misconfigured.
+//
+// The function does NOT touch internal/perm/ — the Permission string
+// is validated against the same three mode literals the harness uses
+// at runtime; the mapping to perm.NewPolicy(mode) is WORK 4's
+// cmd-side wiring.
+func validateMCPServers(servers []MCPServerConfig) error {
+	for idx, srv := range servers {
+		if srv.Name == "" {
+			return fmt.Errorf("mcp_servers[%d]: %w", idx, errMCPServersNameRequired)
+		}
+		switch srv.Transport {
+		case "http":
+			if srv.Endpoint == "" {
+				return fmt.Errorf("mcp_servers[%d] %q: %w", idx, srv.Name, errMCPServersEndpointRequired)
+			}
+			if len(srv.Command) > 0 {
+				return fmt.Errorf("mcp_servers[%d] %q: %w", idx, srv.Name, errMCPServersHTTPNoCommand)
+			}
+		case "stdio":
+			if len(srv.Command) == 0 {
+				return fmt.Errorf("mcp_servers[%d] %q: %w", idx, srv.Name, errMCPServersCommandRequired)
+			}
+			if srv.Endpoint != "" {
+				return fmt.Errorf("mcp_servers[%d] %q: %w", idx, srv.Name, errMCPServersStdioNoEndpoint)
+			}
+		case "":
+			return fmt.Errorf("mcp_servers[%d] %q: %w", idx, srv.Name, errMCPServersTransportRequired)
+		default:
+			return fmt.Errorf("mcp_servers[%d] %q: %w (got %q)", idx, srv.Name, errMCPServersTransportInvalid, srv.Transport)
+		}
+		if srv.Permission != "" {
+			switch srv.Permission {
+			case "read_only", "workspace_write", "full_access":
+				// ok
+			default:
+				return fmt.Errorf("mcp_servers[%d] %q: %w (got %q)", idx, srv.Name, errMCPServersPermissionInvalid, srv.Permission)
+			}
+		}
+		for j, a := range srv.Allowlist {
+			if a == "" {
+				return fmt.Errorf("mcp_servers[%d] %q: %w (allowlist[%d] is empty)", idx, srv.Name, errMCPServersAllowlistEmpty, j)
+			}
+		}
+	}
+	return nil
+}
+
+// errMCPServers* are the sentinel errors validateMCPServers wraps.
+// They carry a stable message ("") and are wrapped via %w so callers
+// (and `errors.Is` checks at WORK 4) can identify the failure mode
+// without string-matching the message.
+var (
+	errMCPServersNameRequired       = fmt.Errorf("name is required")
+	errMCPServersTransportRequired  = fmt.Errorf("transport is required (must be \"http\" or \"stdio\")")
+	errMCPServersTransportInvalid   = fmt.Errorf("transport must be \"http\" or \"stdio\"")
+	errMCPServersEndpointRequired   = fmt.Errorf("endpoint is required for transport \"http\"")
+	errMCPServersHTTPNoCommand      = fmt.Errorf("command must be empty for transport \"http\"")
+	errMCPServersCommandRequired    = fmt.Errorf("command is required for transport \"stdio\" (non-empty)")
+	errMCPServersStdioNoEndpoint    = fmt.Errorf("endpoint must be empty for transport \"stdio\"")
+	errMCPServersPermissionInvalid  = fmt.Errorf("permission must be \"read_only\", \"workspace_write\", or \"full_access\" (empty inherits harness default)")
+	errMCPServersAllowlistEmpty     = fmt.Errorf("allowlist entries must be non-empty strings")
+)
+
 // Render writes the resolved configuration to w in a deterministic,
 // machine-parseable format (JSON), with secret fields redacted per
 // SCOPE §30. The api_key field is replaced with "<redacted>" when
@@ -286,20 +445,52 @@ func setEnvField(cfg *Config, field, val string) error {
 // while producing a redacted view for output. renderView is the
 // marshalling shape: it mirrors Config but renders request_timeout as
 // a human-readable string ("30s") instead of nanoseconds.
+//
+// mcp_servers rendering follows SCOPE §30's redaction contract:
+// api_key is replaced with "<redacted>" when non-empty, and each
+// headers VALUE is replaced with "<redacted>" while keys stay visible
+// (so the operator can see WHICH headers are configured). A nil
+// MCPServers slice renders as the empty array "[]" so the operator
+// can distinguish "zero servers declared" from "field absent" —
+// both forms parse cleanly.
 func (c Config) Render(w io.Writer) error {
 	shadow := c
 	if shadow.Model.APIKey != "" {
 		shadow.Model.APIKey = "<redacted>"
 	}
-	v := renderView{Model: renderModelView{
-		Provider:        shadow.Model.Provider,
-		BaseURL:         shadow.Model.BaseURL,
-		Model:           shadow.Model.Model,
-		APIKey:          shadow.Model.APIKey,
-		Temperature:     shadow.Model.Temperature,
-		MaxOutputTokens: shadow.Model.MaxOutputTokens,
-		RequestTimeout:  shadow.Model.RequestTimeout.String(),
-	}}
+	mcpView := make([]renderMCPView, 0, len(shadow.MCPServers))
+	for _, srv := range shadow.MCPServers {
+		v := renderMCPView{
+			Name:       srv.Name,
+			Transport:  srv.Transport,
+			Endpoint:   srv.Endpoint,
+			Command:    srv.Command,
+			Permission: srv.Permission,
+			Allowlist:  srv.Allowlist,
+		}
+		if srv.APIKey != "" {
+			v.APIKey = "<redacted>"
+		}
+		if len(srv.Headers) > 0 {
+			v.Headers = make(map[string]string, len(srv.Headers))
+			for k := range srv.Headers {
+				v.Headers[k] = "<redacted>"
+			}
+		}
+		mcpView = append(mcpView, v)
+	}
+	v := renderView{
+		Model: renderModelView{
+			Provider:        shadow.Model.Provider,
+			BaseURL:         shadow.Model.BaseURL,
+			Model:           shadow.Model.Model,
+			APIKey:          shadow.Model.APIKey,
+			Temperature:     shadow.Model.Temperature,
+			MaxOutputTokens: shadow.Model.MaxOutputTokens,
+			RequestTimeout:  shadow.Model.RequestTimeout.String(),
+		},
+		MCPServers: mcpView,
+	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	enc.SetEscapeHTML(false)
@@ -310,7 +501,8 @@ func (c Config) Render(w io.Writer) error {
 // mirrors Config but uses string for request_timeout so the output is
 // human-readable.
 type renderView struct {
-	Model renderModelView `json:"model"`
+	Model      renderModelView `json:"model"`
+	MCPServers []renderMCPView `json:"mcp_servers"`
 }
 
 // renderModelView mirrors ModelConfig for marshalling only.
@@ -324,6 +516,23 @@ type renderModelView struct {
 	RequestTimeout  string  `json:"request_timeout"`
 }
 
+// renderMCPView mirrors MCPServerConfig for marshalling only, with
+// the SCOPE §30 redaction baked into the field shape: APIKey carries
+// "<redacted>" in place of the real value when non-empty; Headers'
+// values are "<redacted>" while keys stay visible (so the operator
+// can see WHICH headers are configured, per "Sensitive headers must
+// be redacted" — keys are not secrets).
+type renderMCPView struct {
+	Name       string            `json:"name"`
+	Transport  string            `json:"transport"`
+	Endpoint   string            `json:"endpoint,omitempty"`
+	Command    []string          `json:"command,omitempty"`
+	Permission string            `json:"permission,omitempty"`
+	Allowlist  []string          `json:"allowlist,omitempty"`
+	APIKey     string            `json:"api_key,omitempty"`
+	Headers    map[string]string `json:"headers,omitempty"`
+}
+
 // --- pointer-overlay types -------------------------------------------------
 
 // configOverlay is the JSON unmarshalling target for an on-disk
@@ -331,7 +540,8 @@ type renderModelView struct {
 // "field unset in the file" (nil → leave prior value alone) from
 // "field set to the zero value" (non-nil → replace prior value).
 type configOverlay struct {
-	Model *modelOverlay `json:"model"`
+	Model      *modelOverlay       `json:"model"`
+	MCPServers *[]mcpServerOverlay `json:"mcp_servers"`
 }
 
 type modelOverlay struct {
@@ -342,6 +552,25 @@ type modelOverlay struct {
 	Temperature     *float64 `json:"temperature"`
 	MaxOutputTokens *int     `json:"max_output_tokens"`
 	RequestTimeout  *string  `json:"request_timeout"`
+}
+
+// mcpServerOverlay is the per-field pointer-overlay shape for a
+// single entry under the `mcp_servers` array. The pointer types
+// mirror the modelOverlay discipline: a nil pointer means "absent
+// in this entry" (the zero value of the resolved MCPServerConfig
+// stays); a non-nil pointer means "set to this value" (the underlying
+// string or slice is copied). The slice-level replacement is
+// governed by the parent *[]mcpServerOverlay plus the
+// mcpServersPresent flag from presenceForTopKey.
+type mcpServerOverlay struct {
+	Name       *string            `json:"name"`
+	Transport  *string            `json:"transport"`
+	Endpoint   *string            `json:"endpoint"`
+	Command    *[]string          `json:"command"`
+	Permission *string            `json:"permission"`
+	Allowlist  *[]string          `json:"allowlist"`
+	APIKey     *string            `json:"api_key"`
+	Headers    *map[string]string `json:"headers"`
 }
 
 // applyOverlay merges a non-nil overlay on top of *cfg. Each field on
@@ -358,52 +587,120 @@ type modelOverlay struct {
 // custom UnmarshalJSON on a wrapper type) so a parse-failure error
 // message can name the field it came from — the Go json package does
 // not auto-wrap custom UnmarshalJSON errors with the field path.
-func applyOverlay(cfg *Config, overlay configOverlay, modelPresent map[string]struct{}) error {
-	if overlay.Model == nil {
+//
+// The mcp_servers overlay follows an analogous three-case contract at
+// the array level: present-with-value replaces the prior slice (each
+// overlay entry fully materializes into an MCPServerConfig via
+// applyMCPServerOverlay), present-but-null clears the prior slice,
+// and absent leaves it alone. mcpServersPresent (a single bool from
+// presenceForTopKey) is the array-level presence signal; the
+// pointer-overlay per-field is sufficient to detect the
+// present-with-value case.
+func applyOverlay(cfg *Config, overlay configOverlay, modelPresent map[string]struct{}, mcpServersPresent bool) error {
+	if overlay.Model == nil && overlay.MCPServers == nil && !mcpServersPresent {
 		return nil
 	}
-	m := overlay.Model
-	mc := &cfg.Model
-	if m.Provider != nil {
-		mc.Provider = *m.Provider
-	} else if _, ok := modelPresent["provider"]; ok {
-		mc.Provider = ""
-	}
-	if m.BaseURL != nil {
-		mc.BaseURL = *m.BaseURL
-	} else if _, ok := modelPresent["base_url"]; ok {
-		mc.BaseURL = ""
-	}
-	if m.Model != nil {
-		mc.Model = *m.Model
-	} else if _, ok := modelPresent["model"]; ok {
-		mc.Model = ""
-	}
-	if m.APIKey != nil {
-		mc.APIKey = *m.APIKey
-	} else if _, ok := modelPresent["api_key"]; ok {
-		mc.APIKey = ""
-	}
-	if m.Temperature != nil {
-		mc.Temperature = *m.Temperature
-	} else if _, ok := modelPresent["temperature"]; ok {
-		mc.Temperature = 0
-	}
-	if m.MaxOutputTokens != nil {
-		mc.MaxOutputTokens = *m.MaxOutputTokens
-	} else if _, ok := modelPresent["max_output_tokens"]; ok {
-		mc.MaxOutputTokens = 0
-	}
-	if m.RequestTimeout != nil {
-		dur, err := parseDurationField(*m.RequestTimeout, "request_timeout")
-		if err != nil {
-			return err
+	if overlay.Model != nil {
+		m := overlay.Model
+		mc := &cfg.Model
+		if m.Provider != nil {
+			mc.Provider = *m.Provider
+		} else if _, ok := modelPresent["provider"]; ok {
+			mc.Provider = ""
 		}
-		mc.RequestTimeout = dur
-	} else if _, ok := modelPresent["request_timeout"]; ok {
-		mc.RequestTimeout = 0
+		if m.BaseURL != nil {
+			mc.BaseURL = *m.BaseURL
+		} else if _, ok := modelPresent["base_url"]; ok {
+			mc.BaseURL = ""
+		}
+		if m.Model != nil {
+			mc.Model = *m.Model
+		} else if _, ok := modelPresent["model"]; ok {
+			mc.Model = ""
+		}
+		if m.APIKey != nil {
+			mc.APIKey = *m.APIKey
+		} else if _, ok := modelPresent["api_key"]; ok {
+			mc.APIKey = ""
+		}
+		if m.Temperature != nil {
+			mc.Temperature = *m.Temperature
+		} else if _, ok := modelPresent["temperature"]; ok {
+			mc.Temperature = 0
+		}
+		if m.MaxOutputTokens != nil {
+			mc.MaxOutputTokens = *m.MaxOutputTokens
+		} else if _, ok := modelPresent["max_output_tokens"]; ok {
+			mc.MaxOutputTokens = 0
+		}
+		if m.RequestTimeout != nil {
+			dur, err := parseDurationField(*m.RequestTimeout, "request_timeout")
+			if err != nil {
+				return err
+			}
+			mc.RequestTimeout = dur
+		} else if _, ok := modelPresent["request_timeout"]; ok {
+			mc.RequestTimeout = 0
+		}
+	}
+	if overlay.MCPServers != nil {
+		newServers := make([]MCPServerConfig, 0, len(*overlay.MCPServers))
+		for _, srvOvr := range *overlay.MCPServers {
+			newServers = append(newServers, applyMCPServerOverlay(srvOvr))
+		}
+		cfg.MCPServers = newServers
+	} else if mcpServersPresent {
+		cfg.MCPServers = nil
 	}
 	return nil
+}
+
+// applyMCPServerOverlay materializes one mcpServerOverlay into the
+// resolved MCPServerConfig shape. The overlay's pointer-typed fields
+// mean a nil pointer is "absent in this entry" (the zero value stays);
+// a non-nil pointer is "set to this value" (the underlying string or
+// slice is copied to keep the resolved Config independent of the
+// parsed overlay).
+//
+// Per-field null-vs-absent tracking within an entry is intentionally
+// not implemented: each source's array either replaces the prior
+// value as a whole (overlay present) or leaves the prior value alone
+// (overlay absent or null). Null-vs-absent within a single entry would
+// require a per-entry presence map and is not required by SCOPE §43
+// or the V1 amendment — it can be added in a later Run if a real
+// server entry needs partial-overlay semantics.
+func applyMCPServerOverlay(ovr mcpServerOverlay) MCPServerConfig {
+	s := MCPServerConfig{}
+	if ovr.Name != nil {
+		s.Name = *ovr.Name
+	}
+	if ovr.Transport != nil {
+		s.Transport = *ovr.Transport
+	}
+	if ovr.Endpoint != nil {
+		s.Endpoint = *ovr.Endpoint
+	}
+	if ovr.Command != nil {
+		s.Command = append([]string(nil), (*ovr.Command)...)
+	}
+	if ovr.Permission != nil {
+		s.Permission = *ovr.Permission
+	}
+	if ovr.Allowlist != nil {
+		s.Allowlist = append([]string(nil), (*ovr.Allowlist)...)
+	}
+	if ovr.APIKey != nil {
+		s.APIKey = *ovr.APIKey
+	}
+	if ovr.Headers != nil {
+		src := *ovr.Headers
+		out := make(map[string]string, len(src))
+		for k, v := range src {
+			out[k] = v
+		}
+		s.Headers = out
+	}
+	return s
 }
 
 // parseDurationField parses a JSON duration string ("30s", "1m",

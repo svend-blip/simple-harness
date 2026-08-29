@@ -108,10 +108,59 @@ type Finding struct {
 // commands render the snapshot. Entries is appended to as
 // RunOne composes the message list. Limit is the configured context
 // limit (0 means unknown — populated by the --limit <n> flag in
-// handoff 036).
+// handoff 036). MCPServers is the slice of resolved MCP server
+// states populated by AddMCPServer at session start (SCOPE §43 +
+// amendment §43's "immutable for the session" + "inspectable
+// through context diagnostics (SCOPE §20)" — the surface rendered
+// by MCPSummary / MCPDoctor).
 type Ledger struct {
-	Entries []Entry
-	Limit   int
+	Entries    []Entry
+	Limit      int
+	MCPServers []MCPServerInfo
+}
+
+// MCPServerInfo captures one MCP server's resolved state for the
+// SCOPE §20 + amendment §43 diagnostics surface. The fields are the
+// data the cmd-side `context show` / `context doctor` rendering
+// consumes; the wiring (populating AddMCPServer after Manager.AddServer
+// for each configured server) lives at WORK 4 (handoff 059).
+//
+// Name is the stable identifier from configuration. Transport is
+// "stdio" | "http" (mirrors config.MCPServerConfig.Transport).
+// Endpoint is the http URL for transport=http OR the lead command
+// element for transport=stdio (the rendering branch picks); Command
+// carries every element for stdio (empty for http). Permission is
+// the mode the server's tools map into (or "" when the config left
+// it unset — the cmd-side resolves it to the harness's active mode).
+//
+// FinalNames is the registry-facing name (post-collision resolution;
+// the same value tools.Registry uses). OriginalCount is the number
+// of tools the server reported in its session-start listing
+// (pre-allowlist). RegisteredCount is the number of tools that
+// survived the allowlist filter (= len(FinalNames)). The two counts
+// pin the "allowlist excluded N tools" diagnostic path.
+type MCPServerInfo struct {
+	Name            string
+	Transport       string
+	Endpoint        string
+	Command         []string
+	Permission      string
+	FinalNames      []string
+	OriginalCount   int
+	RegisteredCount int
+}
+
+// AddMCPServer records a resolved MCP server in the Ledger. The
+// fields populate the SCOPE §20 + amendment §43 diagnostics surface
+// (rendered by MCPSummary and MCPDoctor). Adding the same server
+// twice appends a duplicate entry — the surface calls
+// MCPSummary / MCPDoctor render whatever is in the slice at
+// render-time, so callers that want uniqueness must check Name
+// before calling AddMCPServer. The slice is reserved for the
+// session-start wiring (each Manager.AddServer call adds exactly
+// one entry); duplicates are a caller bug, not a defensive routine.
+func (l *Ledger) AddMCPServer(info MCPServerInfo) {
+	l.MCPServers = append(l.MCPServers, info)
 }
 
 // Estimate returns a rough token estimate for the given text. The
@@ -321,5 +370,100 @@ func (l *Ledger) Doctor() []Finding {
 		}
 	}
 
+	return findings
+}
+
+// MCPSummary renders the resolved MCP server set as a multi-line
+// string suitable for appending to the cmd-side `context show`
+// output (the wiring lives in WORK 4 — this function ships the data
+// shape the wire consumes). The format:
+//
+//	MCP servers (N declared, M tools registered):
+//	  <name>  transport=<http|stdio>  permission=<mode>  <registered>/<original> tools registered
+//	  endpoint: <endpoint> | command: <cmd[0]> ... <cmd[N-1]>
+//	  tools: <name1>, <name2>, ...
+//
+// One block per server. Servers with zero registered tools (allowlist
+// excluded all of them, or the server reported an empty listing) still
+// appear in the output — the operator wants to see the server is
+// declared and see why no tools are callable (per SCOPE §43: "No
+// tool is callable that the allowlist excludes").
+//
+// Returns the empty string when no MCP servers are recorded (the
+// cmd-side treats "" as "do not append an MCP section to the
+// `context show` output").
+func (l *Ledger) MCPSummary() string {
+	if len(l.MCPServers) == 0 {
+		return ""
+	}
+	totalRegistered := 0
+	for _, info := range l.MCPServers {
+		totalRegistered += info.RegisteredCount
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "MCP servers (%d declared, %d tools registered):\n", len(l.MCPServers), totalRegistered)
+	for _, info := range l.MCPServers {
+		fmt.Fprintf(&b, "  %s  transport=%s  permission=%s  %d/%d tools registered\n",
+			info.Name, info.Transport, info.Permission, info.RegisteredCount, info.OriginalCount)
+		switch info.Transport {
+		case "http":
+			fmt.Fprintf(&b, "  endpoint: %s\n", info.Endpoint)
+		case "stdio":
+			if len(info.Command) == 0 {
+				fmt.Fprintf(&b, "  command: \n")
+			} else {
+				fmt.Fprintf(&b, "  command: %s\n", strings.Join(info.Command, " "))
+			}
+		}
+		if len(info.FinalNames) > 0 {
+			fmt.Fprintf(&b, "  tools: %s\n", strings.Join(info.FinalNames, ", "))
+		}
+	}
+	return b.String()
+}
+
+// MCPDoctor returns SCOPE §20-style diagnostics for the resolved
+// MCP tool set. Two finding types are surfaced:
+//
+//   - "mcp_large_server": any MCP server with > 20 registered tools.
+//     A large MCP listing inflates the tool-schema token estimate
+//     (SCOPE §20 "tool-schema overhead" category applied to the
+//     MCP-side surface). The finding's Name identifies the server;
+//     Detail names the tool count and the 20-tool threshold.
+//   - "mcp_unreachable": informational, not a failure — any server
+//     whose RegisteredCount is 0 (because the allowlist excluded all
+//     of the server's listed tools, or because the server reported
+//     an empty listing). The same shape as a builtin with zero
+//     usable tools — a configuration concern, not a runtime failure.
+//     The finding's Name identifies the server; Detail explains why
+//     no tools are callable.
+//
+// Returns nil when no findings apply (zero declared servers OR every
+// declared server has ≤ 20 registered tools AND > 0 registered
+// tools). The zero-value of MCPServers (nil) is treated as "no
+// servers declared" and returns nil — keeping existing context_test
+// tests that don't set MCPServers green without modification.
+func (l *Ledger) MCPDoctor() []Finding {
+	if len(l.MCPServers) == 0 {
+		return nil
+	}
+	var findings []Finding
+	const mcpLargeThreshold = 20
+	for _, info := range l.MCPServers {
+		if info.RegisteredCount > mcpLargeThreshold {
+			findings = append(findings, Finding{
+				Name:   info.Name,
+				Type:   "mcp_large_server",
+				Detail: fmt.Sprintf("mcp server %q reports %d tools (threshold %d; tool-schema overhead)", info.Name, info.RegisteredCount, mcpLargeThreshold),
+			})
+		}
+		if info.RegisteredCount == 0 {
+			findings = append(findings, Finding{
+				Name:   info.Name,
+				Type:   "mcp_unreachable",
+				Detail: fmt.Sprintf("mcp server %q has 0 callable tools (allowlist excluded all listed tools, or the server reported an empty listing)", info.Name),
+			})
+		}
+	}
 	return findings
 }
