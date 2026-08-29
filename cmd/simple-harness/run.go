@@ -49,6 +49,7 @@ import (
 	"github.com/svend-blip/simple-harness/internal/event"
 	"github.com/svend-blip/simple-harness/internal/loop"
 	"github.com/svend-blip/simple-harness/internal/model"
+	"github.com/svend-blip/simple-harness/internal/session"
 )
 
 // runUsage is the help text printed by `simple-harness run --help`
@@ -73,6 +74,8 @@ Flags:
   --model <name>          model name to send in the chat request
                           (required, non-empty)
   --workspace <dir>       workspace directory (defaults to cwd)
+  --state-dir <dir>       state directory for session persistence
+                          (defaults to ~/.simple-harness/sessions)
   --prompt-file <path>    path to the prompt file; use "-" to read
                           from stdin (required; the "-" value is
                           accepted but stdin handling is a future
@@ -152,6 +155,7 @@ func runRun(args []string) int {
 	baseURL := fs.String("base-url", "", "base URL of the OpenAI-compatible endpoint (required, non-empty)")
 	model := fs.String("model", "", "model name to send in the chat request (required, non-empty)")
 	workspace := fs.String("workspace", "", "workspace directory (defaults to cwd)")
+	stateDir := fs.String("state-dir", "", "state directory for session persistence (defaults to ~/.simple-harness/sessions)")
 	promptFile := fs.String("prompt-file", "", "path to the prompt file; use - for stdin (required)")
 	systemFile := fs.String("system-file", "", "optional path to a system prompt file")
 	output := fs.String("output", "terminal", `output mode: "terminal" or "jsonl" (default "terminal")`)
@@ -217,6 +221,20 @@ func runRun(args []string) int {
 	default:
 		fmt.Fprintf(os.Stderr, "config error: --output must be 'terminal' or 'jsonl', got %q\n", *output)
 		return 2
+	}
+
+	// --state-dir: optional. Default to ~/.simple-harness/sessions
+	// when empty (the SCOPE §17 contract). Run 008 (handoff 030)
+	// introduces this flag — every run-mode execution now writes
+	// <state-dir>/<session-id>/{session.json, events.jsonl,
+	// messages.jsonl}.
+	if *stateDir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "config error: cannot determine home directory: %v\n", err)
+			return 2
+		}
+		*stateDir = filepath.Join(home, ".simple-harness", "sessions")
 	}
 
 	// --system-file: optional. If non-empty, the file must
@@ -290,6 +308,7 @@ func runRun(args []string) int {
 		*model,
 		*workspace,
 		*output,
+		*stateDir,
 	)
 }
 
@@ -318,7 +337,7 @@ func runRun(args []string) int {
 //     inside RunOne).
 //
 // The function returns the SCOPE §28 exit code.
-func runModeExecute(prompt, baseURL, modelName, workspace, outputMode string) int {
+func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir string) int {
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
@@ -336,10 +355,28 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode string) in
 	var sidecar *os.File
 	switch outputMode {
 	case "jsonl":
-		em = event.NewEmitter(os.Stdout, sessionID)
+		// Run 008 (handoff 030): events.jsonl is the canonical
+		// session record (SCOPE §17); it ALWAYS lands at
+		// <state-dir>/<session-id>/events.jsonl. Under
+		// --output jsonl, the same events ALSO stream to stdout
+		// (the TG3 stdout-purity contract preserved from Run 006).
+		// The emitter writes to both via io.MultiWriter.
+		sidecarDir := filepath.Join(stateDir, sessionID)
+		if err := os.MkdirAll(sidecarDir, 0o755); err != nil {
+			fmt.Fprintf(os.Stderr, "internal error: cannot create %s: %v\n", sidecarDir, err)
+			return 1
+		}
+		sidecarPath := filepath.Join(sidecarDir, "events.jsonl")
+		sf, err := os.Create(sidecarPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "internal error: cannot create %s: %v\n", sidecarPath, err)
+			return 1
+		}
+		sidecar = sf
+		em = event.NewEmitter(io.MultiWriter(sf, os.Stdout), sessionID)
 		loopOut = io.Discard
 	case "terminal":
-		sidecarDir := filepath.Join(workspace, "sessions", sessionID)
+		sidecarDir := filepath.Join(stateDir, sessionID)
 		if err := os.MkdirAll(sidecarDir, 0o755); err != nil {
 			fmt.Fprintf(os.Stderr, "internal error: cannot create %s: %v\n", sidecarDir, err)
 			return 1
@@ -383,6 +420,54 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode string) in
 	normalizedBase := loop.NormalizeBaseURL(baseURL)
 	permissionStr := modeToLoopString(activePermissionMode)
 
+	// Run 008 (handoff 030): open a session.Writer to persist
+	// session.json (identity + config snapshot + final status/exit)
+	// and messages.jsonl (per-message log) under
+	// <state-dir>/<session-id>/. The defer below writes session.json
+	// with the final status/exit on every return path of this
+	// function.
+	sessWriter, err := session.NewWriter(stateDir, sessionID, session.Config{
+		BaseURL:    normalizedBase,
+		Model:      modelName,
+		Workspace:  workspace,
+		Permission: permissionStr,
+		OutputMode: outputMode,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "internal error: cannot open session writer: %v\n", err)
+		return 1
+	}
+	defer func() {
+		var finalStatus session.Status
+		var finalCode int
+		if interrupted {
+			finalStatus = session.StatusInterrupted
+			finalCode = 6
+		} else if err != nil {
+			var me *model.ModelError
+			if errors.As(err, &me) {
+				switch me.Kind {
+				case model.ErrHTTP, model.ErrParse, model.ErrUpstream:
+					finalStatus = session.StatusFailed
+					finalCode = 3
+				case model.ErrTimeout:
+					finalStatus = session.StatusFailed
+					finalCode = 6
+				default:
+					finalStatus = session.StatusFailed
+					finalCode = 1
+				}
+			} else {
+				finalStatus = session.StatusFailed
+				finalCode = 1
+			}
+		} else {
+			finalStatus = session.StatusCompleted
+			finalCode = 0
+		}
+		_ = sessWriter.Write(finalStatus, finalCode)
+	}()
+
 	modelOpts := model.Options{
 		BaseURL:         normalizedBase,
 		Model:           modelName,
@@ -398,7 +483,11 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode string) in
 		Permission: permissionStr,
 	}, client, em, loopOut)
 
-	_, err = r.RunOne(ctx, prompt)
+	// Run 008 (handoff 030): record the user message in
+	// messages.jsonl before the model call.
+	_ = sessWriter.AppendMessage("user", prompt)
+
+	response, err := r.RunOne(ctx, prompt)
 
 	// If the signal fired, the SCOPE §26 sequence is: emit
 	// `interrupted` event -> flush sidecar (if terminal) -> exit 6.
@@ -428,31 +517,43 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode string) in
 			_ = sidecar.Sync()
 			_ = sidecar.Close()
 		}
+		// Run 008 (handoff 030): record the assistant response in
+		// messages.jsonl after a successful turn.
+		_ = sessWriter.AppendMessage("assistant", response)
 		return 0
 	}
 
 	// Error path: RunOne emitted a Status(FAILED|INTERRUPTED) but
 	// NOT a Completed event (loop.go lines 142-159). Emit
 	// Completed(exit_code) here so the wire has the terminal event
-	// the SCOPE §21 protocol requires. Close the sidecar before
-	// returning.
-	if sidecar != nil {
-		_ = sidecar.Sync()
-		_ = sidecar.Close()
-	}
-
+	// the SCOPE §21 protocol requires. NOTE: close the sidecar
+	// AFTER the terminal event so the events.jsonl in state-dir
+	// captures the terminal Completed event (the MultiWriter in
+	// jsonl mode writes to both sidecar + stdout).
 	var me *model.ModelError
 	if errors.As(err, &me) {
 		switch me.Kind {
 		case model.ErrHTTP, model.ErrParse, model.ErrUpstream:
 			_ = em.Completed(3)
+			if sidecar != nil {
+				_ = sidecar.Sync()
+				_ = sidecar.Close()
+			}
 			return 3
 		case model.ErrTimeout:
 			_ = em.Completed(6)
+			if sidecar != nil {
+				_ = sidecar.Sync()
+				_ = sidecar.Close()
+			}
 			return 6
 		}
 	}
 	_ = em.Completed(1)
+	if sidecar != nil {
+		_ = sidecar.Sync()
+		_ = sidecar.Close()
+	}
 	return 1
 }
 

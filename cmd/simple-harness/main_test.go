@@ -170,7 +170,7 @@ func TestConfigUnknownSubcommandRejected(t *testing.T) {
 // built-in command: piping "/help\n/exit\n" through stdin prints
 // the usage block to stderr and exits 0.
 func TestInteractiveMode_HelpCommand_PrintsUsage(t *testing.T) {
-	code, _ := driveInteractive(t, "/help\n/exit\n")
+	code, _, _ := driveInteractive(t, "/help\n/exit\n")
 	if code != 0 {
 		t.Fatalf("run with /help+/exit returned %d, want 0", code)
 	}
@@ -184,7 +184,7 @@ func TestInteractiveMode_HelpCommand_PrintsUsage(t *testing.T) {
 // "/exit\n" through stdin exits 0 cleanly without invoking the
 // model client at all.
 func TestInteractiveMode_ExitCommand_Exits0(t *testing.T) {
-	code, _ := driveInteractive(t, "/exit\n")
+	code, _, _ := driveInteractive(t, "/exit\n")
 	if code != 0 {
 		t.Fatalf("run with /exit returned %d, want 0", code)
 	}
@@ -193,7 +193,7 @@ func TestInteractiveMode_ExitCommand_Exits0(t *testing.T) {
 // TestInteractiveMode_QuitCommand_Exits0 pins /quit as an alias
 // for /exit (both built-ins listed in the prompt).
 func TestInteractiveMode_QuitCommand_Exits0(t *testing.T) {
-	code, _ := driveInteractive(t, "/quit\n")
+	code, _, _ := driveInteractive(t, "/quit\n")
 	if code != 0 {
 		t.Fatalf("run with /quit returned %d, want 0", code)
 	}
@@ -202,7 +202,7 @@ func TestInteractiveMode_QuitCommand_Exits0(t *testing.T) {
 // TestInteractiveMode_InvalidPermissionExits2 pins the SCOPE §28
 // config-error exit for an invalid --permission value.
 func TestInteractiveMode_InvalidPermissionExits2(t *testing.T) {
-	code, _ := driveInteractive(t, "/exit\n", "--permission", "bogus")
+	code, _, _ := driveInteractive(t, "/exit\n", "--permission", "bogus")
 	if code != 2 {
 		t.Fatalf("run with --permission bogus returned %d, want 2 (SCOPE §28 config error)", code)
 	}
@@ -211,7 +211,7 @@ func TestInteractiveMode_InvalidPermissionExits2(t *testing.T) {
 // TestInteractiveMode_InvalidWorkspaceExits2 pins the SCOPE §28
 // config-error exit for an invalid --workspace value.
 func TestInteractiveMode_InvalidWorkspaceExits2(t *testing.T) {
-	code, _ := driveInteractive(t, "/exit\n", "--workspace", "/no/such/dir")
+	code, _, _ := driveInteractive(t, "/exit\n", "--workspace", "/no/such/dir")
 	if code != 2 {
 		t.Fatalf("run with --workspace /no/such/dir returned %d, want 2 (SCOPE §28 config error)", code)
 	}
@@ -232,7 +232,7 @@ func TestInteractiveMode_PromptReachesModelClient(t *testing.T) {
 
 	t.Setenv("SIMPLE_HARNESS_BASE_URL", srv.URL+"/v1")
 
-	code, out := driveInteractive(t, "hello\n/exit\n")
+	code, out, _ := driveInteractive(t, "hello\n/exit\n")
 	if code != 0 {
 		t.Fatalf("run with prompt+/exit returned %d, want 0", code)
 	}
@@ -244,25 +244,40 @@ func TestInteractiveMode_PromptReachesModelClient(t *testing.T) {
 // driveInteractive is the shared test helper: it sets up os.Stdin
 // from the given input string, sets up os.Stdout and os.Stderr
 // capture, calls run(args), and returns the exit code plus the
-// captured stdout.
+// captured stdout and the state-dir it injected.
 //
 // The args slice is appended after the standard flags — callers
 // pass --permission / --workspace / etc. and the helper routes
 // them through the flag parser. The stdin input is piped as
 // multiple lines exactly as a real user would type.
 //
-// The helper injects --workspace <t.TempDir()> as the FIRST pair of
-// args so the default workspace (which under `go test` is
-// os.Getwd() == the package source dir) never pollutes the source
-// tree with real session directories. Tests that need to override
-// the workspace (e.g. TestInteractiveMode_InvalidWorkspaceExits2
-// with /no/such/dir) still see the value they want because Go's
-// flag package takes the LAST value for a repeated flag.
-func driveInteractive(t *testing.T, stdinInput string, extraArgs ...string) (int, string) {
+// The helper injects --workspace <t.TempDir()> AND
+// --state-dir <t.TempDir()> as the FIRST pairs of args so the
+// default workspace (which under `go test` is os.Getwd() == the
+// package source dir) never pollutes the source tree with real
+// session directories. Tests that need to override the workspace
+// (e.g. TestInteractiveMode_InvalidWorkspaceExits2 with
+// /no/such/dir) still see the value they want because Go's flag
+// package takes the LAST value for a repeated flag. The stateDir
+// return value lets tests that need to assert on the session
+// layout read the directory directly without depending on the
+// workspace path.
+//
+// Run 008 (handoff 030) extends the return tuple from (int, string)
+// to (int, string, string) to surface the injected stateDir; the
+// three existing TestInteractiveMode_FirstCtrlC* + SecondCtrlC* +
+// ExitCommand_StillExits0 callers update their argument from
+// findSidecarPath(t, workspace) to findSidecarPath(t, stateDir)
+// accordingly.
+func driveInteractive(t *testing.T, stdinInput string, extraArgs ...string) (int, string, string) {
 	t.Helper()
 
 	workspace := t.TempDir()
-	args := append([]string{"--workspace", workspace}, extraArgs...)
+	stateDir := t.TempDir()
+	args := append([]string{
+		"--workspace", workspace,
+		"--state-dir", stateDir,
+	}, extraArgs...)
 
 	origStdin := os.Stdin
 	origStdout := os.Stdout
@@ -299,7 +314,7 @@ func driveInteractive(t *testing.T, stdinInput string, extraArgs ...string) (int
 	_ = outW.Close()
 	var buf bytes.Buffer
 	_, _ = io.Copy(&buf, outR)
-	return code, buf.String()
+	return code, buf.String(), stateDir
 }
 
 // TestToolsSubcommand_EmptyRegistry pins handoff 013's foundation-state
@@ -511,12 +526,13 @@ func TestConfigShow_IncludesPermission(t *testing.T) {
 
 // TestInteractiveMode_DoesNotPolluteSourceTree pins verdict 010's
 // fix: driveInteractive (and direct run() callers) must use an
-// isolated --workspace so the test suite does not write real
-// session directories into the source tree under `go test`. The
-// test calls driveInteractive (which reaches session-open), then
-// verifies that the production-code session-dir parent has not
-// gained a new entry. Any future regression that drops the
-// t.TempDir() workspace in driveInteractive will fail this test.
+// isolated --workspace AND --state-dir so the test suite does
+// not write real session directories into the source tree under
+// `go test`. The test calls driveInteractive (which reaches
+// session-open), then verifies that the production-code
+// session-dir parent has not gained a new entry. Any future
+// regression that drops the t.TempDir() workspace in
+// driveInteractive will fail this test.
 //
 // Path resolution (verdict 011 fix): under `go test`, the
 // package's test binary runs in the package source dir
@@ -524,16 +540,25 @@ func TestConfigShow_IncludesPermission(t *testing.T) {
 // default-workspace resolution uses os.Getwd() when --workspace
 // is not given (cmd/simple-harness/main.go:189-196), so the
 // production-code default workspace IS this package dir. The
-// session-dir parent (production: <workspace>/sessions, ARCHITECTURE.md
-// §"External subscription") therefore resolves to the relative
-// path "sessions" from this test binary's cwd — NOT to
-// "cmd/simple-harness/sessions" (which under `go test` resolves
-// to a decoy dir cmd/simple-harness/cmd/simple-harness/sessions
+// session-dir parent (Run 008: <state-dir>/<session-id>/, per
+// SCOPE §17; the pre-Run-008 location was <workspace>/sessions,
+// ARCHITECTURE.md §"External subscription") therefore resolves
+// to the relative path "sessions" from this test binary's cwd
+// — NOT to "cmd/simple-harness/sessions" (which under `go test`
+// resolves to a decoy dir cmd/simple-harness/cmd/simple-harness/sessions
 // the test created via os.MkdirAll and that no production code
 // path ever wrote into; verdict 011 reproduced that decoy defect
-// live). Anchoring explicitly with filepath.Join(os.Getwd(),
-// "sessions") makes the resolution self-documenting and immune
-// to package-dir moves.
+// live). Run 008 moves the harness's session writes to
+// <state-dir>/<session-id>/ — driveInteractive injects a
+// t.TempDir() for both --workspace and --state-dir, so the
+// harness does NOT write to <cwd>/sessions. The decoy
+// "sessions" dir created by this test below is the only thing
+// that lives at <cwd>/sessions; the assertion that the count
+// does not change is the regression pin.
+//
+// Anchoring explicitly with filepath.Join(os.Getwd(), "sessions")
+// makes the resolution self-documenting and immune to package-dir
+// moves.
 func TestInteractiveMode_DoesNotPolluteSourceTree(t *testing.T) {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -561,7 +586,7 @@ func TestInteractiveMode_DoesNotPolluteSourceTree(t *testing.T) {
 	before := countSessionsDirs()
 
 	// Reach session-open with the standard /exit pattern.
-	_, _ = driveInteractive(t, "/exit\n")
+	_, _, _ = driveInteractive(t, "/exit\n")
 
 	after := countSessionsDirs()
 	if after != before {
@@ -645,7 +670,7 @@ func TestRun_Version(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 007, handoff 029)"
+	want := "simple-harness 0.1.0-dev (Run 008, handoff 030)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}
@@ -860,7 +885,7 @@ func TestRun_Version_AdvancesToHandoff024(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 007, handoff 029)"
+	want := "simple-harness 0.1.0-dev (Run 008, handoff 030)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}
@@ -959,15 +984,632 @@ func TestRun_SIGTERM_Headless_EmitsInterruptedAndExits6(t *testing.T) {
 	}
 }
 
+// TestRun_StateDir_PersistsSessionLayout is the TG1 path:
+// a headless `run` invocation against the unreachable endpoint
+// (http://127.0.0.1:9) with --state-dir <tmp> persists both
+// session.json AND events.jsonl under <state-dir>/. The test
+// invokes the rebuilt bin/simple-harness-runtime as a subprocess
+// (the same exec.Command pattern as
+// TestRun_SIGTERM_Headless_EmitsInterruptedAndExits6) so the
+// test exercises the real binary, not the in-process test seam.
+//
+// Skip in -short mode (the spawned-process path takes a few
+// seconds and is not appropriate for the -short fast path).
+func TestRun_StateDir_PersistsSessionLayout(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires spawned harness process; skipped in -short mode")
+	}
+
+	binPath, err := filepath.Abs(filepath.Join("..", "..", "bin", "simple-harness-runtime"))
+	if err != nil {
+		t.Fatalf("abs binPath: %v", err)
+	}
+	if _, err := os.Stat(binPath); err != nil {
+		t.Fatalf("rebuilt binary missing at %s — run `go build -o bin/simple-harness-runtime ./cmd/simple-harness` first: %v", binPath, err)
+	}
+
+	stateDir := t.TempDir()
+	workspace := t.TempDir()
+	promptDir := t.TempDir()
+	promptFile := filepath.Join(promptDir, "prompt.md")
+	if err := os.WriteFile(promptFile, []byte("hi"), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+
+	cmd := exec.Command(binPath,
+		"run",
+		"--base-url", "http://127.0.0.1:9",
+		"--model", "tg",
+		"--workspace", workspace,
+		"--permission", "read_only",
+		"--prompt-file", promptFile,
+		"--output", "jsonl",
+		"--state-dir", stateDir,
+	)
+	// Discard stdout / stderr; the harness exits 3 (model
+	// failure on the unreachable endpoint) and we only care
+	// about the persisted files.
+	cmd.Stdout, _ = os.Create(os.DevNull)
+	cmd.Stderr, _ = os.Create(os.DevNull)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start harness: %v", err)
+	}
+	waitErr := cmd.Wait()
+	if waitErr == nil {
+		t.Fatalf("harness exited cleanly (rc=0); want non-zero (model failure expected on unreachable endpoint)")
+	}
+
+	// TG1 literal: find -name session.json | wc -l == 1 AND
+	// find -name events.jsonl | wc -l == 1.
+	sessionCount := 0
+	eventsCount := 0
+	filepath.Walk(stateDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			return nil
+		}
+		base := filepath.Base(path)
+		if base == "session.json" {
+			sessionCount++
+		}
+		if base == "events.jsonl" {
+			eventsCount++
+		}
+		return nil
+	})
+	if sessionCount != 1 {
+		t.Errorf("expected exactly 1 session.json under %s; got %d", stateDir, sessionCount)
+	}
+	if eventsCount != 1 {
+		t.Errorf("expected exactly 1 events.jsonl under %s; got %d", stateDir, eventsCount)
+	}
+}
+
+// TestRun_SessionID_MatchesDirectory reads the `started`
+// event from <state-dir>/<session-id>/events.jsonl, extracts
+// the `session_id` field, and asserts the directory name
+// under <state-dir>/ matches the `session_id` byte-for-byte.
+// This is GOAL §5 reviewer duty #1 ("correlation end-to-end").
+func TestRun_SessionID_MatchesDirectory(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires spawned harness process; skipped in -short mode")
+	}
+
+	binPath, err := filepath.Abs(filepath.Join("..", "..", "bin", "simple-harness-runtime"))
+	if err != nil {
+		t.Fatalf("abs binPath: %v", err)
+	}
+	if _, err := os.Stat(binPath); err != nil {
+		t.Fatalf("rebuilt binary missing at %s: %v", binPath, err)
+	}
+
+	stateDir := t.TempDir()
+	workspace := t.TempDir()
+	promptDir := t.TempDir()
+	promptFile := filepath.Join(promptDir, "prompt.md")
+	if err := os.WriteFile(promptFile, []byte("hi"), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+
+	cmd := exec.Command(binPath,
+		"run",
+		"--base-url", "http://127.0.0.1:9",
+		"--model", "tg",
+		"--workspace", workspace,
+		"--permission", "read_only",
+		"--prompt-file", promptFile,
+		"--output", "jsonl",
+		"--state-dir", stateDir,
+	)
+	cmd.Stdout, _ = os.Create(os.DevNull)
+	cmd.Stderr, _ = os.Create(os.DevNull)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start harness: %v", err)
+	}
+	_ = cmd.Wait()
+
+	// Find the session directory under state-dir.
+	entries, err := os.ReadDir(stateDir)
+	if err != nil {
+		t.Fatalf("readdir %s: %v", stateDir, err)
+	}
+	var sessionDir string
+	for _, e := range entries {
+		if e.IsDir() {
+			sessionDir = filepath.Join(stateDir, e.Name())
+			break
+		}
+	}
+	if sessionDir == "" {
+		t.Fatalf("no session directory under %s", stateDir)
+	}
+	dirName := filepath.Base(sessionDir)
+
+	// Read events.jsonl and extract session_id from the
+	// first parseable line.
+	eventsPath := filepath.Join(sessionDir, "events.jsonl")
+	data, err := os.ReadFile(eventsPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", eventsPath, err)
+	}
+	var foundSID string
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		var ev event.Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			continue
+		}
+		if ev.SessionID != "" {
+			foundSID = ev.SessionID
+			break
+		}
+	}
+	if foundSID == "" {
+		t.Fatalf("no parseable session_id in %s; raw=%s", eventsPath, data)
+	}
+	if foundSID != dirName {
+		t.Fatalf("session_id mismatch: events.jsonl session_id=%q but directory name=%q", foundSID, dirName)
+	}
+}
+
+// TestRun_SessionJSON_HasFinalStatus reads <state-dir>/<session-id>/session.json
+// after the harness exits and asserts (i) status is one of
+// "completed"/"interrupted"/"failed", (ii) exit_code matches the
+// harness's actual exit code, and (iii) config.base_url,
+// config.model, config.workspace, config.permission match the test
+// inputs. The test runs the unreachable-endpoint path (status=failed,
+// exit_code=3) AND the SIGTERM path (status=interrupted, exit_code=6)
+// as subtests.
+func TestRun_SessionJSON_HasFinalStatus(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires spawned harness process; skipped in -short mode")
+	}
+
+	binPath, err := filepath.Abs(filepath.Join("..", "..", "bin", "simple-harness-runtime"))
+	if err != nil {
+		t.Fatalf("abs binPath: %v", err)
+	}
+	if _, err := os.Stat(binPath); err != nil {
+		t.Fatalf("rebuilt binary missing at %s: %v", binPath, err)
+	}
+
+	promptDir := t.TempDir()
+	promptFile := filepath.Join(promptDir, "prompt.md")
+	if err := os.WriteFile(promptFile, []byte("hi"), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+
+	runHarness := func(extraArgs ...string) (int, string) {
+		stateDir := t.TempDir()
+		workspace := t.TempDir()
+		args := []string{
+			"run",
+			"--base-url", "http://127.0.0.1:9",
+			"--model", "tg",
+			"--workspace", workspace,
+			"--permission", "read_only",
+			"--prompt-file", promptFile,
+			"--output", "jsonl",
+			"--state-dir", stateDir,
+		}
+		args = append(args, extraArgs...)
+		cmd := exec.Command(binPath, args...)
+		cmd.Stdout, _ = os.Create(os.DevNull)
+		cmd.Stderr, _ = os.Create(os.DevNull)
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start harness: %v", err)
+		}
+		waitErr := cmd.Wait()
+		exitCode := -1
+		if exitErr, ok := waitErr.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else if waitErr == nil {
+			exitCode = 0
+		}
+		return exitCode, stateDir
+	}
+
+	readSession := func(t *testing.T, stateDir string) (sessionJSONContents []byte, sessionFile string) {
+		entries, err := os.ReadDir(stateDir)
+		if err != nil {
+			t.Fatalf("readdir %s: %v", stateDir, err)
+		}
+		var sessionDir string
+		for _, e := range entries {
+			if e.IsDir() {
+				sessionDir = filepath.Join(stateDir, e.Name())
+				break
+			}
+		}
+		if sessionDir == "" {
+			t.Fatalf("no session directory under %s", stateDir)
+		}
+		sessionFile = filepath.Join(sessionDir, "session.json")
+		sessionJSONContents, err = os.ReadFile(sessionFile)
+		if err != nil {
+			t.Fatalf("read %s: %v", sessionFile, err)
+		}
+		return
+	}
+
+	t.Run("failed_exit_3", func(t *testing.T) {
+		exitCode, stateDir := runHarness()
+		if exitCode != 3 {
+			t.Fatalf("harness exited %d; want 3 (model failure on unreachable endpoint)", exitCode)
+		}
+		contents, _ := readSession(t, stateDir)
+		var doc map[string]any
+		if err := json.Unmarshal(contents, &doc); err != nil {
+			t.Fatalf("session.json parse: %v; raw=%s", err, contents)
+		}
+		status, _ := doc["status"].(string)
+		switch status {
+		case "completed", "interrupted", "failed":
+			// accepted
+		default:
+			t.Errorf("session.json status=%q; want one of completed/interrupted/failed", status)
+		}
+		if got, _ := doc["exit_code"].(float64); int(got) != 3 {
+			t.Errorf("session.json exit_code=%v; want 3", doc["exit_code"])
+		}
+		cfg, _ := doc["config"].(map[string]any)
+		if cfg == nil {
+			t.Fatalf("session.json config missing; raw=%s", contents)
+		}
+		if cfg["base_url"] != "http://127.0.0.1:9" {
+			t.Errorf("session.json config.base_url=%v; want http://127.0.0.1:9", cfg["base_url"])
+		}
+		if cfg["model"] != "tg" {
+			t.Errorf("session.json config.model=%v; want tg", cfg["model"])
+		}
+		if cfg["permission"] != "READ_ONLY" {
+			t.Errorf("session.json config.permission=%v; want READ_ONLY", cfg["permission"])
+		}
+	})
+
+	t.Run("interrupted_exit_6", func(t *testing.T) {
+		// The SIGTERM path: against http://10.255.255.1:9
+		// (connect-hang target) and SIGTERM after 2s.
+		stateDir := t.TempDir()
+		workspace := t.TempDir()
+		cmd := exec.Command(binPath,
+			"run",
+			"--base-url", "http://10.255.255.1:9",
+			"--model", "tg",
+			"--workspace", workspace,
+			"--permission", "read_only",
+			"--prompt-file", promptFile,
+			"--output", "jsonl",
+			"--state-dir", stateDir,
+		)
+		cmd.Stdout, _ = os.Create(os.DevNull)
+		cmd.Stderr, _ = os.Create(os.DevNull)
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start harness: %v", err)
+		}
+		time.Sleep(2 * time.Second)
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		waitErr := cmd.Wait()
+		exitCode := -1
+		if exitErr, ok := waitErr.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		}
+		if exitCode != 6 {
+			t.Fatalf("harness exited %d; want 6 (interrupted)", exitCode)
+		}
+		contents, _ := readSession(t, stateDir)
+		var doc map[string]any
+		if err := json.Unmarshal(contents, &doc); err != nil {
+			t.Fatalf("session.json parse: %v; raw=%s", err, contents)
+		}
+		if doc["status"] != "interrupted" {
+			t.Errorf("session.json status=%v; want interrupted", doc["status"])
+		}
+		if got, _ := doc["exit_code"].(float64); int(got) != 6 {
+			t.Errorf("session.json exit_code=%v; want 6", doc["exit_code"])
+		}
+	})
+}
+
+// TestRun_SessionJSON_NoSecrets pins SCOPE §30 secret redaction:
+// the literal api_key value must not appear in session.json,
+// events.jsonl, or messages.jsonl. The test invokes the
+// subprocess with SIMPLE_HARNESS_API_KEY=sk-leak-test-XXX set
+// in the env, then greps the three files for the marker.
+func TestRun_SessionJSON_NoSecrets(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires spawned harness process; skipped in -short mode")
+	}
+
+	binPath, err := filepath.Abs(filepath.Join("..", "..", "bin", "simple-harness-runtime"))
+	if err != nil {
+		t.Fatalf("abs binPath: %v", err)
+	}
+	if _, err := os.Stat(binPath); err != nil {
+		t.Fatalf("rebuilt binary missing at %s: %v", binPath, err)
+	}
+
+	const marker = "sk-leak-test-handoff030-XXX"
+	stateDir := t.TempDir()
+	workspace := t.TempDir()
+	promptDir := t.TempDir()
+	promptFile := filepath.Join(promptDir, "prompt.md")
+	if err := os.WriteFile(promptFile, []byte("hi"), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+
+	cmd := exec.Command(binPath,
+		"run",
+		"--base-url", "http://127.0.0.1:9",
+		"--model", "tg",
+		"--workspace", workspace,
+		"--permission", "read_only",
+		"--prompt-file", promptFile,
+		"--output", "jsonl",
+		"--state-dir", stateDir,
+	)
+	cmd.Env = append(os.Environ(), "SIMPLE_HARNESS_API_KEY="+marker)
+	cmd.Stdout, _ = os.Create(os.DevNull)
+	cmd.Stderr, _ = os.Create(os.DevNull)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start harness: %v", err)
+	}
+	_ = cmd.Wait()
+
+	// Find session directory and assert marker absent from
+	// all three files.
+	entries, err := os.ReadDir(stateDir)
+	if err != nil {
+		t.Fatalf("readdir %s: %v", stateDir, err)
+	}
+	var sessionDir string
+	for _, e := range entries {
+		if e.IsDir() {
+			sessionDir = filepath.Join(stateDir, e.Name())
+			break
+		}
+	}
+	if sessionDir == "" {
+		t.Fatalf("no session directory under %s", stateDir)
+	}
+	for _, fname := range []string{"session.json", "events.jsonl", "messages.jsonl"} {
+		path := filepath.Join(sessionDir, fname)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if strings.Contains(string(data), marker) {
+			t.Errorf("marker %q leaked into %s", marker, path)
+		}
+	}
+}
+
+// TestRun_InterruptedRun_Diagnosable pins GOAL §5 reviewer
+// duty #2: an interrupted run's session record actually
+// supports diagnosis (status marks interruption; events are
+// flushed). The test runs the TG1 SIGTERM path against the
+// connect-hang target http://10.255.255.1:9, sends SIGTERM
+// after 2s, then reads session.json + events.jsonl and asserts
+// (i) session.json status=interrupted, exit_code=6,
+// (ii) events.jsonl contains an `interrupted` event.
+func TestRun_InterruptedRun_Diagnosable(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires spawned harness process; skipped in -short mode")
+	}
+
+	binPath, err := filepath.Abs(filepath.Join("..", "..", "bin", "simple-harness-runtime"))
+	if err != nil {
+		t.Fatalf("abs binPath: %v", err)
+	}
+	if _, err := os.Stat(binPath); err != nil {
+		t.Fatalf("rebuilt binary missing at %s: %v", binPath, err)
+	}
+
+	stateDir := t.TempDir()
+	workspace := t.TempDir()
+	promptDir := t.TempDir()
+	promptFile := filepath.Join(promptDir, "prompt.md")
+	if err := os.WriteFile(promptFile, []byte("hi"), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+
+	cmd := exec.Command(binPath,
+		"run",
+		"--base-url", "http://10.255.255.1:9",
+		"--model", "tg",
+		"--workspace", workspace,
+		"--permission", "read_only",
+		"--prompt-file", promptFile,
+		"--output", "jsonl",
+		"--state-dir", stateDir,
+	)
+	cmd.Stdout, _ = os.Create(os.DevNull)
+	cmd.Stderr, _ = os.Create(os.DevNull)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start harness: %v", err)
+	}
+	time.Sleep(2 * time.Second)
+	_ = cmd.Process.Signal(syscall.SIGTERM)
+	waitErr := cmd.Wait()
+	if exitErr, ok := waitErr.(*exec.ExitError); !ok || exitErr.ExitCode() != 6 {
+		t.Fatalf("harness exit: %v; want exit 6 (interrupted)", waitErr)
+	}
+
+	entries, err := os.ReadDir(stateDir)
+	if err != nil {
+		t.Fatalf("readdir %s: %v", stateDir, err)
+	}
+	var sessionDir string
+	for _, e := range entries {
+		if e.IsDir() {
+			sessionDir = filepath.Join(stateDir, e.Name())
+			break
+		}
+	}
+	if sessionDir == "" {
+		t.Fatalf("no session directory under %s", stateDir)
+	}
+
+	// session.json must have status=interrupted, exit_code=6.
+	sessionPath := filepath.Join(sessionDir, "session.json")
+	sdata, err := os.ReadFile(sessionPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", sessionPath, err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(sdata, &doc); err != nil {
+		t.Fatalf("session.json parse: %v; raw=%s", err, sdata)
+	}
+	if doc["status"] != "interrupted" {
+		t.Errorf("session.json status=%v; want interrupted", doc["status"])
+	}
+	if got, _ := doc["exit_code"].(float64); int(got) != 6 {
+		t.Errorf("session.json exit_code=%v; want 6", doc["exit_code"])
+	}
+
+	// events.jsonl must contain an `interrupted` event.
+	eventsPath := filepath.Join(sessionDir, "events.jsonl")
+	edata, err := os.ReadFile(eventsPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", eventsPath, err)
+	}
+	foundInterrupted := false
+	for _, line := range strings.Split(strings.TrimSpace(string(edata)), "\n") {
+		if line == "" {
+			continue
+		}
+		var ev event.Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			continue
+		}
+		if ev.Event == "interrupted" {
+			foundInterrupted = true
+			break
+		}
+	}
+	if !foundInterrupted {
+		t.Errorf("events.jsonl missing `interrupted` event; raw=%s", edata)
+	}
+}
+
+// TestInteractive_SessionJSON_PersistsAcrossExercises the
+// interactive half of Run 008's persistence: driveInteractive
+// with "hello\n/exit\n" produces a session.json with
+// status=completed, exit_code=0 AND a messages.jsonl with at
+// least 2 lines (user + assistant).
+func TestInteractive_SessionJSON_PersistsAcrossExchanges(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires spawned harness process; skipped in -short mode")
+	}
+
+	binPath, err := filepath.Abs(filepath.Join("..", "..", "bin", "simple-harness-runtime"))
+	if err != nil {
+		t.Fatalf("abs binPath: %v", err)
+	}
+	if _, err := os.Stat(binPath); err != nil {
+		t.Fatalf("rebuilt binary missing at %s: %v", binPath, err)
+	}
+
+	stateDir := t.TempDir()
+	workspace := t.TempDir()
+
+	// Inject a mock server via SIMPLE_HARNESS_BASE_URL so the
+	// harness has a reachable endpoint.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"hi back"}}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+	t.Setenv("SIMPLE_HARNESS_BASE_URL", srv.URL+"/v1")
+
+	cmd := exec.Command(binPath,
+		"--workspace", workspace,
+		"--state-dir", stateDir,
+	)
+	cmd.Stdin = strings.NewReader("hello\n/exit\n")
+	cmd.Stdout, _ = os.Create(os.DevNull)
+	cmd.Stderr, _ = os.Create(os.DevNull)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start harness: %v", err)
+	}
+	waitErr := cmd.Wait()
+	if exitErr, ok := waitErr.(*exec.ExitError); ok && exitErr.ExitCode() != 0 {
+		t.Fatalf("harness exit: %v; want exit 0", waitErr)
+	}
+
+	entries, err := os.ReadDir(stateDir)
+	if err != nil {
+		t.Fatalf("readdir %s: %v", stateDir, err)
+	}
+	var sessionDir string
+	for _, e := range entries {
+		if e.IsDir() {
+			sessionDir = filepath.Join(stateDir, e.Name())
+			break
+		}
+	}
+	if sessionDir == "" {
+		t.Fatalf("no session directory under %s", stateDir)
+	}
+
+	// session.json has status=completed, exit_code=0.
+	sessionPath := filepath.Join(sessionDir, "session.json")
+	sdata, err := os.ReadFile(sessionPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", sessionPath, err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(sdata, &doc); err != nil {
+		t.Fatalf("session.json parse: %v; raw=%s", err, sdata)
+	}
+	if doc["status"] != "completed" {
+		t.Errorf("session.json status=%v; want completed", doc["status"])
+	}
+	if got, _ := doc["exit_code"].(float64); int(got) != 0 {
+		t.Errorf("session.json exit_code=%v; want 0", doc["exit_code"])
+	}
+
+	// messages.jsonl has at least 2 lines (user + assistant).
+	messagesPath := filepath.Join(sessionDir, "messages.jsonl")
+	mdata, err := os.ReadFile(messagesPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", messagesPath, err)
+	}
+	lines := strings.Split(strings.TrimRight(string(mdata), "\n"), "\n")
+	if len(lines) < 2 {
+		t.Errorf("messages.jsonl has %d lines; want >= 2; raw=%s", len(lines), mdata)
+	}
+}
+
+// TestRun_Version_AdvancesToHandoff030 pins the Version literal
+// advance for handoff 030. The test calls run() with --version
+// and asserts stdout contains the new literal.
+func TestRun_Version_AdvancesToHandoff030(t *testing.T) {
+	code, out, errOut := driveRun(t, "--version")
+	if code != 0 {
+		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
+	}
+	want := "simple-harness 0.1.0-dev (Run 008, handoff 030)"
+	if !strings.Contains(out, want) {
+		t.Fatalf("run --version stdout missing %q; got %q", want, out)
+	}
+}
+
 // driveInteractiveWithSeams is the test helper for handoff 028's
 // interactive-interrupt tests. It mirrors driveInteractive's stdin /
 // stdout / stderr redirect, but it ALSO (a) accepts a caller-supplied
 // signal channel (wired into runInteractive's seams variadic so the
 // test can drive the signal handler deterministically without
-// touching the real process-group signal table) and (b) returns the
+// touching the real process-group signal table), (b) returns the
 // longer-lived stderr body in addition to the captured stdout so the
 // tests can assert on the "cancel requested" / "interrupted"
-// diagnostic lines.
+// diagnostic lines, and (c) returns the stateDir the test injected
+// so callers can use findSidecarPath(t, stateDir) per Run 008.
 //
 // The helper redirects the global os.Stdout / os.Stderr (the run()
 // call path goes through these — the runInteractive signature
@@ -975,7 +1617,7 @@ func TestRun_SIGTERM_Headless_EmitsInterruptedAndExits6(t *testing.T) {
 // runInteractive(os.Stdin, os.Stdout, os.Stderr) on the bare-invocation
 // path; for the test we use the seams variadic to bypass that and
 // pass our own pipes, so the global redirects are belt-and-braces).
-func driveInteractiveWithSeams(t *testing.T, stdinInput string, sigCh chan<- os.Signal, workspace string) (int, string, string) {
+func driveInteractiveWithSeams(t *testing.T, stdinInput string, sigCh chan<- os.Signal, workspace string) (int, string, string, string) {
 	t.Helper()
 
 	origStdin := os.Stdin
@@ -1009,46 +1651,52 @@ func driveInteractiveWithSeams(t *testing.T, stdinInput string, sigCh chan<- os.
 	}
 	os.Stderr = errW
 
+	stateDir := t.TempDir()
+
 	code := runInteractive(inR, outW, errW, sigCh,
-		interactiveOpts{workspace: workspace})
+		interactiveOpts{workspace: workspace, stateDir: stateDir})
 
 	_ = outW.Close()
 	_ = errW.Close()
 	var outBuf, errBuf bytes.Buffer
 	_, _ = io.Copy(&outBuf, outR)
 	_, _ = io.Copy(&errBuf, errR)
-	return code, outBuf.String(), errBuf.String()
+	return code, outBuf.String(), errBuf.String(), stateDir
 }
 
 // findSidecarPath returns the absolute path of the events.jsonl
-// sidecar the harness created under workspace/sessions/. The session
-// id is dynamic (UUIDv7 generated inside runInteractive), so the
-// helper lists the directory and returns the only events.jsonl entry.
-// The workspace is expected to contain exactly one session at the
-// moment the helper is called (the test runs only one
-// runInteractive call).
-func findSidecarPath(t *testing.T, workspace string) string {
+// file the harness created under stateDir/<session-id>/. The
+// session id is dynamic (UUIDv7 generated inside runInteractive
+// or runModeExecute), so the helper lists the directory and
+// returns the only events.jsonl entry. stateDir is expected to
+// contain exactly one session at the moment the helper is
+// called.
+//
+// Run 008 (handoff 030) moves the events.jsonl location from
+// <workspace>/sessions/<session-id>/events.jsonl to
+// <stateDir>/<session-id>/events.jsonl. The helper signature
+// changes accordingly (stateDir replaces workspace).
+func findSidecarPath(t *testing.T, stateDir string) string {
 	t.Helper()
-	sessionsDir := filepath.Join(workspace, "sessions")
-	entries, err := os.ReadDir(sessionsDir)
+	entries, err := os.ReadDir(stateDir)
 	if err != nil {
-		t.Fatalf("readdir %s: %v", sessionsDir, err)
+		t.Fatalf("readdir %s: %v", stateDir, err)
 	}
 	var jsonlPath string
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
-		candidate := filepath.Join(sessionsDir, e.Name(), "events.jsonl")
+		candidate := filepath.Join(stateDir, e.Name(), "events.jsonl")
 		if _, err := os.Stat(candidate); err == nil {
 			if jsonlPath != "" {
-				t.Fatalf("workspace %s has multiple events.jsonl sidecars; cannot determine the active session", workspace)
+				t.Fatalf("state-dir %s has multiple events.jsonl sidecars; cannot determine the active session", stateDir)
 			}
 			jsonlPath = candidate
 		}
 	}
 	if jsonlPath == "" {
-		t.Fatalf("no events.jsonl sidecar found under %s", sessionsDir)
+		t.Fatalf("no events.jsonl sidecar found under %s", stateDir)
 	}
 	return jsonlPath
 }
@@ -1137,6 +1785,7 @@ func TestInteractiveMode_FirstCtrlC_CancelsActiveRequestAndReturnsToPrompt(t *te
 
 	sigCh := make(chan os.Signal, 1)
 	workspace := t.TempDir()
+	stateDir := t.TempDir()
 
 	inR, inW, err := os.Pipe()
 	if err != nil {
@@ -1175,7 +1824,7 @@ func TestInteractiveMode_FirstCtrlC_CancelsActiveRequestAndReturnsToPrompt(t *te
 
 	go func() {
 		code := runInteractive(inR, outW, errW, sigCh,
-			interactiveOpts{workspace: workspace})
+			interactiveOpts{workspace: workspace, stateDir: stateDir})
 		doneCh <- code
 	}()
 
@@ -1212,7 +1861,7 @@ func TestInteractiveMode_FirstCtrlC_CancelsActiveRequestAndReturnsToPrompt(t *te
 	// Sidecar must NOT contain an `interrupted` event (first-press
 	// only cancels; the event is reserved for the second-press
 	// terminate path).
-	sidecar := findSidecarPath(t, workspace)
+	sidecar := findSidecarPath(t, stateDir)
 	if sidecarHasEvent(t, sidecar, "interrupted", "") {
 		data, _ := os.ReadFile(sidecar)
 		t.Fatalf("first-press Ctrl+C: sidecar contains `interrupted` event (first-press is cancel-only); sidecar=%s", data)
@@ -1240,6 +1889,7 @@ func TestInteractiveMode_SecondCtrlC_TerminatesWithExit6(t *testing.T) {
 
 	sigCh := make(chan os.Signal, 1)
 	workspace := t.TempDir()
+	stateDir := t.TempDir()
 
 	inR, inW, err := os.Pipe()
 	if err != nil {
@@ -1276,7 +1926,7 @@ func TestInteractiveMode_SecondCtrlC_TerminatesWithExit6(t *testing.T) {
 
 	go func() {
 		code := runInteractive(inR, outW, errW, sigCh,
-			interactiveOpts{workspace: workspace})
+			interactiveOpts{workspace: workspace, stateDir: stateDir})
 		doneCh <- code
 	}()
 
@@ -1311,7 +1961,7 @@ func TestInteractiveMode_SecondCtrlC_TerminatesWithExit6(t *testing.T) {
 
 	// Sidecar must contain the `interrupted` event with the active
 	// session_id (the second-press path emits it before returning 6).
-	sidecar := findSidecarPath(t, workspace)
+	sidecar := findSidecarPath(t, stateDir)
 	sid := sidecarSessionID(t, sidecar)
 	if sid == "" {
 		data, _ := os.ReadFile(sidecar)
@@ -1337,14 +1987,14 @@ func TestInteractiveMode_ExitCommand_StillExits0(t *testing.T) {
 	sigCh := make(chan os.Signal, 1)
 	workspace := t.TempDir()
 
-	code, _, _ := driveInteractiveWithSeams(t, "/exit\n", sigCh, workspace)
+	code, _, _, stateDir := driveInteractiveWithSeams(t, "/exit\n", sigCh, workspace)
 	if code != 0 {
 		t.Fatalf("runInteractive(/exit) returned %d, want 0 (clean exit)", code)
 	}
 
 	// No `interrupted` event MAY appear — /exit is the clean path,
 	// not the interrupt path.
-	sidecar := findSidecarPath(t, workspace)
+	sidecar := findSidecarPath(t, stateDir)
 	if sidecarHasEvent(t, sidecar, "interrupted", "") {
 		data, _ := os.ReadFile(sidecar)
 		t.Fatalf("`/exit` emitted `interrupted` event (should be reserved for the second-press terminate path); sidecar=%s",

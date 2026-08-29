@@ -8,20 +8,24 @@
 // a banner showing model / endpoint / workspace / permission /
 // session_id, reads prompts from stdin one at a time, streams the
 // model's response to stdout, emits the JSONL sidecar to
-// <workspace>/sessions/<session-id>/events.jsonl, and honours
+// <state-dir>/<session-id>/events.jsonl, and honours
 // /exit, /quit, /help, /version built-in commands plus SIGINT/
 // SIGTERM as exit-6 interruptions per SCOPE §§25, 26, 28.
 //
-// No tools, no permission enforcement, no multi-turn, no sessions
-// persistence beyond the events.jsonl sidecar. The headless
-// `simple-harness run` subcommand is the Run 006 deliverable
-// (handoff 024 lands the run-execution path + JSONL stdout +
-// final TGs). The headless signal/interrupt semantics are the
-// Run 007 deliverable (handoff 025 lands SIGINT/SIGTERM ->
-// cancellation -> interrupted event -> exit 6 per SCOPE §26;
-// handoff 028 lands the interactive first/second-press Ctrl+C
-// behavior + `/exit` command + repeated-Ctrl+C documented
-// termination per SCOPE §§25, 28). Each remaining gap is a
+// Run 008 (handoff 030) introduces session persistence: every
+// execution (headless `run` or interactive) writes a session.json
+// (identity, config snapshot, resolved permission, timestamps,
+// final status/exit) + messages.jsonl (per-message log) under
+// <state-dir>/<session-id>/, where --state-dir defaults to
+// ~/.simple-harness/sessions. The events.jsonl file moves from
+// <workspace>/sessions/<session-id>/events.jsonl to
+// <state-dir>/<session-id>/events.jsonl — the canonical session
+// record location per SCOPE §17.
+//
+// No semantic memory, no embeddings, no tool-output caching. The
+// messages.jsonl is the SCOPE §17 "execution history" record only.
+// Inspection subcommands (`simple-harness sessions list` /
+// `sessions show`) land on handoff 031. Each remaining gap is a
 // future Run per the architecture.
 //
 // Architectural boundary: this is a Simple Harness component. It does not
@@ -52,6 +56,7 @@ import (
 	"github.com/svend-blip/simple-harness/internal/loop"
 	"github.com/svend-blip/simple-harness/internal/model"
 	"github.com/svend-blip/simple-harness/internal/perm"
+	"github.com/svend-blip/simple-harness/internal/session"
 	"github.com/svend-blip/simple-harness/internal/tools"
 	"github.com/svend-blip/simple-harness/internal/tools/builtins"
 )
@@ -61,7 +66,7 @@ import (
 // without shelling out or reading the binary itself. The format is a
 // single line, project-name first, so an external parser does not need to
 // interpret it to extract the version.
-const Version = "simple-harness 0.1.0-dev (Run 007, handoff 029)"
+const Version = "simple-harness 0.1.0-dev (Run 008, handoff 030)"
 
 // globalRegistry is the tool registry the `simple-harness tools`
 // subcommand lists. Handoff 013 leaves it EMPTY; Run 014 / Run 015 will
@@ -94,6 +99,10 @@ Flags:
   --version             print the runtime version and exit 0
   --help                print this usage summary and exit 0
   --workspace <dir>     workspace directory (interactive mode; default: cwd)
+  --state-dir <dir>     state directory for session persistence
+                        (default: ~/.simple-harness/sessions); see
+                        'simple-harness run --help' for the run-mode
+                        flag of the same name. SCOPE §17.
   --permission <mode>   permission mode (one of read_only,
                         workspace_write, full_access; default: read_only).
                         Global flag — applies to every subcommand and the
@@ -134,6 +143,7 @@ See docs/ARCHITECTURE.md §"Distribution shape" for the full contract.
 // per SCOPE §12.
 type interactiveOpts struct {
 	workspace string
+	stateDir  string // Run 008: --state-dir; defaults to ~/.simple-harness/sessions
 }
 
 // run is the testable inner entry point. It returns the process
@@ -188,6 +198,7 @@ func run(args []string) int {
 	// inner flag parser would reject it via TG4 (exit 1), which is
 	// also acceptable per SCOPE §28 generic-failure.
 	workspace := fs.String("workspace", "", "workspace directory (interactive mode only; defaults to cwd)")
+	stateDir := fs.String("state-dir", "", "state directory for session persistence (defaults to ~/.simple-harness/sessions)")
 
 	if err := fs.Parse(args); err != nil {
 		// flag.ContinueOnError already printed the parse error to
@@ -195,6 +206,15 @@ func run(args []string) int {
 		// unparseable flag, including unknown flags. This is the
 		// behaviour TG4 measures via the wrapper.
 		return 1
+	}
+
+	if *stateDir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "config error: cannot determine home directory: %v\n", err)
+			return 2
+		}
+		*stateDir = filepath.Join(home, ".simple-harness", "sessions")
 	}
 
 	switch {
@@ -211,6 +231,7 @@ func run(args []string) int {
 	return runInteractive(os.Stdin, os.Stdout, os.Stderr,
 		interactiveOpts{
 			workspace: *workspace,
+			stateDir:  *stateDir,
 		})
 }
 
@@ -359,9 +380,11 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, seams ...any) int
 	// directionality is part of the type identity at the dynamic-
 	// type level even though it is assignable across directions.
 	var (
-		sigCh       <-chan os.Signal
-		o           interactiveOpts
-		customSigCh bool
+		sigCh             <-chan os.Signal
+		o                 interactiveOpts
+		customSigCh       bool
+		cancelPressed     atomic.Bool
+		interruptRequested atomic.Bool
 	)
 	for _, s := range seams {
 		switch v := s.(type) {
@@ -410,8 +433,12 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, seams ...any) int
 		return 1
 	}
 
+	// Normalize the BaseURL — the config carries "/v1" (SCOPE §29),
+	// the model client appends "/v1/chat/completions" itself.
+	normalizedBase := loop.NormalizeBaseURL(cfg.Model.BaseURL)
+
 	// Open the sidecar events.jsonl.
-	sidecarDir := filepath.Join(o.workspace, "sessions", sessionID)
+	sidecarDir := filepath.Join(o.stateDir, sessionID)
 	if err := os.MkdirAll(sidecarDir, 0o755); err != nil {
 		fmt.Fprintf(stderr, "internal error: cannot create %s: %v\n", sidecarDir, err)
 		return 1
@@ -426,9 +453,37 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, seams ...any) int
 
 	em := event.NewEmitter(sidecar, sessionID)
 
-	// Normalize the BaseURL — the config carries "/v1" (SCOPE §29),
-	// the model client appends "/v1/chat/completions" itself.
-	normalizedBase := loop.NormalizeBaseURL(cfg.Model.BaseURL)
+	// Run 008 (handoff 030): open a session.Writer to persist
+	// session.json (identity + config snapshot + final status/exit)
+	// and messages.jsonl (one JSON object per appended message)
+	// under the same <state-dir>/<session-id>/ directory.
+	sessWriter, err := session.NewWriter(o.stateDir, sessionID, session.Config{
+		BaseURL:    normalizedBase,
+		Model:      cfg.Model.Model,
+		Workspace:  o.workspace,
+		Permission: permissionStr,
+		OutputMode: "", // interactive mode does not use --output (always streams to sidecar)
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "internal error: cannot open session writer: %v\n", err)
+		return 1
+	}
+	defer func() {
+		var finalStatus session.Status
+		var finalCode int
+		switch {
+		case interruptRequested.Load():
+			finalStatus = session.StatusInterrupted
+			finalCode = 6
+		case cancelPressed.Load():
+			finalStatus = session.StatusFailed
+			finalCode = 1
+		default:
+			finalStatus = session.StatusCompleted
+			finalCode = 0
+		}
+		_ = sessWriter.Write(finalStatus, finalCode)
+	}()
 
 	// Banner to stderr so stdout stays clean for the streamed text.
 	fmt.Fprintf(stderr, "session_id: %s\n", sessionID)
@@ -469,8 +524,6 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, seams ...any) int
 	// wait at the bottom of the loop); the main loop currently
 	// terminates via the interruptRequested flag check at the top.
 	interruptDone := make(chan struct{}, 1)
-	var cancelPressed atomic.Bool
-	var interruptRequested atomic.Bool
 	go func() {
 		for range sigCh {
 		if !cancelPressed.Load() {
@@ -607,7 +660,12 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, seams ...any) int
 		prompt := accum.String()
 		accum.Reset()
 
-		if _, err := r.RunOne(runCtx, prompt); err != nil {
+		// Run 008 (handoff 030): record the user message in
+		// messages.jsonl before the model call.
+		_ = sessWriter.AppendMessage("user", prompt)
+
+		response, err := r.RunOne(runCtx, prompt)
+		if err != nil {
 			var me *model.ModelError
 			if errors.As(err, &me) {
 				switch me.Kind {
@@ -642,6 +700,9 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, seams ...any) int
 		// dispatch. The second-press flag (interruptRequested) is
 		// sticky and is checked at the top of the loop.
 		cancelPressed.Store(false)
+		// Run 008 (handoff 030): record the assistant response in
+		// messages.jsonl after a successful turn.
+		_ = sessWriter.AppendMessage("assistant", response)
 		fmt.Fprintln(stdout) // newline after the streamed response
 	}
 }
