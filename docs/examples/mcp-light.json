@@ -1,0 +1,24 @@
+{
+  "mcp_servers": [
+    {
+      "name": "mcp-light",
+      "transport": "http",
+      "endpoint": "http://127.0.0.1:9135/mcp",
+      "permission": "read_only",
+      "allowlist": [
+        "get_governance_index",
+        "get_governance_file",
+        "get_frontend_governance",
+        "get_required_frontend_impact_block",
+        "search_context",
+        "search_verdicts",
+        "get_flow",
+        "get_role",
+        "get_flow_steps",
+        "get_execution_config",
+        "get_implementation_mode",
+        "get_patcher_usage"
+      ]
+    }
+  ]
+}
