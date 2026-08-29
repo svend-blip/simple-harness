@@ -12,18 +12,18 @@ import (
 	"github.com/svend-blip/simple-harness/internal/tools"
 )
 
-// TestRegisterBuiltins_RegistersAllFiveTools: a fresh registry +
-// RegisterBuiltins lists all five V1 builtin tools (four read-only
-// + the write_file mutation tool), sorted, before any pipeline
-// integration. This is the load-bearing assertion for partial TG1
-// at the registrar level (TG1 closes when handoff 018 adds
-// apply_patch).
-func TestRegisterBuiltins_RegistersAllFiveTools(t *testing.T) {
+// TestRegisterBuiltins_RegistersAllSixTools: a fresh registry +
+// RegisterBuiltins lists all six V1 builtin tools (four read-only
+// + two mutation tools), sorted, before any pipeline integration.
+// This is the load-bearing assertion for full TG1 at the
+// registrar level. Handoff 017 added write_file; handoff 018 adds
+// apply_patch and lands full TG1.
+func TestRegisterBuiltins_RegistersAllSixTools(t *testing.T) {
 	r := tools.NewRegistry()
 	RegisterBuiltins(r)
 
 	names := r.Names()
-	want := []string{"grep", "list_directory", "read_file", "search_files", "write_file"}
+	want := []string{"apply_patch", "grep", "list_directory", "read_file", "search_files", "write_file"}
 	if len(names) != len(want) {
 		t.Fatalf("len(names) = %d, want %d (got %v)", len(names), len(want), names)
 	}
@@ -139,6 +139,29 @@ func TestRegisterBuiltins_MetaAndSchema(t *testing.T) {
 	if string(ws.Properties["content"]) != string(tools.TypeString) {
 		t.Fatalf("write_file content type = %q, want %q",
 			ws.Properties["content"], tools.TypeString)
+	}
+
+	ap, ok := r.Get("apply_patch")
+	if !ok || ap == nil {
+		t.Fatalf("Get(apply_patch) = (%v, %v), want (non-nil, true)", ap, ok)
+	}
+	if ap.Meta().Name != "apply_patch" {
+		t.Fatalf("apply_patch Meta().Name = %q, want %q", ap.Meta().Name, "apply_patch")
+	}
+	if ap.Meta().Description == "" {
+		t.Fatalf("apply_patch Meta().Description is empty")
+	}
+	aps := ap.Schema()
+	if len(aps.Required) != 2 || aps.Required[0] != "path" || aps.Required[1] != "patch" {
+		t.Fatalf("apply_patch Schema.Required = %v, want [path patch]", aps.Required)
+	}
+	if string(aps.Properties["path"]) != string(tools.TypeString) {
+		t.Fatalf("apply_patch path type = %q, want %q",
+			aps.Properties["path"], tools.TypeString)
+	}
+	if string(aps.Properties["patch"]) != string(tools.TypeString) {
+		t.Fatalf("apply_patch patch type = %q, want %q",
+			aps.Properties["patch"], tools.TypeString)
 	}
 }
 
@@ -719,6 +742,159 @@ func TestIntegration_PermissionDenial_WRITE_FILE_FULL_ACCESS_Escape(t *testing.T
 	call := tools.Call{
 		Name:      "write_file",
 		Arguments: map[string]any{"path": "../escape.txt", "content": "should fail at path stage"},
+	}
+	res := r.Dispatch(context.Background(), call, ws, perm.NewPolicy(perm.FULL_ACCESS), perm.Authorize)
+	if res.Status != "error" {
+		t.Fatalf("Status = %q, want %q (path escape must be rejected by the path stage regardless of mode)",
+			res.Status, "error")
+	}
+	if res.Error == nil || res.Error.Kind != "path_escape" {
+		t.Fatalf("Error.Kind = %v, want %q (the path stage catches the escape before the policy stage runs)",
+			res.Error, "path_escape")
+	}
+}
+
+// TestIntegration_PermissionDenial_APPLY_PATCH_READ_ONLY: a
+// apply_patch call under READ_ONLY mode is rejected at the policy
+// stage. Dispatch returns Result with Status="error" and
+// Error.Kind="permission_denied". The policy decision fires AFTER
+// schema and path steps pass — the test verifies the load-bearing
+// SCOPE §13 "policy sits between path and execute" contract for
+// apply_patch (the second mutation tool). The target file's
+// content MUST be unchanged after the dispatch (Execute never ran).
+func TestIntegration_PermissionDenial_APPLY_PATCH_READ_ONLY(t *testing.T) {
+	ws := tempWorkspace(t)
+	full := filepath.Join(ws.Root(), "in-workspace.txt")
+	original := "alpha\nbeta\ngamma\n"
+	if err := os.WriteFile(full, []byte(original), 0o644); err != nil {
+		t.Fatalf("write in-workspace.txt: %v", err)
+	}
+
+	chdirWorkspace(t, ws)
+
+	r := tools.NewRegistry()
+	RegisterBuiltins(r)
+
+	patch := "--- a/in-workspace.txt\n+++ b/in-workspace.txt\n@@ -2 +2 @@\n-beta\n+BETA\n"
+	call := tools.Call{
+		Name:      "apply_patch",
+		Arguments: map[string]any{"path": "in-workspace.txt", "patch": patch},
+	}
+	res := r.Dispatch(context.Background(), call, ws, perm.NewPolicy(perm.READ_ONLY), perm.Authorize)
+	if res.Status != "error" {
+		t.Fatalf("Status = %q, want %q (READ_ONLY should deny the apply_patch call)", res.Status, "error")
+	}
+	if res.Error == nil || res.Error.Kind != "permission_denied" {
+		t.Fatalf("Error.Kind = %v, want %q (READ_ONLY must deny apply_patch at the policy stage)",
+			res.Error, "permission_denied")
+	}
+
+	onDisk, err := os.ReadFile(full)
+	if err != nil {
+		t.Fatalf("ReadFile %s: %v", full, err)
+	}
+	if string(onDisk) != original {
+		t.Fatalf("on-disk bytes = %q, want unchanged %q (Execute must not run when policy denies)",
+			string(onDisk), original)
+	}
+}
+
+// TestIntegration_PermissionDenial_APPLY_PATCH_WORKSPACE_WRITE_Escape:
+// a WORKSPACE_WRITE apply_patch call with an escape path is
+// rejected with Kind="path_escape" (the path stage catches the
+// escape BEFORE the policy stage runs). This pins SCOPE §12's
+// escape-rejection contract for apply_patch — the layered defense
+// fires at the path stage, not the policy stage.
+func TestIntegration_PermissionDenial_APPLY_PATCH_WORKSPACE_WRITE_Escape(t *testing.T) {
+	ws := tempWorkspace(t)
+
+	r := tools.NewRegistry()
+	RegisterBuiltins(r)
+
+	patch := "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+A\n"
+	call := tools.Call{
+		Name:      "apply_patch",
+		Arguments: map[string]any{"path": "../escape.txt", "patch": patch},
+	}
+	res := r.Dispatch(context.Background(), call, ws, perm.NewPolicy(perm.WORKSPACE_WRITE), perm.Authorize)
+	if res.Status != "error" {
+		t.Fatalf("Status = %q, want %q (path escape must be rejected)", res.Status, "error")
+	}
+	if res.Error == nil || res.Error.Kind != "path_escape" {
+		t.Fatalf("Error.Kind = %v, want %q (path_escape fires at the path stage, before policy)",
+			res.Error, "path_escape")
+	}
+}
+
+// TestIntegration_PermissionDenial_APPLY_PATCH_WORKSPACE_WRITE_Allowed:
+// a WORKSPACE_WRITE apply_patch call with an in-workspace path is
+// allowed; the apply_patch Execute runs and the file's bytes on
+// disk reflect the patch's expected changes. This pins SCOPE §12's
+// "permits workspace writes" contract for apply_patch.
+func TestIntegration_PermissionDenial_APPLY_PATCH_WORKSPACE_WRITE_Allowed(t *testing.T) {
+	ws := tempWorkspace(t)
+	full := filepath.Join(ws.Root(), "in-workspace.txt")
+	original := "alpha\nbeta\ngamma\n"
+	if err := os.WriteFile(full, []byte(original), 0o644); err != nil {
+		t.Fatalf("write in-workspace.txt: %v", err)
+	}
+
+	chdirWorkspace(t, ws)
+
+	r := tools.NewRegistry()
+	RegisterBuiltins(r)
+
+	patch := "--- a/in-workspace.txt\n+++ b/in-workspace.txt\n@@ -2 +2 @@\n-beta\n+BETA\n"
+	call := tools.Call{
+		Name:      "apply_patch",
+		Arguments: map[string]any{"path": "in-workspace.txt", "patch": patch},
+	}
+	res := r.Dispatch(context.Background(), call, ws, perm.NewPolicy(perm.WORKSPACE_WRITE), perm.Authorize)
+	if res.Status != "ok" {
+		t.Fatalf("Status = %q, want %q (error=%+v)", res.Status, "ok", res.Error)
+	}
+	apr, ok := res.Content.(ApplyPatchResult)
+	if !ok {
+		t.Fatalf("Content type = %T, want ApplyPatchResult", res.Content)
+	}
+	if apr.HunksApplied != 1 {
+		t.Fatalf("HunksApplied = %d, want 1", apr.HunksApplied)
+	}
+
+	onDisk, err := os.ReadFile(full)
+	if err != nil {
+		t.Fatalf("ReadFile %s: %v", full, err)
+	}
+	if string(onDisk) != "alpha\nBETA\ngamma\n" {
+		t.Fatalf("on-disk bytes = %q, want %q", string(onDisk), "alpha\nBETA\ngamma\n")
+	}
+}
+
+// TestIntegration_PermissionDenial_APPLY_PATCH_FULL_ACCESS_Escape:
+// a FULL_ACCESS apply_patch call with an escape path is rejected
+// by the path stage with Kind="path_escape" — NOT at the policy
+// stage. The path stage is a STRUCTURAL safety that fires
+// regardless of mode (it catches escape attempts before the
+// policy stage runs); the "FULL_ACCESS is the explicit opt-in"
+// contract (SCOPE §12 "never silent escalation") means
+// FULL_ACCESS does not impose the in-workspace policy
+// restriction that WORKSPACE_WRITE does, but it does not bypass
+// the path-stage safety either.
+//
+// This test pins the layered-defense contract: even under the
+// most-permissive policy mode, the path stage catches escape
+// attempts for apply_patch — the same standing behavior as
+// write_file.
+func TestIntegration_PermissionDenial_APPLY_PATCH_FULL_ACCESS_Escape(t *testing.T) {
+	ws := tempWorkspace(t)
+
+	r := tools.NewRegistry()
+	RegisterBuiltins(r)
+
+	patch := "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+A\n"
+	call := tools.Call{
+		Name:      "apply_patch",
+		Arguments: map[string]any{"path": "../escape.txt", "patch": patch},
 	}
 	res := r.Dispatch(context.Background(), call, ws, perm.NewPolicy(perm.FULL_ACCESS), perm.Authorize)
 	if res.Status != "error" {

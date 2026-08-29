@@ -34,9 +34,9 @@ import "github.com/svend-blip/simple-harness/internal/tools"
 // Run 003 (handoffs 014 + 015) registered all four V1 read-only
 // tools: grep, list_directory, read_file, search_files. Run 004
 // handoff 017 adds the first mutation tool: write_file (SCOPE §10
-// "Support direct file writing where appropriate"). The remaining
-// mutation tool (apply_patch) lands on Run 004 handoff 018 and is
-// NOT registered here.
+// "Support direct file writing where appropriate"). Run 004 handoff
+// 018 adds the second mutation tool: apply_patch (SCOPE §10
+// "deterministic patching for source modifications").
 //
 // RegisterBuiltins is idempotent only in the sense that calling it
 // twice on the same registry PANICS — Registry.Register panics on
@@ -46,6 +46,7 @@ import "github.com/svend-blip/simple-harness/internal/tools"
 // RegisterBuiltins exactly once.
 func RegisterBuiltins(r *tools.Registry) {
 	// Order: alphabetical by tool name.
+	r.Register(ApplyPatch{})
 	r.Register(Grep{})
 	r.Register(ListDirectory{})
 	r.Register(ReadFile{})

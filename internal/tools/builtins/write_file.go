@@ -32,9 +32,24 @@ import (
 	"github.com/svend-blip/simple-harness/internal/tools"
 )
 
-// writeFileMode is the file mode for newly created files (0644
-// minus the umask; conventional for source files). Documented as a
-// named constant so the seam choice is visible.
+// writeFileMode is the file mode for newly created AND atomically-
+// overwritten files. After os.Rename, os.Chmod applies this mode
+// UNCONDITIONALLY: os.Chmod calls chmod(2), which sets the literal
+// mode bits and ignores the process umask (umask only filters mode
+// bits at file-creation time via open(2)/creat(2)/mkdir(2); it has
+// no effect on chmod(2)). The on-disk mode is therefore always
+// writeFileMode (0o644) regardless of the process's umask.
+//
+// Conventional for source files: readable by owner + group,
+// writable by owner.
+//
+// Security implication: an operator who sets a restrictive umask
+// (e.g. 0o077, common in CI / security-hardened images) will still
+// get world-and-group-readable 0o644 files out of write_file. This
+// is the truthful contract — write_file's mode is independent of
+// the process's umask, by design (deterministic and predictable).
+// Operators who need 0o600 under a 0o077 umask should post-process
+// the file with chmod(..., 0o600) after write_file returns.
 const writeFileMode = 0o644
 
 // WriteFile is the write_file builtin tool. It writes a UTF-8 text
@@ -241,6 +256,16 @@ func (WriteFile) Execute(ctx context.Context, call tools.Call) (tools.Result, er
 	// file).
 	if err := os.Rename(tmpName, pathVal); err != nil {
 		return tools.Result{}, fmt.Errorf("write_file: rename %s -> %s: %w", tmpName, pathVal, err)
+	}
+
+	// Set the documented mode bits. os.Chmod calls chmod(2),
+	// which sets the literal mode bits unconditionally — the
+	// process umask is irrelevant to chmod(2). The on-disk mode
+	// is always writeFileMode (0o644) regardless of the process's
+	// umask. The constant is load-bearing here; the documented
+	// contract is verified by TestWriteFile_FileMode.
+	if err := os.Chmod(pathVal, writeFileMode); err != nil {
+		return tools.Result{}, fmt.Errorf("write_file: chmod %s: %w", pathVal, err)
 	}
 
 	return tools.Result{Status: "ok", Content: WriteFileResult{
