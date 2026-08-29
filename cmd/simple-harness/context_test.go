@@ -359,3 +359,304 @@ func TestContextShow_ReadsSystemFile_IntoGovernanceEntry(t *testing.T) {
 		t.Fatalf("run(context show --system-file) Total tokens = %d, want >= 25 (system file's contribution); stdout=%q", totalTokens, stdout)
 	}
 }
+
+// TestContextDoctor_Help: `run([]string{"context", "doctor",
+// "--help"})` returns 0 AND stdout contains the substring
+// "context doctor" AND stdout contains the substring "--limit".
+// (Help text pin; both the verb name and the new --limit <n>
+// flag are documented in contextUsage.)
+func TestContextDoctor_Help(t *testing.T) {
+	code, stdout, _ := captureContext(t, []string{"context", "doctor", "--help"})
+	if code != 0 {
+		t.Fatalf("run(context doctor --help) returned %d, want 0 (stdout=%q)", code, stdout)
+	}
+	if !strings.Contains(stdout, "context doctor") {
+		t.Fatalf("run(context doctor --help) stdout missing %q; got %q", "context doctor", stdout)
+	}
+	if !strings.Contains(stdout, "--limit") {
+		t.Fatalf("run(context doctor --help) stdout missing %q; got %q", "--limit", stdout)
+	}
+}
+
+// TestContextDoctor_UnknownVerb: dispatcher's verb-rejection path.
+// `run([]string{"context", "doctor", "extra"})` with "extra"
+// treated as a positional argument returns 1 AND stderr contains
+// "context doctor" (the usage line includes the surface name).
+// Mirrors TestContextShow_UnknownVerb.
+func TestContextDoctor_UnknownVerb(t *testing.T) {
+	code, _, stderr := captureContext(t, []string{"context", "doctor", "extra"})
+	if code == 0 {
+		t.Fatalf("run(context doctor extra) returned 0, want non-zero (stderr=%q)", stderr)
+	}
+	if !strings.Contains(stderr, "context doctor") {
+		t.Fatalf("run(context doctor extra) stderr missing %q; got %q", "context doctor", stderr)
+	}
+}
+
+// TestContextDoctor_RequiresBaseURL: --base-url empty → exit 2
+// AND stderr contains "--base-url is required". Mirrors
+// TestContextShow_RequiresBaseURL.
+func TestContextDoctor_RequiresBaseURL(t *testing.T) {
+	promptPath := filepath.Join(t.TempDir(), "prompt.md")
+	if err := os.WriteFile(promptPath, []byte("hi"), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+	code, _, stderr := captureContext(t, []string{
+		"context", "doctor",
+		"--base-url", "",
+		"--model", "m",
+		"--prompt-file", promptPath,
+	})
+	if code != 2 {
+		t.Fatalf("run(context doctor --base-url empty) returned %d, want 2 (stderr=%q)", code, stderr)
+	}
+	if !strings.Contains(stderr, "--base-url is required") {
+		t.Fatalf("run(context doctor --base-url empty) stderr missing %q; got %q", "--base-url is required", stderr)
+	}
+}
+
+// TestContextDoctor_RequiresModel: --model empty → exit 2 AND
+// stderr contains "--model is required".
+func TestContextDoctor_RequiresModel(t *testing.T) {
+	promptPath := filepath.Join(t.TempDir(), "prompt.md")
+	if err := os.WriteFile(promptPath, []byte("hi"), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+	code, _, stderr := captureContext(t, []string{
+		"context", "doctor",
+		"--base-url", "http://127.0.0.1:9",
+		"--model", "",
+		"--prompt-file", promptPath,
+	})
+	if code != 2 {
+		t.Fatalf("run(context doctor --model empty) returned %d, want 2 (stderr=%q)", code, stderr)
+	}
+	if !strings.Contains(stderr, "--model is required") {
+		t.Fatalf("run(context doctor --model empty) stderr missing %q; got %q", "--model is required", stderr)
+	}
+}
+
+// TestContextDoctor_RequiresPromptFile: --prompt-file missing →
+// exit 2 AND stderr contains "--prompt-file is required".
+func TestContextDoctor_RequiresPromptFile(t *testing.T) {
+	code, _, stderr := captureContext(t, []string{
+		"context", "doctor",
+		"--base-url", "http://127.0.0.1:9",
+		"--model", "m",
+	})
+	if code != 2 {
+		t.Fatalf("run(context doctor --prompt-file missing) returned %d, want 2 (stderr=%q)", code, stderr)
+	}
+	if !strings.Contains(stderr, "--prompt-file is required") {
+		t.Fatalf("run(context doctor --prompt-file missing) stderr missing %q; got %q", "--prompt-file is required", stderr)
+	}
+}
+
+// TestContextDoctor_EmptyConfig_TG2 is the GOAL §6 TG2 binding
+// pin. The test drives `run([]string{"context", "doctor", ...})`
+// with the minimum flag set (--base-url http://127.0.0.1:9 --model
+// tg --workspace /tmp --permission read_only --prompt-file
+// <prompt containing 'hi'>). The unreachable --base-url is the
+// determinism handle that proves the surface does NOT call the
+// model client. The assertions: exit code 0 AND stdout contains
+// "doctor findings" AND "no findings." (the empty ledger case
+// from a 2-byte prompt).
+func TestContextDoctor_EmptyConfig_TG2(t *testing.T) {
+	promptPath := filepath.Join(t.TempDir(), "prompt.md")
+	if err := os.WriteFile(promptPath, []byte("hi"), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+
+	code, stdout, stderr := captureContext(t, []string{
+		"context", "doctor",
+		"--base-url", "http://127.0.0.1:9",
+		"--model", "tg",
+		"--workspace", "/tmp",
+		"--permission", "read_only",
+		"--prompt-file", promptPath,
+	})
+	if code != 0 {
+		t.Fatalf("run(context doctor empty-config) returned %d, want 0 (stderr=%q)", code, stderr)
+	}
+	for _, want := range []string{"doctor findings", "no findings."} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("run(context doctor empty-config) stdout missing %q; got %q", want, stdout)
+		}
+	}
+}
+
+// TestContextDoctor_FullConfig_PlantLargeContributor_FindsByName
+// is the GOAL §5 reviewer duty 2 binding pin: the doctor must
+// find a planted large contributor by name. The test constructs
+// a 5000-character prompt file (so Total() = 1250 tokens, > 1000
+// token large threshold) and runs `context doctor`. The
+// assertions: stdout contains "doctor findings" AND "large" AND
+// "task:" (the category label) AND "task" (the contributor name
+// from r.PopulateLedger's task entry; the task category's Name
+// field is "task" per the existing wiring at
+// internal/loop/loop.go).
+func TestContextDoctor_FullConfig_PlantLargeContributor_FindsByName(t *testing.T) {
+	promptPath := filepath.Join(t.TempDir(), "prompt.md")
+	// 5000 chars so Total() = (5000+3)/4 = 1250 tokens > 1000
+	// threshold. The harness system prompt also contributes
+	// tokens (~100-200), so the total is well over 1000.
+	promptContent := strings.Repeat("X", 5000)
+	if err := os.WriteFile(promptPath, []byte(promptContent), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+
+	code, stdout, stderr := captureContext(t, []string{
+		"context", "doctor",
+		"--base-url", "http://127.0.0.1:9",
+		"--model", "tg",
+		"--workspace", "/tmp",
+		"--permission", "read_only",
+		"--prompt-file", promptPath,
+	})
+	if code != 0 {
+		t.Fatalf("run(context doctor planted-large) returned %d, want 0 (stderr=%q stdout=%q)", code, stderr, stdout)
+	}
+	for _, want := range []string{"doctor findings", "large", "task:"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("run(context doctor planted-large) stdout missing %q; got %q", want, stdout)
+		}
+	}
+	// The contributor name for the task category is "task" per
+	// internal/loop/loop.go's PopulateLedger implementation
+	// (the task entry's Name field is set to "task"). The
+	// finding's Detail field renders as
+	// "<category>: <name> contributes <n> tokens (threshold
+	// 1000)"; the binding pin asserts the substring "task"
+	// appears in the rendered output (the contributor name is
+	// the second word after "task:" in the Detail string AND
+	// in the label format "<category>: <name>" emitted by
+	// formatDoctorFindings). The literal substring "task"
+	// appears multiple times in the rendered output
+	// (formatDoctorFindings renders the label, and the Detail
+	// field also includes "task: task contributes ..."); the
+	// binding test is satisfied if "task" appears anywhere in
+	// the rendered output.
+	if !strings.Contains(stdout, "task") {
+		t.Fatalf("run(context doctor planted-large) stdout missing contributor name %q; got %q", "task", stdout)
+	}
+}
+
+// TestContextDoctor_DoesNotCallModel: the determinism handle.
+// Drive runContextDoctor with --base-url http://127.0.0.1:9 (the
+// discard target; a real model call would fail with "connection
+// refused" or "context deadline exceeded"). Assertions: exit
+// code 0 AND stderr does NOT contain "context deadline exceeded"
+// (the model client was NOT invoked despite the 1-second
+// RequestTimeout safety belt).
+func TestContextDoctor_DoesNotCallModel(t *testing.T) {
+	promptPath := filepath.Join(t.TempDir(), "prompt.md")
+	if err := os.WriteFile(promptPath, []byte("hi"), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+
+	code, stdout, stderr := captureContext(t, []string{
+		"context", "doctor",
+		"--base-url", "http://127.0.0.1:9",
+		"--model", "tg",
+		"--workspace", "/tmp",
+		"--permission", "read_only",
+		"--prompt-file", promptPath,
+	})
+	if code != 0 {
+		t.Fatalf("run(context doctor unreachable-base-url) returned %d, want 0 (stderr=%q stdout=%q)", code, stderr, stdout)
+	}
+	if !strings.Contains(stdout, "doctor findings") {
+		t.Fatalf("run(context doctor unreachable-base-url) stdout missing %q; got %q", "doctor findings", stdout)
+	}
+	if strings.Contains(strings.ToLower(stderr), "context deadline exceeded") {
+		t.Fatalf("run(context doctor unreachable-base-url) stderr contains %q (model client appears to have been invoked); stderr=%q",
+			"context deadline exceeded", stderr)
+	}
+}
+
+// TestContextShow_Limit_FlagsParse: confirm the --limit <n> flag
+// parses correctly on `context show` and the surface does NOT
+// exit 2 when the content fits within the configured limit. The
+// test uses a small prompt ("hi") and --limit 1000; Total() is
+// well under 1000 so no overflow fires.
+func TestContextShow_Limit_FlagsParse(t *testing.T) {
+	promptPath := filepath.Join(t.TempDir(), "prompt.md")
+	if err := os.WriteFile(promptPath, []byte("hi"), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+	code, stdout, stderr := captureContext(t, []string{
+		"context", "show",
+		"--base-url", "http://127.0.0.1:9",
+		"--model", "tg",
+		"--workspace", "/tmp",
+		"--permission", "read_only",
+		"--prompt-file", promptPath,
+		"--limit", "1000",
+	})
+	if code != 0 {
+		t.Fatalf("run(context show --limit 1000) returned %d, want 0 (stderr=%q stdout=%q)", code, stderr, stdout)
+	}
+	if !strings.Contains(strings.ToLower(stdout), "total") {
+		t.Fatalf("run(context show --limit 1000) stdout missing %q; got %q", "total", stdout)
+	}
+}
+
+// TestContextShow_Limit_OverflowExits2: confirm the --limit <n>
+// overflow enforcement on `context show`. The test uses a
+// 2-byte prompt ("hi") and --limit 1; Total() is well over 1
+// (the harness system prompt alone contributes tokens), so the
+// overflow check fires and exits 2 with the SCOPE §18 overflow
+// error.
+func TestContextShow_Limit_OverflowExits2(t *testing.T) {
+	promptPath := filepath.Join(t.TempDir(), "prompt.md")
+	if err := os.WriteFile(promptPath, []byte("hi"), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+	code, _, stderr := captureContext(t, []string{
+		"context", "show",
+		"--base-url", "http://127.0.0.1:9",
+		"--model", "tg",
+		"--workspace", "/tmp",
+		"--permission", "read_only",
+		"--prompt-file", promptPath,
+		"--limit", "1",
+	})
+	if code != 2 {
+		t.Fatalf("run(context show --limit 1) returned %d, want 2 (stderr=%q)", code, stderr)
+	}
+	if !strings.Contains(stderr, "config error: context overflow:") {
+		t.Fatalf("run(context show --limit 1) stderr missing %q; got %q", "config error: context overflow:", stderr)
+	}
+	if !strings.Contains(stderr, "exceeds configured limit 1") {
+		t.Fatalf("run(context show --limit 1) stderr missing %q; got %q", "exceeds configured limit 1", stderr)
+	}
+}
+
+// TestContextShow_Limit_NoLimit_DefaultsToZero: confirm the
+// default (--limit omitted) AND the explicit --limit 0 both
+// disable the overflow check. The test uses a 5000-char prompt
+// and --limit 0; Total() = 1250 tokens, which would exceed any
+// positive limit, but with Limit = 0 the overflow check is
+// skipped and the surface exits 0.
+func TestContextShow_Limit_NoLimit_DefaultsToZero(t *testing.T) {
+	promptPath := filepath.Join(t.TempDir(), "prompt.md")
+	promptContent := strings.Repeat("X", 5000)
+	if err := os.WriteFile(promptPath, []byte(promptContent), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+	code, stdout, stderr := captureContext(t, []string{
+		"context", "show",
+		"--base-url", "http://127.0.0.1:9",
+		"--model", "tg",
+		"--workspace", "/tmp",
+		"--permission", "read_only",
+		"--prompt-file", promptPath,
+		"--limit", "0",
+	})
+	if code != 0 {
+		t.Fatalf("run(context show --limit 0 with 1250-token prompt) returned %d, want 0 (stderr=%q stdout=%q)", code, stderr, stdout)
+	}
+	if !strings.Contains(strings.ToLower(stdout), "total") {
+		t.Fatalf("run(context show --limit 0) stdout missing %q; got %q", "total", stdout)
+	}
+}

@@ -518,6 +518,105 @@ func TestInteractive_ContextCommand_PrintsReport(t *testing.T) {
 	}
 }
 
+// TestInteractive_ContextDoctorCommand_PrintsFindings is the
+// binding pin for handoff 038 (Run 010 / DOCTOR + LIMIT +
+// OVERFLOW): the in-session `/context-doctor` REPL command must
+// render the SCOPE §20 doctor diagnostics to stderr (so stdout
+// stays clean for streamed responses). Mirrors the existing
+// TestInteractive_ContextCommand_PrintsReport pattern.
+//
+// Test mechanics:
+//   - spin up an httptest.NewServer capture server (the model
+//     server is NOT invoked by `/context-doctor` itself; the
+//     server is set up for cleanliness — if a future regression
+//     accidentally invokes RunOne from the /context-doctor
+//     handler, the test fails with a "decode fail" error rather
+//     than hanging).
+//   - point SIMPLE_HARNESS_BASE_URL at the test server's URL via
+//     t.Setenv.
+//   - wire stdin / stdout / stderr via os.Pipe.
+//   - feed "/context-doctor\n/exit\n" to stdin and close the
+//     pipe so the scanner sees EOF after the /context-doctor
+//     line is dispatched.
+//   - drive runInteractive with interactiveOpts{skill: nil}.
+//   - assert: (i) exit code 0; (ii) the captured stderr
+//     contains "doctor findings" AND "no findings." (the empty
+//     ledger case — `/context-doctor` is dispatched before any
+//     prompt so the ledger is empty).
+//
+// The test runs against the in-process runInteractive entry
+// point (NOT via the spawned-binary path), because the binding
+// pin is the /context-doctor REPL handler inside runInteractive
+// and the test must execute that code path directly.
+func TestInteractive_ContextDoctorCommand_PrintsFindings(t *testing.T) {
+	var captured capturedChatRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Errorf("decode request body: %v", err)
+			http.Error(w, "decode fail", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+	t.Setenv("SIMPLE_HARNESS_BASE_URL", srv.URL+"/v1")
+
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stderr pipe: %v", err)
+	}
+
+	origStdin := os.Stdin
+	origStdout := os.Stdout
+	origStderr := os.Stderr
+	t.Cleanup(func() {
+		os.Stdin = origStdin
+		os.Stdout = origStdout
+		os.Stderr = origStderr
+	})
+
+	os.Stdin = inR
+	os.Stdout = outW
+	os.Stderr = errW
+
+	go func() {
+		_, _ = io.WriteString(inW, "/context-doctor\n/exit\n")
+		_ = inW.Close()
+	}()
+
+	code := runInteractive(inR, outW, errW, interactiveOpts{
+		workspace: t.TempDir(),
+		stateDir:  t.TempDir(),
+		skill:     nil,
+	})
+
+	_ = outW.Close()
+	_ = errW.Close()
+	var outBuf, errBuf bytes.Buffer
+	_, _ = io.Copy(&outBuf, outR)
+	_, _ = io.Copy(&errBuf, errR)
+	capturedErr := errBuf.String()
+
+	if code != 0 {
+		t.Fatalf("runInteractive returned %d, want 0 (stderr=%q stdout=%q)",
+			code, capturedErr, outBuf.String())
+	}
+	for _, want := range []string{"doctor findings", "no findings."} {
+		if !strings.Contains(capturedErr, want) {
+			t.Errorf("stderr missing %q (the /context-doctor REPL command's findings output); got stderr=%q", want, capturedErr)
+		}
+	}
+}
+
 // driveInteractive is the shared test helper: it sets up os.Stdin
 // from the given input string, sets up os.Stdout and os.Stderr
 // capture, calls run(args), and returns the exit code plus the
@@ -947,7 +1046,7 @@ func TestRun_Version(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 010, handoff 036)"
+	want := "simple-harness 0.1.0-dev (Run 010, handoff 038)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}
@@ -1151,6 +1250,96 @@ func TestRun_StdinPolicy_NonDashSentinel_Returns0(t *testing.T) {
 	}
 }
 
+// TestRun_Limit_OverflowExits2 is the binding pin for handoff 038's
+// `--limit <n>` overflow integration on runRun. The test drives a
+// run invocation with a 5000-char prompt file (so Total() = 1250
+// tokens > limit 100). The flow needs RunOne to actually invoke
+// the model so the overflow check fires AFTER RunOne returns
+// success. The test uses an httptest.NewServer that returns the
+// standard SSE deltas so the model call completes successfully,
+// the assistant message is appended, THEN the overflow check
+// fires and exits 2. The assertions: stderr contains "config
+// error: context overflow:" AND "exceeds configured limit 100"
+// AND exit code is 2.
+func TestRun_Limit_OverflowExits2(t *testing.T) {
+	promptFile := filepath.Join(t.TempDir(), "prompt.md")
+	// 5000-char prompt so Total() = (5000+3)/4 = 1250 tokens > 100.
+	promptContent := strings.Repeat("X", 5000)
+	if err := os.WriteFile(promptFile, []byte(promptContent), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+
+	// Mock model server — replies with a clean SSE stream so
+	// RunOne returns success and the post-RunOne overflow check
+	// fires.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"hi back"}}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	code, _, errOut := driveRun(t,
+		"--base-url", srv.URL+"/v1",
+		"--model", "tg",
+		"--workspace", t.TempDir(),
+		"--permission", "read_only",
+		"--prompt-file", promptFile,
+		"--output", "terminal",
+		"--limit", "100",
+	)
+	if code != 2 {
+		t.Fatalf("run --limit 100 (with 1250-token prompt) returned %d, want 2 (config error: context overflow); stderr=%q",
+			code, errOut)
+	}
+	if !strings.Contains(errOut, "config error: context overflow:") {
+		t.Errorf("run --limit 100 stderr missing %q; got %q",
+			"config error: context overflow:", errOut)
+	}
+	if !strings.Contains(errOut, "exceeds configured limit 100") {
+		t.Errorf("run --limit 100 stderr missing %q; got %q",
+			"exceeds configured limit 100", errOut)
+	}
+}
+
+// TestRun_Limit_NoLimit_DefaultsToZero pins the handoff 038
+// `--limit <n>` integration: omitting `--limit <n>` entirely (the
+// default) does NOT trigger the overflow check, even when the
+// prompt is large. Mirrors the
+// TestContextShow_Limit_NoLimit_DefaultsToZero contract but for
+// runRun. The test uses an unreachable endpoint (port 9) so the
+// run exits 3 (model error) — this is fine; the binding pin is
+// that the run did NOT exit 2 (no overflow check fired). A
+// successful RunOne path is not required.
+func TestRun_Limit_NoLimit_DefaultsToZero(t *testing.T) {
+	promptFile := filepath.Join(t.TempDir(), "prompt.md")
+	// 5000-char prompt so Total() = 1250 tokens. Without
+	// --limit, this would overflow a hypothetical limit of 100,
+	// but since Limit = 0 the check is skipped.
+	promptContent := strings.Repeat("X", 5000)
+	if err := os.WriteFile(promptFile, []byte(promptContent), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+
+	code, _, errOut := driveRun(t,
+		"--base-url", "http://127.0.0.1:9",
+		"--model", "tg",
+		"--workspace", t.TempDir(),
+		"--permission", "read_only",
+		"--prompt-file", promptFile,
+		"--output", "jsonl",
+	)
+	// The unreachable endpoint returns exit 3 (model error).
+	// The binding pin: the run did NOT exit 2 (the overflow
+	// check did NOT fire because --limit was not set).
+	if code == 2 {
+		t.Fatalf("run without --limit returned 2 (overflow check fired unexpectedly); stderr=%q", errOut)
+	}
+	if strings.Contains(errOut, "config error: context overflow:") {
+		t.Errorf("run without --limit stderr contains overflow error (check fired unexpectedly); stderr=%q", errOut)
+	}
+}
+
 // TestRun_Version_AdvancesToHandoff024 pins the Version literal
 // advance. The existing TestRun_Version (handoff 022) was pinned to
 // "Run 006, handoff 022"; the literal advance moves the pinned value
@@ -1162,7 +1351,7 @@ func TestRun_Version_AdvancesToHandoff024(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 010, handoff 036)"
+	want := "simple-harness 0.1.0-dev (Run 010, handoff 038)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}
@@ -1871,7 +2060,7 @@ func TestRun_Version_AdvancesToHandoff030(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 010, handoff 036)"
+	want := "simple-harness 0.1.0-dev (Run 010, handoff 038)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}

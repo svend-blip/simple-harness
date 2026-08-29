@@ -38,10 +38,12 @@
 // (renders the SCOPE §19 accounting report without invoking
 // the model client) and the `/context` interactive REPL
 // command (renders the cumulative ledger snapshot to stderr).
-// The /context-doctor command + the `context doctor`
-// subcommand + the `--limit <n>` flag wiring + the overflow
-// enforcement land in handoff 037. Each remaining gap is a
-// future Run per the architecture.
+// Run 010 / handoff 038 adds the SCOPE §20 doctor diagnostics
+// cmd-side surface + the --limit <n> flag + the overflow
+// integration. See cmd/simple-harness/context.go (the
+// runContextDoctor function) + cmd/simple-harness/main.go (the
+// /context-doctor REPL command) for the new bindings.
+// Each remaining gap is a future Run per the architecture.
 //
 // Architectural boundary: this is a Simple Harness component. It does not
 // import orchestration, harness selection, GPU/VRAM allocation,
@@ -67,6 +69,7 @@ import (
 	"time"
 
 	"github.com/svend-blip/simple-harness/internal/config"
+	contextpkg "github.com/svend-blip/simple-harness/internal/context"
 	"github.com/svend-blip/simple-harness/internal/event"
 	"github.com/svend-blip/simple-harness/internal/loop"
 	"github.com/svend-blip/simple-harness/internal/model"
@@ -82,7 +85,7 @@ import (
 // without shelling out or reading the binary itself. The format is a
 // single line, project-name first, so an external parser does not need to
 // interpret it to extract the version.
-const Version = "simple-harness 0.1.0-dev (Run 010, handoff 036)"
+const Version = "simple-harness 0.1.0-dev (Run 010, handoff 038)"
 
 // globalRegistry is the tool registry the `simple-harness tools`
 // subcommand lists. Handoff 013 leaves it EMPTY; Run 014 / Run 015 will
@@ -131,17 +134,25 @@ Flags:
                         workspace_write, full_access; default: read_only).
                         Global flag — applies to every subcommand and the
                         interactive mode. SCOPE §12.
+  --limit <n>           configured context limit in tokens for the
+                        interactive session (default: 0 = unknown,
+                        no overflow check). When set, each prompt's
+                        populated ledger is checked for overflow
+                        AFTER the model call returns; an overflow
+                        exits 2 with the SCOPE §18 overflow error.
+                        SCOPE §18.
 
 Subcommands:
   config show           print the resolved configuration (secrets redacted)
   sessions list         enumerate session ids under --state-dir (one per line)
   sessions show <id>    print session.json for <id> (pretty-printed)
   context show          print the SCOPE §19 accounting report (no model call)
+  context doctor        print the SCOPE §20 doctor diagnostics (no model call)
   run                   execute one turn non-interactively, emit JSONL events
 
 Interactive mode (the default when no flags or subcommands are given)
 reads prompts from stdin and streams responses to stdout. Built-in
-commands at the prompt: /help, /version, /exit, /quit, /skill <name>, /context.
+commands at the prompt: /help, /version, /exit, /quit, /skill <name>, /context, /context-doctor.
 EOF on stdin exits cleanly. Ctrl+C cancels the active request and
 returns to the prompt with the session preserved; a second Ctrl+C
 terminates with exit code 6 (documented behavior per SCOPE §28).
@@ -149,7 +160,9 @@ terminates with exit code 6 (documented behavior per SCOPE §28).
 Exit codes (SCOPE §28):
   0  clean exit
   1  generic failure
-  2  configuration error
+  2  configuration error (e.g. context overflow
+     when --limit <n> is set and the composition
+     exceeds the configured limit)
   3  model/API failure
   6  interrupted (SIGINT/SIGTERM)
 
@@ -182,6 +195,7 @@ type interactiveOpts struct {
 	workspace string
 	stateDir  string // Run 008: --state-dir; defaults to ~/.simple-harness/sessions
 	skill     *skill.Skill // resolved at flag-parse time; nil if --skill not set
+	limit     int    // Run 010 / handoff 038: --limit <n> flag; applied to the per-prompt ledger after each RunOne call returns
 }
 
 // run is the testable inner entry point. It returns the process
@@ -250,6 +264,15 @@ func run(args []string) int {
 	// pattern (HOME + workspace). Unknown --skill = exit 2 (TG1).
 	skillName := fs.String("skill", "", "skill name to load for the interactive session (SCOPE §15; composition into the model context lands on handoff 033; the in-session /skill NAME command lets you switch skills mid-session)")
 	skillsDir := fs.String("skills-dir", "", "skills directory override for the interactive session (defaults to ~/.simple-harness/skills + <workspace>/.simple-harness/skills; the test-only deterministic handle per GOAL §2)")
+	// Run 010 / handoff 038: --limit <n> interactive-mode flag.
+	// The value flows into interactiveOpts.limit; the prompt
+	// loop applies it to the per-prompt ledger via
+	// r.Ledger().Limit after each RunOne returns. The overflow
+	// check fires AFTER the model call returns (defensive: the
+	// model call was already made, but the response is not
+	// delivered to stdout and the session exits with exit 2 so
+	// the operator notices the misconfiguration).
+	limitFlag := fs.Int("limit", 0, "configured context limit in tokens (default: 0 = unknown, no overflow check). SCOPE §18.")
 
 	if err := fs.Parse(args); err != nil {
 		// flag.ContinueOnError already printed the parse error to
@@ -323,6 +346,7 @@ func run(args []string) int {
 			workspace: *workspace,
 			stateDir:  *stateDir,
 			skill:     loadedSkill,
+			limit:     *limitFlag,
 		})
 }
 
@@ -802,6 +826,41 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, seams ...any) int
 				r.SetSkills([]skill.Skill{*loaded})
 				fmt.Fprintf(stderr, "skill loaded: %s (source: %s)\n", loaded.Name, loaded.Source)
 				continue
+			case strings.HasPrefix(trimmed, "/context-doctor"):
+				// Run 010 / handoff 038: in-session /context-doctor
+				// command. Renders the SCOPE §20 doctor diagnostics
+				// from the current Ledger snapshot. Each prior RunOne
+				// call has populated HarnessSystem + ExternalSystem +
+				// Skill(s) + Task entries (handoff 035's wiring), so
+				// /context-doctor prints the cumulative findings to
+				// stderr (so stdout stays clean for streamed
+				// responses). The format is the same one the headless
+				// `context doctor` surface uses (formatDoctorFindings
+				// from cmd/simple-harness/context.go). The --limit <n>
+				// startup flag, when set (Limit > 0), is checked
+				// here too: an overflow emits an "overflow"-type
+				// finding in addition to the Doctor() output. The
+				// session continues — /context-doctor is
+				// informational, not a session-changing command.
+				//
+				// NOTE: this case MUST come BEFORE the /context case
+				// below because /context-doctor has /context as a
+				// prefix; Go's switch evaluates cases in order, so a
+				// /context-prefixed input would match the /context
+				// case first if it came first. The current ordering
+				// (/context-doctor first, /context second) is the
+				// canonical one.
+				findings := r.Ledger().Doctor()
+				if r.Ledger().Limit > 0 {
+					if err := r.Ledger().Overflow(); err != nil {
+						findings = append(findings, contextpkg.Finding{
+							Type:   "overflow",
+							Detail: err.Error(),
+						})
+					}
+				}
+				fmt.Fprintln(stderr, formatDoctorFindings(findings))
+				continue
 			case strings.HasPrefix(trimmed, "/context"):
 				// Run 010 / handoff 036: in-session /context command.
 				// Renders the SCOPE §19 accounting report from the current
@@ -871,6 +930,22 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, seams ...any) int
 		// dispatch. The second-press flag (interruptRequested) is
 		// sticky and is checked at the top of the loop.
 		cancelPressed.Store(false)
+		// Run 010 / handoff 038: SCOPE §18 overflow check. The
+		// per-prompt ledger has been populated by RunOne's
+		// internal PopulateLedger call; if --limit <n> is set
+		// (Limit > 0) and the populated Total() exceeds it, fail
+		// predictably with exit 2. The model call was already
+		// made, but the response is not delivered to stdout and
+		// the session exits so the operator notices the
+		// misconfiguration. Per SCOPE §18: "fail predictably if
+		// the request cannot fit rather than silently corrupting
+		// the conversation."
+		if o.limit > 0 {
+			if err := r.Ledger().Overflow(); err != nil {
+				fmt.Fprintf(stderr, "\nconfig error: %v\n", err)
+				return 2
+			}
+		}
 		// Run 008 (handoff 030): record the assistant response in
 		// messages.jsonl after a successful turn.
 		_ = sessWriter.AppendMessage("assistant", response)

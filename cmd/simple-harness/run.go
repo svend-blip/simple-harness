@@ -109,6 +109,12 @@ Flags:
                           timestamp, event). The minimum event
                           set is: started, status, model_request,
                           assistant_stream, completed.
+  --limit <n>             configured context limit in tokens
+                          (default: 0 = unknown, no overflow
+                          check). When set, the populated ledger
+                          is checked for overflow AFTER the model
+                          call returns; an overflow exits 2 with
+                          the SCOPE §18 overflow error. SCOPE §18.
 
 Exit codes (SCOPE §28):
   0  clean exit (run-mode validation passed; also returned on a
@@ -182,6 +188,14 @@ func runRun(args []string) int {
 	systemText := fs.String("system", "", "inline external system/governance prompt (mutually exclusive with --system-file; one of the two is required when --skill is set, optional otherwise). SCOPE §14.")
 	systemFile := fs.String("system-file", "", "optional path to a system prompt file")
 	output := fs.String("output", "terminal", `output mode: "terminal" or "jsonl" (default "terminal")`)
+	// Run 010 / handoff 038: --limit <n> flag. The value flows
+	// into the per-Run ledger via r.Ledger().Limit = *limit after
+	// loop.New returns; the overflow check fires AFTER RunOne
+	// returns success (defensive: the model call was already
+	// made, but the response is not delivered to stdout and the
+	// exit code is 2 so the operator notices the
+	// misconfiguration). SCOPE §18.
+	limit := fs.Int("limit", 0, "configured context limit in tokens (default: 0 = unknown, no overflow check). When set, the populated ledger is checked for overflow AFTER the model call returns; an overflow exits 2 with the SCOPE §18 overflow error. SCOPE §18.")
 
 	if err := fs.Parse(args); err != nil {
 		// flag.ContinueOnError already printed the parse error to
@@ -385,6 +399,7 @@ func runRun(args []string) int {
 		*systemText,
 		systemFileContent,
 		loadedSkill,
+		*limit,
 	)
 }
 
@@ -400,10 +415,17 @@ func runRun(args []string) int {
 // Handoff 033 adds three parameters for SCOPE §14 composition:
 //
 //   - systemText: the value of --system (or "" if unset)
-//   - systemFileContent: the file's bytes read in runRun (or "" if
-//     --system-file was not set)
+//   - systemFileContent: the file's bytes read in runRun (or ""
+//     if --system-file was not set)
 //   - loadedSkill: the *Skill returned by skill.Load (or nil if
 //     --skill was not set)
+//
+// Handoff 038 adds one more parameter:
+//
+//   - limit: the value of --limit <n> (or 0 if unset). The
+//     value flows into the per-Run ledger via
+//     r.Ledger().Limit = limit after loop.New returns; the
+//     overflow check fires AFTER RunOne returns success.
 //
 // systemText and systemFileContent are mutually exclusive
 // (enforced in runRun with exit 2); the inner executor receives
@@ -428,9 +450,10 @@ func runRun(args []string) int {
 //     Completed(exit_code) if the error path didn't already emit
 //     Completed (the loop's success path emits Completed(0) from
 //     inside RunOne).
+//  8. Checks r.Ledger().Overflow() if limit > 0 (handoff 038).
 //
 // The function returns the SCOPE §28 exit code.
-func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir, systemText, systemFileContent string, loadedSkill *skill.Skill) int {
+func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir, systemText, systemFileContent string, loadedSkill *skill.Skill, limit int) int {
 	// Defensive double-check on the mutual-exclusion of --system
 	// and --system-file. runRun already rejects this with exit 2
 	// before this function is reached; the inner check covers any
@@ -594,6 +617,15 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir,
 		Skills:         skills,
 	}, client, em, loopOut)
 
+	// Run 010 / handoff 038: --limit <n> overflow wiring on the
+	// per-Run ledger. Set Limit immediately after loop.New
+	// returns so RunOne's internal PopulateLedger call sees the
+	// configured value. Limit <= 0 disables the check (the
+	// existing Ledger.Overflow() semantics at
+	// internal/context/context.go:196-197). Setting Limit here is
+	// the cmd-side binding seam (no loop.Config field added).
+	r.Ledger().Limit = limit
+
 	// Run 008 (handoff 030): record the user message in
 	// messages.jsonl before the model call.
 	_ = sessWriter.AppendMessage("user", prompt)
@@ -627,6 +659,22 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir,
 		if sidecar != nil {
 			_ = sidecar.Sync()
 			_ = sidecar.Close()
+		}
+		// Run 010 / handoff 038: SCOPE §18 overflow check. The
+		// ledger has been populated by RunOne's internal
+		// PopulateLedger call. If --limit <n> is set (Limit > 0)
+		// and Total() exceeds it, fail predictably with exit 2.
+		// The model call was already made and the response was
+		// appended to the session, but the final exit code is 2
+		// so the operator notices the misconfiguration. Per
+		// SCOPE §18: "fail predictably if the request cannot fit
+		// rather than silently corrupting the conversation."
+		if limit > 0 {
+			if overflowErr := r.Ledger().Overflow(); overflowErr != nil {
+				_ = sessWriter.AppendMessage("assistant", response)
+				fmt.Fprintf(os.Stderr, "config error: %v\n", overflowErr)
+				return 2
+			}
 		}
 		// Run 008 (handoff 030): record the assistant response in
 		// messages.jsonl after a successful turn.
