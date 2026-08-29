@@ -29,8 +29,10 @@
 // 031). Skills (`simple-harness --skill NAME`, `--skills-dir DIR`)
 // are the Run 009 foundation work slot (handoff 032): the cold-start
 // reference skill and discovery machinery. Composition into the
-// model context (SCOPE §14) lands on handoff 033. Each remaining
-// gap is a future Run per the architecture.
+// model context (SCOPE §14) lands on handoff 033 (composition +
+// interactive `/skill` command + new `--system <text>` flag +
+// reviewer duties 2+3 + TG4). Each remaining gap is a future Run
+// per the architecture.
 //
 // Architectural boundary: this is a Simple Harness component. It does not
 // import orchestration, harness selection, GPU/VRAM allocation,
@@ -61,6 +63,7 @@ import (
 	"github.com/svend-blip/simple-harness/internal/model"
 	"github.com/svend-blip/simple-harness/internal/perm"
 	"github.com/svend-blip/simple-harness/internal/session"
+	"github.com/svend-blip/simple-harness/internal/skill"
 	"github.com/svend-blip/simple-harness/internal/tools"
 	"github.com/svend-blip/simple-harness/internal/tools/builtins"
 )
@@ -70,7 +73,7 @@ import (
 // without shelling out or reading the binary itself. The format is a
 // single line, project-name first, so an external parser does not need to
 // interpret it to extract the version.
-const Version = "simple-harness 0.1.0-dev (Run 009, handoff 032)"
+const Version = "simple-harness 0.1.0-dev (Run 009, handoff 033)"
 
 // globalRegistry is the tool registry the `simple-harness tools`
 // subcommand lists. Handoff 013 leaves it EMPTY; Run 014 / Run 015 will
@@ -107,6 +110,14 @@ Flags:
                         (default: ~/.simple-harness/sessions); see
                         'simple-harness run --help' for the run-mode
                         flag of the same name. SCOPE §17.
+  --skills-dir <dir>    skills directory override (interactive
+                        mode; defaults to ~/.simple-harness/skills
+                        and <workspace>/.simple-harness/skills).
+                        SCOPE §15.
+  --skill <name>        skill name to load for the interactive
+                        session (or use the in-session
+                        /skill <name> command to switch).
+                        SCOPE §15, §16.
   --permission <mode>   permission mode (one of read_only,
                         workspace_write, full_access; default: read_only).
                         Global flag — applies to every subcommand and the
@@ -120,10 +131,10 @@ Subcommands:
 
 Interactive mode (the default when no flags or subcommands are given)
 reads prompts from stdin and streams responses to stdout. Built-in
-commands at the prompt: /help, /version, /exit, /quit. EOF on stdin
-exits cleanly. Ctrl+C cancels the active request and returns to the
-prompt with the session preserved; a second Ctrl+C terminates with
-exit code 6 (documented behavior per SCOPE §28).
+commands at the prompt: /help, /version, /exit, /quit, /skill <name>.
+EOF on stdin exits cleanly. Ctrl+C cancels the active request and
+returns to the prompt with the session preserved; a second Ctrl+C
+terminates with exit code 6 (documented behavior per SCOPE §28).
 
 Exit codes (SCOPE §28):
   0  clean exit
@@ -147,9 +158,20 @@ See docs/ARCHITECTURE.md §"Distribution shape" for the full contract.
 // either a separate flag at the subcommand level or duplicating the
 // parser; the global-flag approach is the simpler and correct one
 // per SCOPE §12.
+//
+// Run 009 / handoff 033 adds the `skill` field: a *skill.Skill
+// loaded at flag-parse time from the resolved --skill name + the
+// resolved --skills-dir. The field is read by runInteractive to
+// populate loop.Config.Skills for every prompt. Passing a *Skill
+// (rather than the name + flags) through the seam keeps the REPL
+// pure — the prompt loop never touches flag lookups or I/O. The
+// field is also mutated by the in-session `/skill NAME` command
+// (a new built-in command at the prompt) so the next prompt uses
+// the freshly-loaded skill.
 type interactiveOpts struct {
 	workspace string
 	stateDir  string // Run 008: --state-dir; defaults to ~/.simple-harness/sessions
+	skill     *skill.Skill // resolved at flag-parse time; nil if --skill not set
 }
 
 // run is the testable inner entry point. It returns the process
@@ -208,6 +230,13 @@ func run(args []string) int {
 	// also acceptable per SCOPE §28 generic-failure.
 	workspace := fs.String("workspace", "", "workspace directory (interactive mode only; defaults to cwd)")
 	stateDir := fs.String("state-dir", "", "state directory for session persistence (defaults to ~/.simple-harness/sessions)")
+	// Run 009 / handoff 033: interactive-mode --skill / --skills-dir
+	// flags. --skills-dir is the test-only override (when non-empty,
+	// REPLACES BOTH default search roots); --skill is the skill name
+	// to load at startup. The default resolution mirrors the run-mode
+	// pattern (HOME + workspace). Unknown --skill = exit 2 (TG1).
+	skillName := fs.String("skill", "", "skill name to load for the interactive session (SCOPE §15; composition into the model context lands on handoff 033; the in-session /skill NAME command lets you switch skills mid-session)")
+	skillsDir := fs.String("skills-dir", "", "skills directory override for the interactive session (defaults to ~/.simple-harness/skills + <workspace>/.simple-harness/skills; the test-only deterministic handle per GOAL §2)")
 
 	if err := fs.Parse(args); err != nil {
 		// flag.ContinueOnError already printed the parse error to
@@ -226,6 +255,45 @@ func run(args []string) int {
 		*stateDir = filepath.Join(home, ".simple-harness", "sessions")
 	}
 
+	// Run 009 / handoff 033: resolve --skill / --skills-dir and
+	// load the named skill. The loaded *Skill is threaded through
+	// interactiveOpts.skill so runInteractive can compose its
+	// Content into the model context per SCOPE §14 step 3. This
+	// is a near-mirror of the run-mode --skill block in run.go,
+	// with two differences: (a) it operates on the inner flag set
+	// values, not the run-mode flag set; (b) on success it stores
+	// the loaded skill on interactiveOpts.skill rather than
+	// discarding it.
+	var loadedSkill *skill.Skill
+	if *skillName != "" {
+		var resolvedSkillsDir string
+		var resolvedHome string
+		if *skillsDir != "" {
+			resolvedSkillsDir = *skillsDir
+		} else {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "config error: cannot determine home directory: %v\n", err)
+				return 2
+			}
+			resolvedHome = home
+		}
+		s, err := skill.Load(*skillName, skill.LoadOptions{
+			SkillsDir:    resolvedSkillsDir,
+			WorkspaceDir: *workspace,
+			HomeDir:      resolvedHome,
+		})
+		if err != nil {
+			if errors.Is(err, skill.ErrSkillNotFound) {
+				fmt.Fprintf(os.Stderr, "config error: unknown skill %q\n", *skillName)
+				return 2
+			}
+			fmt.Fprintf(os.Stderr, "config error: load skill %q: %v\n", *skillName, err)
+			return 2
+		}
+		loadedSkill = s
+	}
+
 	switch {
 	case *version:
 		fmt.Println(Version)
@@ -241,6 +309,7 @@ func run(args []string) int {
 		interactiveOpts{
 			workspace: *workspace,
 			stateDir:  *stateDir,
+			skill:     loadedSkill,
 		})
 }
 
@@ -559,6 +628,17 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, seams ...any) int
 		MaxOutputTokens: cfg.Model.MaxOutputTokens,
 		RequestTimeout:  cfg.Model.RequestTimeout,
 	})
+	// Run 009 / handoff 033: compose the SCOPE §14 message list.
+	// The loop.HarnessSystem is the minimal harness system
+	// prompt (step 1). SystemExternal is empty in interactive
+	// mode (the in-session --system / --system-file flag is a
+	// follow-up concern). Skills are the loaded *Skill from
+	// o.skill wrapped in a slice (V1 single-skill model; the
+	// type is the seam for future multi-skill interactive mode).
+	var skills []skill.Skill
+	if o.skill != nil {
+		skills = []skill.Skill{*o.skill}
+	}
 	r := loop.New(loop.Config{
 		Model: model.Options{
 			BaseURL:         normalizedBase,
@@ -568,8 +648,11 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, seams ...any) int
 			MaxOutputTokens: cfg.Model.MaxOutputTokens,
 			RequestTimeout:  cfg.Model.RequestTimeout,
 		},
-		Workspace:  o.workspace,
-		Permission: permissionStr,
+		Workspace:      o.workspace,
+		Permission:     permissionStr,
+		System:         loop.HarnessSystem,
+		SystemExternal: "",
+		Skills:         skills,
 	}, client, em, stdout)
 
 	scanner := bufio.NewScanner(stdin)
@@ -645,16 +728,66 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, seams ...any) int
 			// First line of a (possibly multi-line) prompt —
 			// check for built-in commands and empty-line skip.
 			trimmed := strings.TrimSpace(line)
-			switch trimmed {
-			case "":
+			switch {
+			case trimmed == "":
 				continue
-			case "/exit", "/quit":
+			case trimmed == "/exit" || trimmed == "/quit":
 				return 0
-			case "/help":
+			case trimmed == "/help":
 				fmt.Fprint(stderr, usage)
 				continue
-			case "/version":
+			case trimmed == "/version":
 				fmt.Fprintln(stderr, Version)
+				continue
+			case strings.HasPrefix(trimmed, "/skill"):
+				// Run 009 / handoff 033: in-session /skill NAME
+				// command. Parses the trailing NAME; on success,
+				// replaces o.skill with the freshly-loaded Skill
+				// and stderr-prints a confirmation. On failure,
+				// stderr-prints "unknown skill: <NAME>" and
+				// continues (the previous skill, if any, remains
+				// active — this is a recoverable error per SCOPE
+				// §15's "skill mechanism should not interrupt the
+				// session on a bad lookup").
+				parts := strings.Fields(trimmed)
+				if len(parts) < 2 {
+					fmt.Fprintln(stderr, "usage: /skill <name>")
+					continue
+				}
+				name := parts[1]
+				// Load with the session's resolved --skills-dir if
+				// the user gave one at startup; otherwise HOME +
+				// the workspace (the default search roots). The
+				// load mirrors the run-mode pattern.
+				home, herr := os.UserHomeDir()
+				var resolvedHome string
+				if herr == nil {
+					resolvedHome = home
+				}
+				loaded, lerr := skill.Load(name, skill.LoadOptions{
+					WorkspaceDir: o.workspace,
+					HomeDir:      resolvedHome,
+				})
+				if lerr != nil {
+					if errors.Is(lerr, skill.ErrSkillNotFound) {
+						fmt.Fprintf(stderr, "unknown skill: %s\n", name)
+						continue
+					}
+					fmt.Fprintf(stderr, "skill load error: %v\n", lerr)
+					continue
+				}
+				o.skill = loaded
+				// Handoff 034 (rework): the new skill must reach the
+				// model on the NEXT prompt. The previously-constructed
+				// *loop.Run captured the old skills slice in its unexported
+				// cfg field; SetSkills mutates cfg.Skills in place so the
+				// next RunOne's ComposeMessages call (line 167 of
+				// internal/loop/loop.go) sees the new content. Without this
+				// call, the loaded skill's content never reaches the model
+				// despite the "skill loaded: <name>" confirmation printed
+				// above — the defect verdict 033 named.
+				r.SetSkills([]skill.Skill{*loaded})
+				fmt.Fprintf(stderr, "skill loaded: %s (source: %s)\n", loaded.Name, loaded.Source)
 				continue
 			}
 		}

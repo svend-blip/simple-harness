@@ -33,7 +33,18 @@ import (
 
 	"github.com/svend-blip/simple-harness/internal/event"
 	"github.com/svend-blip/simple-harness/internal/model"
+	"github.com/svend-blip/simple-harness/internal/skill"
 )
+
+// HarnessSystem is the canonical minimal harness system prompt
+// prepended to every composed message list per SCOPE §14 step 1.
+// It is the harness's identity + posture, not project-specific
+// content; the project-specific material lives in the skills slot
+// (step 3) and the external system slot (step 2). The string is
+// intentionally short — it is the harness's voice, not the
+// project's content. The cmd imports this const (no string
+// duplication) and threads it through loop.Config.System.
+const HarnessSystem = "You are running inside Simple Harness, a small terminal-first execution kernel. Respond concisely and complete the user's request. Use the system, skills, and user input below as the full context for this turn; do not assume project state beyond what the loaded skills and external governance describe."
 
 // Config is the seam between the cmd and the loop. The cmd builds
 // this from the resolved config.Config (workspace, permission) and
@@ -54,6 +65,23 @@ type Config struct {
 	// cmd validates this against the SCOPE §12 enum before the
 	// loop sees it (so the loop can trust the value).
 	Permission string
+	// System is the minimal harness system prompt per SCOPE §14
+	// step 1. The loop prepends it as the FIRST message. The
+	// string is supplied by the cmd (loop.HarnessSystem, the
+	// harness's identity + posture). Empty means skip the
+	// harness-system slot.
+	System string
+	// SystemExternal is the external system/governance prompt
+	// from --system or --system-file per SCOPE §14 step 2. The
+	// loop prepends it AFTER the harness system and BEFORE the
+	// skills. Empty means skip the external-system slot.
+	SystemExternal string
+	// Skills is the resolved skills' content, in the order they
+	// should be composed into the model context per SCOPE §14
+	// step 3. Each Skill becomes its own system message AFTER
+	// SystemExternal and BEFORE the user task. Skills with empty
+	// Content are skipped. Nil/empty means skip the skills slot.
+	Skills []skill.Skill
 }
 
 // Run is a single-turn interactive loop session. It owns the model
@@ -79,6 +107,27 @@ func New(cfg Config, client *model.Client, em *event.Emitter, out io.Writer) *Ru
 		em:     em,
 		out:    out,
 	}
+}
+
+// SetSkills replaces the Skills field of the Run's Config with
+// the given slice. It is the seam the interactive REPL uses when
+// the user invokes the `/skill NAME` mid-session command (SCOPE
+// §15's "skill mechanism should allow mid-session swap"): the
+// handler updates its local *Skill pointer, calls SetSkills with
+// the new single-element slice, and the next RunOne call's
+// ComposeMessages sees the updated skills slot.
+//
+// SetSkills is NOT safe for concurrent use with an in-flight
+// RunOne call. The interactive REPL is single-goroutine (the
+// scanner goroutine only feeds the prompt loop; the prompt
+// loop is the sole caller of RunOne and the sole caller of
+// SetSkills, sequentially), so no locking is required.
+//
+// An empty / nil skills slice clears the skills slot (the next
+// RunOne's composed message list omits the skills slot, as if
+// --skill had not been set).
+func (r *Run) SetSkills(skills []skill.Skill) {
+	r.cfg.Skills = skills
 }
 
 // RunOne executes one turn: emits started, calls
@@ -136,7 +185,7 @@ func (r *Run) RunOne(ctx context.Context, prompt string) (string, error) {
 	}
 
 	err := r.client.ChatStream(ctx, model.ChatRequest{
-		Messages: []model.Message{{Role: "user", Content: prompt}},
+		Messages: ComposeMessages(r.cfg, prompt),
 	}, onDelta)
 
 	if err != nil {
@@ -191,4 +240,47 @@ func NormalizeBaseURL(url string) string {
 		return strings.TrimSuffix(u, "/v1")
 	}
 	return url
+}
+
+// ComposeMessages builds the SCOPE §14 message list:
+//
+//  1. harness system prompt   (cfg.System, if non-empty)
+//  2. external system/governance (cfg.SystemExternal, if non-empty)
+//  3. each loaded skill       (cfg.Skills[i], in order, with
+//     non-empty Content)
+//  4. user task               (prompt, always present)
+//
+// The order is BINDING per GOAL §2 + SCOPE §14: no permutation
+// of the inputs changes the relative positions in the output.
+// The harness system is always first; the user task is always
+// last; skills always land BETWEEN the external system and the
+// user task. This function is the single seam for context
+// composition in V1 and is the target of reviewer duty 2
+// (permutation-proof ordering test) — a future regression that
+// reorders, drops, or duplicates a slot fails the test.
+//
+// An empty Skills[i].Content is skipped (a skill with a zero-byte
+// body contributes no message). An empty prompt is allowed (the
+// loop emits a [system*, user=""] message list, which the model
+// client will reject — but the loop is not the validator; empty
+// prompts are a runtime concern).
+//
+// The function is pure (no I/O, no goroutines, no global state);
+// it is testable as a unit without a model server.
+func ComposeMessages(cfg Config, prompt string) []model.Message {
+	messages := make([]model.Message, 0, 1+len(cfg.Skills))
+	if cfg.System != "" {
+		messages = append(messages, model.Message{Role: "system", Content: cfg.System})
+	}
+	if cfg.SystemExternal != "" {
+		messages = append(messages, model.Message{Role: "system", Content: cfg.SystemExternal})
+	}
+	for _, s := range cfg.Skills {
+		if s.Content == "" {
+			continue
+		}
+		messages = append(messages, model.Message{Role: "system", Content: s.Content})
+	}
+	messages = append(messages, model.Message{Role: "user", Content: prompt})
+	return messages
 }

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/svend-blip/simple-harness/internal/event"
+	"github.com/svend-blip/simple-harness/internal/loop"
 	"github.com/svend-blip/simple-harness/internal/perm"
 	"github.com/svend-blip/simple-harness/internal/tools"
 	"github.com/svend-blip/simple-harness/internal/tools/builtins"
@@ -238,6 +239,182 @@ func TestInteractiveMode_PromptReachesModelClient(t *testing.T) {
 	}
 	if !strings.Contains(out, "hi back") {
 		t.Fatalf("captured stdout does not contain model response; got %q", out)
+	}
+}
+
+// TestInteractive_SkillCommand_LoadsSkill is the binding pin for
+// handoff 034 (Run 009 / REWORK): the in-session `/skill NAME`
+// command must mutate the *loop.Run's cfg.Skills field so the
+// loaded skill's content reaches the model on the NEXT prompt.
+// The defect handoff 033 reported (verdict 033 §"CONFIRMED DEFECT")
+// was that the *Run was constructed once before the REPL loop
+// started and `cfg` is unexported, so an updated o.skill pointer
+// never reached `cfg.Skills` and never reached the model despite
+// the "skill loaded: <name>" confirmation line. The fix is the
+// exported SetSkills setter on *Run (the new seam landed in
+// internal/loop/loop.go by this handoff) called immediately after
+// o.skill = loaded inside the in-session /skill handler (the new
+// call landed in cmd/simple-harness/main.go by this handoff).
+//
+// The test is the regression tripwire: a future change that drops
+// or misplaces either the SetSkills setter or the call from the
+// /skill handler causes the marker NOT to appear in the model's
+// composed messages, and the test fails by name with a clear
+// "marker not found in any captured message" error.
+//
+// Test mechanics:
+//
+//   - write a `cold-start` skill under
+//     <workspace>/.simple-harness/skills/cold-start/SKILL.md
+//     with a marker string unique to this test (no collision
+//     with TestRun_Skill_ContentInjectedIntoModelContext's
+//     LOADED-SKILL-MARKER-cc11)
+//   - spin up an httptest server whose handler JSON-decodes
+//     the captured request body into capturedChatRequest
+//     (defined in skill_test.go, shared package) and replies
+//     with `data: [DONE]\n\n` so RunOne completes cleanly
+//   - point SIMPLE_HARNESS_BASE_URL at the test server's URL
+//     (the same env-var override pattern that
+//     TestInteractiveMode_PromptReachesModelClient uses)
+//   - drive runInteractive with stdin = "/skill cold-start\n
+//     hello\n" (NO startup skill — the /skill command is the
+//     FIRST skill the loop sees; this is what makes the test
+//     catch the regression) and interactiveOpts{skill: nil}
+//   - assert (i) captured request body has at least 1 message,
+//     (ii) FIRST message contains loop.HarnessSystem text
+//     (the harness system slot per SCOPE §14 step 1),
+//     (iii) EXACTLY ONE captured message contains the marker
+//     (the skills slot per SCOPE §14 step 3), (iv) LAST
+//     captured message has role: "user" and content: "hello"
+//     (the user task slot per SCOPE §14 step 4).
+//
+// The test runs against the in-process runInteractive entry
+// point (the same pattern as TestInteractiveMode_PromptReaches-
+// ModelClient), not via the spawned-binary path, because the
+// binding pin is the SetSkills call inside runInteractive and
+// the test must execute that code path directly.
+func TestInteractive_SkillCommand_LoadsSkill(t *testing.T) {
+	const marker = "INTERACTIVE-SKILL-CMD-PIN-ee44"
+	const prompt = "hello"
+
+	// Workspace with cold-start SKILL.md at
+	// <workspace>/.simple-harness/skills/cold-start/SKILL.md
+	// (writeSkillFixture is in skill_test.go in the same package).
+	workspace := t.TempDir()
+	writeSkillFixture(t, workspace, "cold-start", marker+"\n")
+
+	// Capture each incoming chat-completions request body. The
+	// handler returns `data: [DONE]\n\n` immediately so RunOne
+	// completes without streaming any deltas; the test only
+	// asserts on the request body's `messages` JSON.
+	var captured capturedChatRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Errorf("decode request body: %v", err)
+			http.Error(w, "decode fail", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+	t.Setenv("SIMPLE_HARNESS_BASE_URL", srv.URL+"/v1")
+
+	// Wire stdin / stdout / stderr so runInteractive can read
+	// "/skill cold-start\nhello\n" from the test, write the
+	// confirmation line to the test's stderr buffer, and stream
+	// any assistant text to a discardable stdout. The pipe
+	// pattern mirrors driveInteractive (lines 244-318) and
+	// driveInteractiveWithSeams (lines 1620-1665).
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stderr pipe: %v", err)
+	}
+
+	origStdin := os.Stdin
+	origStdout := os.Stdout
+	origStderr := os.Stderr
+	t.Cleanup(func() {
+		os.Stdin = origStdin
+		os.Stdout = origStdout
+		os.Stderr = origStderr
+	})
+
+	os.Stdin = inR
+	os.Stdout = outW
+	os.Stderr = errW
+
+	// Feed the two-line input and close the pipe so the
+	// scanner sees EOF after the second prompt is dispatched.
+	go func() {
+		_, _ = io.WriteString(inW, "/skill cold-start\nhello\n")
+		_ = inW.Close()
+	}()
+
+	// skill: nil = NO startup skill. The first skill the loop
+	// sees comes from the in-session /skill command. If the
+	// /skill handler's r.SetSkills call is missing (the
+	// handoff 033 defect), r.cfg.Skills stays nil and the
+	// captured messages contain NO marker — the test fails.
+	code := runInteractive(inR, outW, errW, interactiveOpts{
+		workspace: workspace,
+		stateDir:  t.TempDir(),
+		skill:     nil,
+	})
+
+	_ = outW.Close()
+	_ = errW.Close()
+	var outBuf, errBuf bytes.Buffer
+	_, _ = io.Copy(&outBuf, outR)
+	_, _ = io.Copy(&errBuf, errR)
+	capturedErr := errBuf.String()
+
+	if code != 0 {
+		t.Fatalf("runInteractive returned %d, want 0 (stderr=%q stdout=%q)",
+			code, capturedErr, outBuf.String())
+	}
+	if !strings.Contains(capturedErr, "skill loaded: cold-start") {
+		t.Errorf("stderr missing %q; got %q", "skill loaded: cold-start", capturedErr)
+	}
+	if len(captured.Messages) == 0 {
+		t.Fatalf("captured request body has 0 messages; runInteractive did not POST to the test server (stderr=%q)",
+			capturedErr)
+	}
+
+	// (i) Harness-system slot: first message must contain
+	// loop.HarnessSystem text (SCOPE §14 step 1).
+	if captured.Messages[0].Role != "system" || !strings.Contains(captured.Messages[0].Content, loop.HarnessSystem) {
+		t.Errorf("messages[0] = %+v, want {system, contains loop.HarnessSystem}", captured.Messages[0])
+	}
+
+	// (ii) Skills slot: exactly ONE captured message must
+	// contain the marker (SCOPE §14 step 3). This is the
+	// binding-pin assertion: without r.SetSkills(...) the
+	// marker is absent and markerCount is 0.
+	markerCount := 0
+	for _, m := range captured.Messages {
+		if strings.Contains(m.Content, marker) {
+			markerCount++
+		}
+	}
+	if markerCount != 1 {
+		t.Errorf("captured request body has %d message(s) containing marker %q; want exactly 1 (the skills slot); messages=%+v",
+			markerCount, marker, captured.Messages)
+	}
+
+	// (iii) User-task slot: last message is role: "user"
+	// with content: prompt (SCOPE §14 step 4).
+	last := captured.Messages[len(captured.Messages)-1]
+	if last.Role != "user" || last.Content != prompt {
+		t.Errorf("messages[last] = %+v, want {user, %q}", last, prompt)
 	}
 }
 
@@ -670,7 +847,7 @@ func TestRun_Version(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 009, handoff 032)"
+	want := "simple-harness 0.1.0-dev (Run 009, handoff 033)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}
@@ -885,7 +1062,7 @@ func TestRun_Version_AdvancesToHandoff024(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 009, handoff 032)"
+	want := "simple-harness 0.1.0-dev (Run 009, handoff 033)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}
@@ -1594,7 +1771,7 @@ func TestRun_Version_AdvancesToHandoff030(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 009, handoff 032)"
+	want := "simple-harness 0.1.0-dev (Run 009, handoff 033)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}

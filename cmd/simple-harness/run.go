@@ -82,19 +82,24 @@ Flags:
                           the test-only deterministic handle per GOAL §2)
   --skill <name>          skill name to load; SKILL.md is read from the
                           resolved skills dir; an unknown name is a
-                          configuration error (exit 2). Skill content
-                          is loaded but NOT YET injected into the model
-                          context (composition lands on a future handoff).
-                          SCOPE §15, SCOPE §16.
+                          configuration error (exit 2). The skill's
+                          content is composed into the model context
+                          at the SCOPE §14 step-3 position. SCOPE §15,
+                          SCOPE §16.
   --prompt-file <path>    path to the prompt file; use "-" to read
                           from stdin (required; the "-" value is
                           accepted but stdin handling is a future
                           handoff)
+  --system <text>         inline external system/governance prompt
+                          (mutually exclusive with --system-file;
+                          the resolved value is composed into the
+                          model context at the SCOPE §14 step 2
+                          position). SCOPE §14.
   --system-file <path>    optional path to a system prompt file;
-                          the file must exist and be readable
-                          (the system prompt is not yet used by
-                          the loop — this handoff validates the
-                          path only)
+                          the file must exist and be readable; the
+                          file's content is composed into the model
+                          context at the SCOPE §14 step 2 position.
+                          Mutually exclusive with --system.
   --output <mode>         output mode: "terminal" (default; the
                           streamed assistant text goes to stdout,
                           human decorations to stderr) or "jsonl"
@@ -110,7 +115,8 @@ Exit codes (SCOPE §28):
      successful model turn)
   1  generic failure (flag parse error, runtime I/O error, etc.)
   2  configuration error (missing prompt file, invalid --output,
-     empty --base-url, empty --model, missing --system-file)
+     empty --base-url, empty --model, missing --system-file,
+     unknown skill, --system and --system-file both set)
   3  model/API failure (unreachable endpoint, HTTP 5xx, malformed
      SSE; the JSONL stream carries a 'status: FAILED' event and a
      'completed(exit_code: 3)' event before the process exits)
@@ -121,6 +127,10 @@ Exit codes (SCOPE §28):
 
 See docs/ARCHITECTURE.md §"Distribution shape" for the full
 contract and the V1 event protocol.
+
+The composed model context is SCOPE §14 ordered: minimal harness
+system -> external system/governance (--system or --system-file)
+-> loaded skills (--skill NAME) -> user task.
 `
 
 // runRun is the testable inner entry point for the `simple-harness
@@ -169,6 +179,7 @@ func runRun(args []string) int {
 	skillsDir := fs.String("skills-dir", "", "skills directory override (defaults to ~/.simple-harness/skills + <workspace>/.simple-harness/skills; this is the test-only deterministic handle per GOAL §2)")
 	skillName := fs.String("skill", "", "skill name to load; SKILL.md is read from the resolved skills dir; an unknown name is a configuration error (exit 2). Composition into the model context lands on handoff 033. SCOPE §15.")
 	promptFile := fs.String("prompt-file", "", "path to the prompt file; use - for stdin (required)")
+	systemText := fs.String("system", "", "inline external system/governance prompt (mutually exclusive with --system-file; one of the two is required when --skill is set, optional otherwise). SCOPE §14.")
 	systemFile := fs.String("system-file", "", "optional path to a system prompt file")
 	output := fs.String("output", "terminal", `output mode: "terminal" or "jsonl" (default "terminal")`)
 
@@ -249,22 +260,30 @@ func runRun(args []string) int {
 		*stateDir = filepath.Join(home, ".simple-harness", "sessions")
 	}
 
-	// --system-file: optional. If non-empty, the file must
-	// exist and be readable (same validation as --prompt-file).
-	// The system prompt is not yet used by the loop in this
-	// handoff; the validation is the only thing landing now so
-	// a handoff 024 caller cannot trip over a missing file
-	// after the loop has already been invoked. The check runs
-	// BEFORE the --prompt-file "-" stdin short-circuit so a
-	// missing system file fails fast even when the prompt is
-	// sourced from stdin (the TG1-style "any config error is
-	// exit 2 regardless of which other flags are present"
-	// contract).
+	// --system / --system-file: optional, mutually exclusive.
+	// --system is the inline-text sibling of --system-file; both
+	// flow into loop.Config.SystemExternal. If both are set, exit
+	// 2 (config error). --system-file additionally requires the
+	// file to exist and be readable; its content is read here so
+	// runModeExecute receives the bytes (a TOCTOU read failure
+	// between validateReadableFile and os.ReadFile is exit 1,
+	// not 2 — the config WAS valid at parse time).
+	var systemFileContent string
+	if *systemText != "" && *systemFile != "" {
+		fmt.Fprintf(os.Stderr, "config error: --system and --system-file are mutually exclusive\n")
+		return 2
+	}
 	if *systemFile != "" {
 		if err := validateReadableFile(*systemFile); err != nil {
 			fmt.Fprintf(os.Stderr, "config error: cannot read system-file %q: %v\n", *systemFile, err)
 			return 2
 		}
+		data, err := os.ReadFile(*systemFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "config error: read system-file %q: %v\n", *systemFile, err)
+			return 2
+		}
+		systemFileContent = string(data)
 	}
 
 	// --skill + --skills-dir: optional. --skills-dir is the
@@ -272,12 +291,14 @@ func runRun(args []string) int {
 	// roots); --skill is the skill name to load. An unknown
 	// --skill name is a configuration error (SCOPE §15: "V1
 	// skills should primarily inject reusable instructions/context")
-	// and exits 2 per GOAL §2 and TG1. Composition into the model
-	// context is deferred to a future handoff; this handoff only
-	// validates the skill name resolves and the file is readable.
-	// The validation runs BEFORE the --prompt-file check so a
-	// missing prompt file doesn't mask a missing skill (and so the
-	// error message is about the skill, not the prompt).
+	// and exits 2 per GOAL §2 and TG1. The validation runs
+	// BEFORE the --prompt-file check so a missing prompt file
+	// doesn't mask a missing skill (and so the error message is
+	// about the skill, not the prompt). The loaded *Skill is
+	// RETAINED here (handoff 032 discarded the return value
+	// because composition was deferred; handoff 033 threads it
+	// through to runModeExecute for the SCOPE §14 composition).
+	var loadedSkill *skill.Skill
 	if *skillName != "" {
 		var resolvedSkillsDir string
 		var resolvedHome string
@@ -291,11 +312,12 @@ func runRun(args []string) int {
 			}
 			resolvedHome = home
 		}
-		if _, err := skill.Load(*skillName, skill.LoadOptions{
+		s, err := skill.Load(*skillName, skill.LoadOptions{
 			SkillsDir:    resolvedSkillsDir,
 			WorkspaceDir: *workspace,
 			HomeDir:      resolvedHome,
-		}); err != nil {
+		})
+		if err != nil {
 			if errors.Is(err, skill.ErrSkillNotFound) {
 				fmt.Fprintf(os.Stderr, "config error: unknown skill %q\n", *skillName)
 				return 2
@@ -303,6 +325,7 @@ func runRun(args []string) int {
 			fmt.Fprintf(os.Stderr, "config error: load skill %q: %v\n", *skillName, err)
 			return 2
 		}
+		loadedSkill = s
 	}
 
 	// --prompt-file: required, non-empty. The "-" value is
@@ -359,6 +382,9 @@ func runRun(args []string) int {
 		*workspace,
 		*output,
 		*stateDir,
+		*systemText,
+		systemFileContent,
+		loadedSkill,
 	)
 }
 
@@ -371,6 +397,22 @@ func runRun(args []string) int {
 // it directly. It is NOT part of the public CLI surface; it is
 // internal (lowercase, same package).
 //
+// Handoff 033 adds three parameters for SCOPE §14 composition:
+//
+//   - systemText: the value of --system (or "" if unset)
+//   - systemFileContent: the file's bytes read in runRun (or "" if
+//     --system-file was not set)
+//   - loadedSkill: the *Skill returned by skill.Load (or nil if
+//     --skill was not set)
+//
+// systemText and systemFileContent are mutually exclusive
+// (enforced in runRun with exit 2); the inner executor receives
+// exactly one or the other and threads the resolved value into
+// loop.Config.SystemExternal. loadedSkill is dereferenced into a
+// []skill.Skill so loop.Config.Skills carries the SCOPE §14
+// composition shape (a list of skills; the V1 wire allows only
+// one but the type is the seam for future multi-skill runs).
+//
 // The function:
 //  1. Loads the resolved config (config.Load() — existing API).
 //  2. Generates a session ID (newSessionID() — existing helper in
@@ -379,7 +421,8 @@ func runRun(args []string) int {
 //     terminal).
 //  4. Decides the loop's r.out writer (io.Discard for jsonl,
 //     stdout for terminal — the TG3 stdout-purity contract).
-//  5. Constructs loop.Config + model.NewClient + loop.New.
+//  5. Constructs loop.Config + model.NewClient + loop.New with
+//     the SCOPE §14 composition wired into the loop.Config.
 //  6. Calls r.RunOne(context.Background(), prompt).
 //  7. Maps the returned error to a SCOPE §28 exit code and emits
 //     Completed(exit_code) if the error path didn't already emit
@@ -387,7 +430,22 @@ func runRun(args []string) int {
 //     inside RunOne).
 //
 // The function returns the SCOPE §28 exit code.
-func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir string) int {
+func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir, systemText, systemFileContent string, loadedSkill *skill.Skill) int {
+	// Defensive double-check on the mutual-exclusion of --system
+	// and --system-file. runRun already rejects this with exit 2
+	// before this function is reached; the inner check covers any
+	// test that bypasses the outer parser.
+	if systemText != "" && systemFileContent != "" {
+		fmt.Fprintf(os.Stderr, "config error: --system and --system-file are mutually exclusive\n")
+		return 2
+	}
+	systemExternal := systemText + systemFileContent
+
+	var skills []skill.Skill
+	if loadedSkill != nil {
+		skills = []skill.Skill{*loadedSkill}
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
@@ -528,9 +586,12 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir 
 	}
 	client := model.NewClient(modelOpts)
 	r := loop.New(loop.Config{
-		Model:      modelOpts,
-		Workspace:  workspace,
-		Permission: permissionStr,
+		Model:          modelOpts,
+		Workspace:      workspace,
+		Permission:     permissionStr,
+		System:         loop.HarnessSystem,
+		SystemExternal: systemExternal,
+		Skills:         skills,
 	}, client, em, loopOut)
 
 	// Run 008 (handoff 030): record the user message in

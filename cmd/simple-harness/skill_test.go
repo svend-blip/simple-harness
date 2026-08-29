@@ -2,11 +2,19 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
+	"go/parser"
+	"go/token"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/svend-blip/simple-harness/internal/loop"
 )
 
 // captureSkill is the test helper for handoff 032's TestRun_Skill_*
@@ -381,5 +389,359 @@ func TestSkill_NoStartupNamesInRuntime(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// --- handoff 033: composition contract tests + reviewer duty #3 ---
+
+// capturedChatRequest mirrors the OpenAI-compat chat-completions
+// request body shape (the loop's ChatRequest.Messages). Only the
+// fields the new tests assert on are decoded (Role, Content).
+type capturedChatRequest struct {
+	Messages []struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	} `json:"messages"`
+}
+
+// runWithCapturingServer is the private helper for the new
+// httptest-based content-injection tests. It spins up an
+// httptest server whose handler JSON-decodes the request body
+// into the capturedChatRequest pointed at by `out` and returns
+// `data: [DONE]\n\n` so the loop completes cleanly, then runs
+// run(args) with --base-url pointed at the server. Returns
+// the run() exit code and stderr. The captured body is asserted
+// by the caller.
+//
+// The helper is PRIVATE to skill_test.go — the no-shared-
+// helper-exported constraint from handoff 031/032 carries
+// forward.
+func runWithCapturingServer(t *testing.T, args []string, out *capturedChatRequest) (code int, stderr string) {
+	t.Helper()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(out); err != nil {
+			t.Errorf("decode request body: %v", err)
+			http.Error(w, "decode fail", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	// Splice srv.URL into --base-url. The handoff's test list
+	// always passes --base-url explicitly in args; we replace
+	// the placeholder value (or any value) with the test server
+	// URL so the run-mode flag parser sees the new base.
+	newArgs := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--base-url" && i+1 < len(args) {
+			newArgs = append(newArgs, "--base-url", srv.URL)
+			i++
+			continue
+		}
+		newArgs = append(newArgs, args[i])
+	}
+
+	origStdout := os.Stdout
+	origStderr := os.Stderr
+	t.Cleanup(func() {
+		os.Stdout = origStdout
+		os.Stderr = origStderr
+	})
+
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stderr pipe: %v", err)
+	}
+	os.Stdout = outW
+	os.Stderr = errW
+
+	code = run(newArgs)
+
+	_ = outW.Close()
+	_ = errW.Close()
+	_, _ = io.Copy(io.Discard, outR)
+	var errBuf bytes.Buffer
+	_, _ = io.Copy(&errBuf, errR)
+	return code, errBuf.String()
+}
+
+// TestSkill_NoPluginCreep is REVIEWER DUTY #3 (SCOPE §15 +
+// GOAL §5 #3): the skill loader's Go source must NOT import any
+// execution / dynamic-loading package. The test parses
+// internal/skill/skill.go as a Go AST, walks the ImportSpec
+// nodes, and asserts the import path's base does NOT match any
+// of the dangerous prefixes. A future regression that introduces
+// "os/exec", "plugin", "debug/elf", etc. into the loader fails
+// the test by name.
+//
+// The test reports each violation with a clear "SCOPE §15
+// violation: skill loader imports %q" message so the failure
+// output names the offending import path explicitly.
+func TestSkill_NoPluginCreep(t *testing.T) {
+	pwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	projectRoot := filepath.Clean(filepath.Join(pwd, "..", ".."))
+	skillPath := filepath.Join(projectRoot, "internal", "skill", "skill.go")
+
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, skillPath, nil, parser.ImportsOnly)
+	if err != nil {
+		t.Fatalf("parse %s: %v", skillPath, err)
+	}
+
+	dangerous := []string{
+		"os/exec",
+		"plugin",
+		"debug/elf",
+		"debug/gosym",
+		"debug/dwarf",
+	}
+
+	for _, imp := range f.Imports {
+		path := strings.Trim(imp.Path.Value, `"`)
+		for _, d := range dangerous {
+			if path == d {
+				t.Errorf("SCOPE §15 violation: skill loader imports %q (file %s)", path, skillPath)
+			}
+		}
+	}
+}
+
+// TestRun_Skill_ContentInjectedIntoModelContext is the binding
+// wire pin for the SCOPE §14 composition contract. The test:
+//
+//   - writes a cold-start skill under --skills-dir <override>
+//     with a known marker string
+//   - spins up an httptest server whose handler captures the
+//     incoming chat-completions request body and returns
+//     data: [DONE]\n\n
+//   - invokes run with --skill cold-start + --skills-dir
+//     <override>
+//   - asserts the captured request body's messages JSON contains
+//     the marker string (the skill slot), contains a system
+//     message with loop.HarnessSystem (the harness slot), and
+//     contains the user prompt string (the user slot)
+func TestRun_Skill_ContentInjectedIntoModelContext(t *testing.T) {
+	const marker = "LOADED-SKILL-MARKER-cc11"
+	const prompt = "PROMPT-FOR-SKILL-INJECTION-TEST-cc11"
+
+	overrideDir := t.TempDir()
+	writeOverrideSkillFixture(t, overrideDir, "cold-start", marker+"\n")
+	promptFile := filepath.Join(t.TempDir(), "prompt.md")
+	if err := os.WriteFile(promptFile, []byte(prompt), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+
+	var captured capturedChatRequest
+	code, stderr := runWithCapturingServer(t, []string{
+		"run",
+		"--base-url", "http://placeholder",
+		"--model", "qwen",
+		"--workspace", t.TempDir(),
+		"--state-dir", t.TempDir(),
+		"--permission", "read_only",
+		"--prompt-file", promptFile,
+		"--skills-dir", overrideDir,
+		"--skill", "cold-start",
+	}, &captured)
+	if code != 0 {
+		t.Fatalf("run returned %d (expected 0 against [DONE]); stderr=%q", code, stderr)
+	}
+
+	// Defaults: the harness-system text is loop.HarnessSystem;
+	// the marker is the skill content; the prompt is the user
+	// task. The capture should yield exactly 3 messages:
+	// system (harness), system (skill), user (prompt).
+	if len(captured.Messages) != 3 {
+		t.Fatalf("captured %d messages, want 3 (messages=%+v)", len(captured.Messages), captured.Messages)
+	}
+	if captured.Messages[0].Role != "system" || !strings.Contains(captured.Messages[0].Content, loop.HarnessSystem) {
+		t.Errorf("messages[0] = %+v, want {system, contains loop.HarnessSystem}", captured.Messages[0])
+	}
+	if captured.Messages[1].Role != "system" || !strings.Contains(captured.Messages[1].Content, marker) {
+		t.Errorf("messages[1] = %+v, want {system, contains %q}", captured.Messages[1], marker)
+	}
+	if captured.Messages[2].Role != "user" || captured.Messages[2].Content != prompt {
+		t.Errorf("messages[2] = %+v, want {user, %q}", captured.Messages[2], prompt)
+	}
+}
+
+// TestRun_Skill_SourceWinsOnCollision_ContentInContext pins
+// SCOPE §15's workspace-wins-on-collision rule AT THE
+// COMPOSITION LEVEL (not just the loader level). The test
+// writes DISTINGUISHABLE skill content under both the
+// workspace root and the HOME root, then asserts the workspace
+// content lands in the model context and the global content
+// is shadowed.
+func TestRun_Skill_SourceWinsOnCollision_ContentInContext(t *testing.T) {
+	const wsMarker = "WS-WINS-PIN-cc11"
+	const homeMarker = "HOME-LOSES-PIN-dd22"
+
+	home := t.TempDir()
+	ws := t.TempDir()
+	t.Setenv("HOME", home)
+
+	writeSkillFixture(t, ws, "cold-start", wsMarker+"\n")
+	writeSkillFixture(t, home, "cold-start", homeMarker+"\n")
+
+	promptFile := filepath.Join(t.TempDir(), "prompt.md")
+	if err := os.WriteFile(promptFile, []byte("hi"), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+
+	var captured capturedChatRequest
+	code, stderr := runWithCapturingServer(t, []string{
+		"run",
+		"--base-url", "http://placeholder",
+		"--model", "qwen",
+		"--workspace", ws,
+		"--state-dir", t.TempDir(),
+		"--permission", "read_only",
+		"--prompt-file", promptFile,
+		"--skill", "cold-start",
+	}, &captured)
+	if code != 0 {
+		t.Fatalf("run returned %d (expected 0 against [DONE]); stderr=%q", code, stderr)
+	}
+
+	// Walk the captured messages; wsMarker must appear (in a
+	// system message), homeMarker must NOT appear anywhere.
+	foundWS := false
+	for _, m := range captured.Messages {
+		if m.Role == "system" && strings.Contains(m.Content, wsMarker) {
+			foundWS = true
+		}
+		if strings.Contains(m.Content, homeMarker) {
+			t.Errorf("workspace shadow failed: HOME content %q appeared in a model-context message", homeMarker)
+		}
+	}
+	if !foundWS {
+		t.Errorf("workspace content %q not found in any system message (messages=%+v)", wsMarker, captured.Messages)
+	}
+}
+
+// TestRun_System_BothFlags_Errors pins the mutual-exclusion of
+// --system and --system-file. The test sets both, asserts exit 2,
+// and asserts stderr contains "mutually exclusive".
+func TestRun_System_BothFlags_Errors(t *testing.T) {
+	tmp := t.TempDir()
+	sysFile := filepath.Join(tmp, "system.txt")
+	if err := os.WriteFile(sysFile, []byte("FILE-SYSTEM-CONTENT-cc11"), 0o644); err != nil {
+		t.Fatalf("write sys file: %v", err)
+	}
+	promptFile := filepath.Join(tmp, "prompt.md")
+	if err := os.WriteFile(promptFile, []byte("hi"), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+
+	code, _, stderr := captureSkill(t, []string{
+		"run",
+		"--base-url", "http://127.0.0.1:9",
+		"--model", "tg",
+		"--workspace", tmp,
+		"--state-dir", t.TempDir(),
+		"--permission", "read_only",
+		"--prompt-file", promptFile,
+		"--system", "INLINE-CONTENT-cc11",
+		"--system-file", sysFile,
+	})
+	if code != 2 {
+		t.Fatalf("run --system + --system-file returned %d, want 2 (stderr=%q)", code, stderr)
+	}
+	if !strings.Contains(stderr, "mutually exclusive") {
+		t.Fatalf("run --system + --system-file stderr missing %q; got %q", "mutually exclusive", stderr)
+	}
+}
+
+// TestRun_System_TextInjectedIntoContext pins the inline --system
+// <text> flag at the wire level. The test sets --system to a
+// marker string and asserts the captured request body's messages
+// JSON contains the marker (in a system message).
+func TestRun_System_TextInjectedIntoContext(t *testing.T) {
+	const marker = "INLINE-SYSTEM-MARKER-cc11"
+
+	promptFile := filepath.Join(t.TempDir(), "prompt.md")
+	if err := os.WriteFile(promptFile, []byte("hi"), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+
+	var captured capturedChatRequest
+	code, stderr := runWithCapturingServer(t, []string{
+		"run",
+		"--base-url", "http://placeholder",
+		"--model", "qwen",
+		"--workspace", t.TempDir(),
+		"--state-dir", t.TempDir(),
+		"--permission", "read_only",
+		"--prompt-file", promptFile,
+		"--system", marker,
+	}, &captured)
+	if code != 0 {
+		t.Fatalf("run --system returned %d (expected 0 against [DONE]); stderr=%q", code, stderr)
+	}
+
+	found := false
+	for _, m := range captured.Messages {
+		if m.Role == "system" && strings.Contains(m.Content, marker) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("inline --system content %q not found in any system message (messages=%+v)", marker, captured.Messages)
+	}
+}
+
+// TestRun_System_FileInjectedIntoContext pins the file-based
+// --system-file <path> flag at the wire level. The test writes a
+// tmpfile with a marker, invokes --system-file <tmpfile>, and
+// asserts the marker appears in a system message in the
+// captured request body.
+func TestRun_System_FileInjectedIntoContext(t *testing.T) {
+	const marker = "FILE-SYSTEM-MARKER-cc11"
+
+	tmp := t.TempDir()
+	sysFile := filepath.Join(tmp, "system.txt")
+	if err := os.WriteFile(sysFile, []byte(marker), 0o644); err != nil {
+		t.Fatalf("write sys file: %v", err)
+	}
+	promptFile := filepath.Join(tmp, "prompt.md")
+	if err := os.WriteFile(promptFile, []byte("hi"), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+
+	var captured capturedChatRequest
+	code, stderr := runWithCapturingServer(t, []string{
+		"run",
+		"--base-url", "http://placeholder",
+		"--model", "qwen",
+		"--workspace", tmp,
+		"--state-dir", t.TempDir(),
+		"--permission", "read_only",
+		"--prompt-file", promptFile,
+		"--system-file", sysFile,
+	}, &captured)
+	if code != 0 {
+		t.Fatalf("run --system-file returned %d (expected 0 against [DONE]); stderr=%q", code, stderr)
+	}
+
+	found := false
+	for _, m := range captured.Messages {
+		if m.Role == "system" && strings.Contains(m.Content, marker) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("--system-file content %q not found in any system message (messages=%+v)", marker, captured.Messages)
 	}
 }
