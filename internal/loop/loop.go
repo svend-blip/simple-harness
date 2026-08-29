@@ -31,6 +31,7 @@ import (
 	"io"
 	"strings"
 
+	contextpkg "github.com/svend-blip/simple-harness/internal/context"
 	"github.com/svend-blip/simple-harness/internal/event"
 	"github.com/svend-blip/simple-harness/internal/model"
 	"github.com/svend-blip/simple-harness/internal/skill"
@@ -85,27 +86,31 @@ type Config struct {
 }
 
 // Run is a single-turn interactive loop session. It owns the model
-// client, the event emitter, and the human-facing stdout writer.
-// Construct via New; reuse across multiple RunOne calls (one
-// prompt at a time). The Run does NOT spawn goroutines itself;
-// RunOne is the unit of work the cmd calls once per prompt.
+// client, the event emitter, the human-facing stdout writer, and
+// the per-Run context accounting ledger. Construct via New; reuse
+// across multiple RunOne calls (one prompt at a time). The Run
+// does NOT spawn goroutines itself; RunOne is the unit of work
+// the cmd calls once per prompt.
 type Run struct {
 	cfg    Config
 	client *model.Client
 	em     *event.Emitter
 	out    io.Writer
+	ledger *contextpkg.Ledger
 }
 
 // New returns a Run with its dependencies wired. The caller supplies
 // the emitter (so the cmd can decide where the JSONL sidecar goes)
 // and the human-facing stdout writer (the same writer that gets
-// the streamed assistant text written to it).
+// the streamed assistant text written to it). The context ledger
+// is initialized empty; RunOne populates it after ComposeMessages.
 func New(cfg Config, client *model.Client, em *event.Emitter, out io.Writer) *Run {
 	return &Run{
 		cfg:    cfg,
 		client: client,
 		em:     em,
 		out:    out,
+		ledger: &contextpkg.Ledger{},
 	}
 }
 
@@ -128,6 +133,31 @@ func New(cfg Config, client *model.Client, em *event.Emitter, out io.Writer) *Ru
 // --skill had not been set).
 func (r *Run) SetSkills(skills []skill.Skill) {
 	r.cfg.Skills = skills
+}
+
+// Ledger returns the per-Run context accounting ledger. The
+// ledger accumulates entries as RunOne builds the composed
+// message list; each RunOne call appends HarnessSystem +
+// ExternalSystem (if non-empty) + each Skill (with non-empty
+// content) + Task to the ledger. ToolSchemas / Conversation /
+// ToolResults are tracked as categories but currently zero
+// entries (V1: the loop does not yet dispatch tools or maintain
+// multi-turn conversation history; future Runs that add those
+// surfaces will extend RunOne to populate them).
+//
+// The ledger is the binding seam for SCOPE §18 context
+// observability: the cmd's `context show` command reads it via
+// this accessor and renders the SCOPE §19 accounting report;
+// the cmd's `context doctor` command reads it and renders the
+// SCOPE §20 diagnostics. Run 010 handoff 035 ships this
+// accessor + the loop population; handoffs 036 + 037 ship the
+// commands that consume it.
+//
+// NOT safe for concurrent use with an in-flight RunOne call.
+// The interactive REPL is single-goroutine; no locking
+// required.
+func (r *Run) Ledger() *contextpkg.Ledger {
+	return r.ledger
 }
 
 // RunOne executes one turn: emits started, calls
@@ -183,6 +213,24 @@ func (r *Run) RunOne(ctx context.Context, prompt string) (string, error) {
 		}
 		return nil
 	}
+
+	// SCOPE §18 ledger population: track each category of content
+	// that is about to be sent to the model. V1 tracks
+	// HarnessSystem + ExternalSystem + Skill(s) + Task. Empty
+	// categories are skipped (matches ComposeMessages semantics).
+	if r.cfg.System != "" {
+		r.ledger.Add(contextpkg.HarnessSystem, "harness", r.cfg.System)
+	}
+	if r.cfg.SystemExternal != "" {
+		r.ledger.Add(contextpkg.ExternalSystem, "external", r.cfg.SystemExternal)
+	}
+	for _, s := range r.cfg.Skills {
+		if s.Content == "" {
+			continue
+		}
+		r.ledger.Add(contextpkg.Skill, s.Name, s.Content)
+	}
+	r.ledger.Add(contextpkg.Task, "task", prompt)
 
 	err := r.client.ChatStream(ctx, model.ChatRequest{
 		Messages: ComposeMessages(r.cfg, prompt),

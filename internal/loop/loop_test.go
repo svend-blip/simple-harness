@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	contextpkg "github.com/svend-blip/simple-harness/internal/context"
 	"github.com/svend-blip/simple-harness/internal/event"
 	"github.com/svend-blip/simple-harness/internal/model"
 	"github.com/svend-blip/simple-harness/internal/skill"
@@ -582,5 +583,288 @@ func TestRunOne_PassesComposedMessagesToClient(t *testing.T) {
 		if captured.Messages[i].Content != w.content {
 			t.Errorf("captured[%d].content = %q, want %q", i, captured.Messages[i].Content, w.content)
 		}
+	}
+}
+
+// --- handoff 035: TestRun_Ledger_* tests ---
+
+// newCaptureServer returns an httptest server that replies with a
+// single `data: [DONE]\n\n` payload (a clean completion path with
+// no streaming deltas) plus a captured-request sidecar that the
+// tests can inspect. It is the loop-test fixture pattern reused
+// across the handoff 035 binding tests.
+func newCaptureServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	return srv
+}
+
+// TestRun_Ledger_EmptyConfig_PopulatesHarnessSystemAndTask: drive
+// RunOne with only HarnessSystem set and no external/skills; the
+// ledger must contain EXACTLY two entries: HarnessSystem +
+// Task.
+func TestRun_Ledger_EmptyConfig_PopulatesHarnessSystemAndTask(t *testing.T) {
+	srv := newCaptureServer(t)
+	defer srv.Close()
+
+	var sidecar bytes.Buffer
+	em := event.NewEmitter(&sidecar, "sess-ledger-empty")
+	var stdout bytes.Buffer
+	client := model.NewClient(model.Options{
+		BaseURL:        srv.URL,
+		Model:          "qwen",
+		RequestTimeout: 2 * time.Second,
+	})
+	r := New(Config{
+		Model:      model.Options{BaseURL: srv.URL, Model: "qwen"},
+		Workspace:  "/tmp/ws",
+		Permission: "READ_ONLY",
+		System:     HarnessSystem,
+	}, client, em, &stdout)
+
+	if _, err := r.RunOne(context.Background(), "hi"); err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+
+	led := r.Ledger()
+	if led == nil {
+		t.Fatal("Ledger() returned nil")
+	}
+	if len(led.Entries) != 2 {
+		t.Fatalf("len(Entries) = %d, want 2 (got=%+v)", len(led.Entries), led.Entries)
+	}
+	if led.Entries[0].Category != contextpkg.HarnessSystem {
+		t.Errorf("Entries[0].Category = %q, want %q", led.Entries[0].Category, contextpkg.HarnessSystem)
+	}
+	if led.Entries[0].Name != "harness" {
+		t.Errorf("Entries[0].Name = %q, want %q", led.Entries[0].Name, "harness")
+	}
+	if led.Entries[1].Category != contextpkg.Task {
+		t.Errorf("Entries[1].Category = %q, want %q", led.Entries[1].Category, contextpkg.Task)
+	}
+	if led.Entries[1].Name != "task" {
+		t.Errorf("Entries[1].Name = %q, want %q", led.Entries[1].Name, "task")
+	}
+}
+
+// TestRun_Ledger_AllSlotsPopulated: drive RunOne with all four
+// populated slots; the ledger must contain EXACTLY four entries
+// in the canonical order: HarnessSystem, ExternalSystem, Skill,
+// Task.
+func TestRun_Ledger_AllSlotsPopulated(t *testing.T) {
+	srv := newCaptureServer(t)
+	defer srv.Close()
+
+	var sidecar bytes.Buffer
+	em := event.NewEmitter(&sidecar, "sess-ledger-all")
+	var stdout bytes.Buffer
+	client := model.NewClient(model.Options{
+		BaseURL:        srv.URL,
+		Model:          "qwen",
+		RequestTimeout: 2 * time.Second,
+	})
+	r := New(Config{
+		Model:          model.Options{BaseURL: srv.URL, Model: "qwen"},
+		Workspace:      "/tmp/ws",
+		Permission:     "READ_ONLY",
+		System:         HarnessSystem,
+		SystemExternal: "governance-text",
+		Skills:         []skill.Skill{{Name: "cold-start", Content: "skill-body"}},
+	}, client, em, &stdout)
+
+	if _, err := r.RunOne(context.Background(), "hi"); err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+
+	led := r.Ledger()
+	if len(led.Entries) != 4 {
+		t.Fatalf("len(Entries) = %d, want 4 (got=%+v)", len(led.Entries), led.Entries)
+	}
+	want := []struct {
+		cat contextpkg.Category
+		nm  string
+	}{
+		{contextpkg.HarnessSystem, "harness"},
+		{contextpkg.ExternalSystem, "external"},
+		{contextpkg.Skill, "cold-start"},
+		{contextpkg.Task, "task"},
+	}
+	for i, w := range want {
+		if led.Entries[i].Category != w.cat {
+			t.Errorf("Entries[%d].Category = %q, want %q", i, led.Entries[i].Category, w.cat)
+		}
+		if led.Entries[i].Name != w.nm {
+			t.Errorf("Entries[%d].Name = %q, want %q", i, led.Entries[i].Name, w.nm)
+		}
+	}
+}
+
+// TestRun_Ledger_SkillsPreserveOrder_AcrossRunOneCalls: drive
+// RunOne TWICE with the SAME skill set; the ledger accumulates
+// EIGHT entries (4 per RunOne call, in the same order each call).
+// This is the TestComposeMessages_SkillsPreserveOrder precedent
+// carried to the ledger.
+func TestRun_Ledger_SkillsPreserveOrder_AcrossRunOneCalls(t *testing.T) {
+	srv := newCaptureServer(t)
+	defer srv.Close()
+
+	var sidecar bytes.Buffer
+	em := event.NewEmitter(&sidecar, "sess-ledger-order")
+	var stdout bytes.Buffer
+	client := model.NewClient(model.Options{
+		BaseURL:        srv.URL,
+		Model:          "qwen",
+		RequestTimeout: 2 * time.Second,
+	})
+	r := New(Config{
+		Model:          model.Options{BaseURL: srv.URL, Model: "qwen"},
+		Workspace:      "/tmp/ws",
+		Permission:     "READ_ONLY",
+		System:         HarnessSystem,
+		SystemExternal: "E",
+		Skills:         []skill.Skill{{Name: "s", Content: "A"}},
+	}, client, em, &stdout)
+
+	if _, err := r.RunOne(context.Background(), "p1"); err != nil {
+		t.Fatalf("RunOne #1: %v", err)
+	}
+	if _, err := r.RunOne(context.Background(), "p2"); err != nil {
+		t.Fatalf("RunOne #2: %v", err)
+	}
+
+	led := r.Ledger()
+	if len(led.Entries) != 8 {
+		t.Fatalf("len(Entries) = %d, want 8 (got=%+v)", len(led.Entries), led.Entries)
+	}
+	want := []string{"harness", "external", "s", "task", "harness", "external", "s", "task"}
+	for i, nm := range want {
+		if led.Entries[i].Name != nm {
+			t.Errorf("Entries[%d].Name = %q, want %q", i, led.Entries[i].Name, nm)
+		}
+	}
+}
+
+// TestRun_Ledger_Total_MatchesSum: drive RunOne with a known
+// Config; the ledger's Total() equals the sum of
+// contextpkg.Estimate(content) for each populated entry. This is
+// the consistency pin that the loop uses the same Estimate
+// function the package exports.
+func TestRun_Ledger_Total_MatchesSum(t *testing.T) {
+	srv := newCaptureServer(t)
+	defer srv.Close()
+
+	var sidecar bytes.Buffer
+	em := event.NewEmitter(&sidecar, "sess-ledger-total")
+	var stdout bytes.Buffer
+	client := model.NewClient(model.Options{
+		BaseURL:        srv.URL,
+		Model:          "qwen",
+		RequestTimeout: 2 * time.Second,
+	})
+	r := New(Config{
+		Model:          model.Options{BaseURL: srv.URL, Model: "qwen"},
+		Workspace:      "/tmp/ws",
+		Permission:     "READ_ONLY",
+		System:         "H",
+		SystemExternal: "E",
+		Skills:         []skill.Skill{{Name: "s", Content: "S"}},
+	}, client, em, &stdout)
+
+	if _, err := r.RunOne(context.Background(), "p"); err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+
+	led := r.Ledger()
+	want := contextpkg.Estimate("H") + contextpkg.Estimate("E") +
+		contextpkg.Estimate("S") + contextpkg.Estimate("p")
+	if got := led.Total(); got != want {
+		t.Errorf("Total() = %d, want %d (Estimate(H)+Estimate(E)+Estimate(S)+Estimate(p))", got, want)
+	}
+}
+
+// TestRun_Ledger_OverflowNotTriggered_NoLimit: drive RunOne with a
+// small Config; r.Ledger().Overflow() returns nil (the Limit field
+// defaults to 0, so overflow never triggers).
+func TestRun_Ledger_OverflowNotTriggered_NoLimit(t *testing.T) {
+	srv := newCaptureServer(t)
+	defer srv.Close()
+
+	var sidecar bytes.Buffer
+	em := event.NewEmitter(&sidecar, "sess-ledger-overflow")
+	var stdout bytes.Buffer
+	client := model.NewClient(model.Options{
+		BaseURL:        srv.URL,
+		Model:          "qwen",
+		RequestTimeout: 2 * time.Second,
+	})
+	r := New(Config{
+		Model:      model.Options{BaseURL: srv.URL, Model: "qwen"},
+		Workspace:  "/tmp/ws",
+		Permission: "READ_ONLY",
+		System:     "tiny",
+	}, client, em, &stdout)
+
+	if _, err := r.RunOne(context.Background(), "hi"); err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+
+	if err := r.Ledger().Overflow(); err != nil {
+		t.Errorf("Overflow() returned error with no Limit set: %v", err)
+	}
+}
+
+// TestRun_Ledger_ConcurrentReads_NotGuardedByLock: drive RunOne
+// once; in a separate goroutine (NOT in-flight with RunOne), call
+// r.Ledger() and read the entries. The test verifies the
+// docstring's "NOT safe for concurrent use with an in-flight
+// RunOne call" contract by demonstrating that the SEQUENTIAL
+// access pattern works. The test does NOT spawn a goroutine
+// that reads the ledger WHILE RunOne is in flight (that would be
+// a violation of the docstring contract and is the implementer's
+// responsibility to avoid, not the test's).
+func TestRun_Ledger_ConcurrentReads_NotGuardedByLock(t *testing.T) {
+	srv := newCaptureServer(t)
+	defer srv.Close()
+
+	var sidecar bytes.Buffer
+	em := event.NewEmitter(&sidecar, "sess-ledger-concurrent")
+	var stdout bytes.Buffer
+	client := model.NewClient(model.Options{
+		BaseURL:        srv.URL,
+		Model:          "qwen",
+		RequestTimeout: 2 * time.Second,
+	})
+	r := New(Config{
+		Model:      model.Options{BaseURL: srv.URL, Model: "qwen"},
+		Workspace:  "/tmp/ws",
+		Permission: "READ_ONLY",
+		System:     "H",
+	}, client, em, &stdout)
+
+	doneRun := make(chan struct{})
+	go func() {
+		_, _ = r.RunOne(context.Background(), "p")
+		close(doneRun)
+	}()
+	<-doneRun
+
+	type readResult struct {
+		n     int
+		total int
+	}
+	doneRead := make(chan readResult)
+	go func() {
+		led := r.Ledger()
+		doneRead <- readResult{n: len(led.Entries), total: led.Total()}
+	}()
+	res := <-doneRead
+	if res.n == 0 {
+		t.Errorf("ledger read returned 0 entries, want > 0")
+	}
+	if res.total == 0 {
+		t.Errorf("ledger read returned Total=0, want > 0")
 	}
 }
