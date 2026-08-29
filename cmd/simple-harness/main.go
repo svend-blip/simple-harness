@@ -25,8 +25,8 @@
 // No semantic memory, no embeddings, no tool-output caching. The
 // messages.jsonl is the SCOPE §17 "execution history" record only.
 // Inspection subcommands (`simple-harness sessions list` /
-// `sessions show`) land on handoff 031. Each remaining gap is a
-// future Run per the architecture.
+// `sessions show`) are the Run 008 inspection work slot (handoff
+// 031). Each remaining gap is a future Run per the architecture.
 //
 // Architectural boundary: this is a Simple Harness component. It does not
 // import orchestration, harness selection, GPU/VRAM allocation,
@@ -66,7 +66,7 @@ import (
 // without shelling out or reading the binary itself. The format is a
 // single line, project-name first, so an external parser does not need to
 // interpret it to extract the version.
-const Version = "simple-harness 0.1.0-dev (Run 008, handoff 030)"
+const Version = "simple-harness 0.1.0-dev (Run 008, handoff 031)"
 
 // globalRegistry is the tool registry the `simple-harness tools`
 // subcommand lists. Handoff 013 leaves it EMPTY; Run 014 / Run 015 will
@@ -110,6 +110,8 @@ Flags:
 
 Subcommands:
   config show           print the resolved configuration (secrets redacted)
+  sessions list         enumerate session ids under --state-dir (one per line)
+  sessions show <id>    print session.json for <id> (pretty-printed)
   run                   execute one turn non-interactively, emit JSONL events
 
 Interactive mode (the default when no flags or subcommands are given)
@@ -176,6 +178,9 @@ func run(args []string) int {
 	}
 	if len(args) > 0 && args[0] == "tools" {
 		return runTools(args[1:])
+	}
+	if len(args) > 0 && args[0] == "sessions" {
+		return runSessions(args[1:])
 	}
 	if len(args) > 0 && args[0] == "run" {
 		return runRun(args[1:])
