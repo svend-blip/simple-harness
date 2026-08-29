@@ -1034,10 +1034,24 @@ $ cat ~/.simple-harness/sessions/<id>/events.jsonl | \
 
 * After any sample run completes:
   * `~/.simple-harness/sessions/<session-id>/session.json` exists and
-    is valid JSON carrying `session_id` + `base_url` + `model` +
-    `permission` + `workspace` + `created_at`.
+    is valid JSON carrying:
+    * top-level: `session_id` + `started_at` (RFC 3339 UTC timestamp
+      of session creation) + `ended_at` (RFC 3339 UTC timestamp of
+      session close, omitted on interrupted sessions) + `status`
+      (`completed` / `failed` / `interrupted`) + `exit_code` +
+      `events_path` (relative path, `"events.jsonl"`);
+    * nested under `config`: `base_url` + `model` + `workspace` +
+      `permission` + `output_mode` (the latter omitted when empty).
   * `events.jsonl` is ≥ 1 line + every line is valid JSON.
   * `messages.jsonl` is non-empty.
+
+Note: the four identity-card fields `base_url`, `model`, `workspace`,
+`permission` are nested under a `config` sub-object in `session.json`
+to match the same nested-config shape emitted in the JSONL `started`
+event's `config` sub-object (per `internal/event/event.go`'s
+`SessionConfig`). The session-creation timestamp is named `started_at`
+(distinct from any future `created_at` field); the session-close
+timestamp is `ended_at`.
 
 ---
 
@@ -1163,7 +1177,7 @@ claim above.
 | (b) config-error exit 2 | `### prepare` | exit 2 + stderr matches `/config error: --base-url is required/`. |
 | (c) unreachable endpoint | `### start` | exit 3 + JSONL is non-empty + every line is parseable JSON + at least one `"event":"started"` line + at least one `"event":"completed"` line with `"exit_code":3`. |
 | (d) SIGTERM exit 6 | `### interrupt` | Harness exits within 5s after SIGTERM + sidecar JSONL contains an `interrupted` event + terminal event has `"exit_code":6`. (Best-effort — SKIP if endpoint down.) |
-| (e) session layout | `### collect` | Each session directory has `session.json` (valid JSON carrying `session_id` + `base_url` + `model` + `permission` + `workspace` + `created_at`) + `events.jsonl` (≥ 1 line, every line valid JSON) + `messages.jsonl` (non-empty). |
+| (e) session layout | `### collect` | Each session directory has `session.json` (valid JSON carrying top-level `session_id` + `started_at` + `ended_at` + `status` + `exit_code` + `events_path` + nested `config.base_url` + `config.model` + `config.workspace` + `config.permission` + `config.output_mode`) + `events.jsonl` (≥ 1 line, every line valid JSON) + `messages.jsonl` (non-empty). |
 
 ---
 

@@ -209,10 +209,12 @@ assert_sigterm_exit_6() {
 
 # --- Assertion (e): session layout ----------------------------------
 # Document claim (§collect): each session dir has session.json (valid
-# JSON carrying session_id + base_url + model + permission + workspace
-# + created_at) + events.jsonl (>=1 line, every line valid JSON) +
-# messages.jsonl (non-empty). Source: internal/session/writer.go +
-# internal/session/session.go (the Session and Config structs).
+# JSON carrying top-level session_id + started_at + status + exit_code
+# + events_path, plus the nested config sub-object with base_url +
+# model + workspace + permission) + events.jsonl (>=1 line, every line
+# valid JSON) + messages.jsonl (non-empty). Source:
+# internal/session/writer.go + internal/session/session.go (the Session
+# and Config structs).
 assert_session_layout() {
   local sd="$CONTRACT_CHECK_STATE_DIR"
   local sessions
@@ -226,18 +228,31 @@ assert_session_layout() {
     [[ -f "$dir/session.json" ]] || { all_ok=false; echo "  MISSING session.json in $dir" >&2; continue; }
     [[ -f "$dir/events.jsonl" ]] || { all_ok=false; echo "  MISSING events.jsonl in $dir" >&2; continue; }
     [[ -f "$dir/messages.jsonl" ]] || { all_ok=false; echo "  MISSING messages.jsonl in $dir" >&2; continue; }
-    # Verify session.json is valid JSON with the required identity-card
-    # fields per the contract document's anchor table. The fields are
-    # the flat top-level keys enumerated in
-    # docs/HARNESS-CONTRACT.md:1166.
+    # Verify session.json is valid JSON with the required top-level
+    # identity-card fields + the nested `config` sub-object per the
+    # contract document's anchor table (docs/HARNESS-CONTRACT.md:1166).
+    # The top-level fields are session_id + started_at + status +
+    # exit_code + events_path + the nested `config` itself; the nested
+    # `config` must be a dict containing base_url + model + workspace +
+    # permission. Source: internal/session/session.go:37-43 (Config
+    # struct) + :49-57 (Session struct) + internal/session/writer.go
+    # :94-118 (Writer.Write).
     python3 -c "
 import json, sys
-required = ['session_id', 'base_url', 'model', 'permission', 'workspace', 'created_at']
+required_top = ['session_id', 'started_at', 'status', 'exit_code', 'events_path', 'config']
+required_nested = ['base_url', 'model', 'workspace', 'permission']
 with open('$dir/session.json') as f:
     cfg = json.load(f)
-missing = [k for k in required if k not in cfg]
-if missing:
-    print(f'  missing {missing} in $dir/session.json')
+missing_top = [k for k in required_top if k not in cfg]
+if missing_top:
+    print(f'  missing top-level {missing_top} in $dir/session.json')
+    sys.exit(1)
+if not isinstance(cfg.get('config'), dict):
+    print(f'  config is not a dict in $dir/session.json')
+    sys.exit(1)
+missing_nested = [k for k in required_nested if k not in cfg['config']]
+if missing_nested:
+    print(f'  missing config.{missing_nested} in $dir/session.json')
     sys.exit(1)
 " 2>&1 || { all_ok=false; continue; }
     [[ -s "$dir/events.jsonl" ]] || { all_ok=false; echo "  EMPTY events.jsonl in $dir" >&2; continue; }
