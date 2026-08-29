@@ -1046,7 +1046,7 @@ func TestRun_Version(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 010, handoff 038)"
+	want := "simple-harness 0.1.0-dev (Run 011, handoff 039)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}
@@ -1351,7 +1351,7 @@ func TestRun_Version_AdvancesToHandoff024(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 010, handoff 038)"
+	want := "simple-harness 0.1.0-dev (Run 011, handoff 039)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}
@@ -2060,7 +2060,7 @@ func TestRun_Version_AdvancesToHandoff030(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 010, handoff 038)"
+	want := "simple-harness 0.1.0-dev (Run 011, handoff 039)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}
@@ -2465,5 +2465,38 @@ func TestInteractiveMode_ExitCommand_StillExits0(t *testing.T) {
 		data, _ := os.ReadFile(sidecar)
 		t.Fatalf("`/exit` emitted `interrupted` event (should be reserved for the second-press terminate path); sidecar=%s",
 			data)
+	}
+}
+
+// TestE2E_AcceptanceRunner_RequiresArgs_Exits1 — the in-process Go
+// binding pin for Run 011 / handoff 039's GOAL §6 TG2 ("the
+// acceptance runner exists, is executable, and validates its
+// arguments"). Drives scripts/e2e-coding.sh as a subprocess with
+// no arguments and asserts exit code != 0 AND stderr contains the
+// substring "usage" (the placeholder usage message from the
+// handoff 039 script body).
+//
+// The script's working directory at exec time MUST be the project
+// root (the script is a relative-path executable that reads no
+// workspace files in this handoff, but its `test -x` is what TG2
+// verifies; running it from the project root ensures the chmod
+// +x bit is honored and the script's shebang line resolves
+// correctly). Under `go test`, os.Getwd() == cmd/simple-harness;
+// the project root is two parents up.
+func TestE2E_AcceptanceRunner_RequiresArgs_Exits1(t *testing.T) {
+	projectRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("abs projectRoot: %v", err)
+	}
+	cmd := exec.Command("./scripts/e2e-coding.sh")
+	cmd.Dir = projectRoot
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+	if runErr == nil {
+		t.Fatalf("expected non-zero exit code from scripts/e2e-coding.sh with no args, got nil (exit 0)")
+	}
+	if !strings.Contains(stderr.String(), "usage") {
+		t.Fatalf("expected stderr to contain 'usage' substring, got: %q", stderr.String())
 	}
 }
