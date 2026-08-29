@@ -4,25 +4,28 @@
 // short-circuits, and the config-error exit-2 wiring for the four
 // SCOPE §28 / GOAL §2 config-error conditions (missing prompt file,
 // invalid --output, empty --base-url, empty --model) plus the
-// missing-system-file case. Handoff 023 lands the run-execution
-// path: a separate `Emitter` writing JSONL to os.Stdout, the model
-// client invocation through loop.RunOne, the exit-3 mapping for
-// unreachable endpoints (TG2), and the stdout-purity guarantee that
-// every line on stdout parses as JSON (TG3).
+// missing-system-file case. Handoff 024 lands the run-execution
+// path: a separate `Emitter` writing JSONL to os.Stdout (--output
+// jsonl) or to a <workspace>/sessions/<session-id>/events.jsonl
+// sidecar (--output terminal), the model client invocation through
+// loop.RunOne, the SCOPE §28 exit-code mapping for *model.ModelError
+// (ErrHTTP|ErrParse|ErrUpstream -> 3, ErrTimeout -> 6), and the
+// stdout-purity guarantee that every line on stdout parses as JSON
+// (TG3) for the --output jsonl surface.
 //
-// This file is intentionally the smallest foundation that
+// This file wires the full run-mode execution path:
 // (a) parses + validates the run-mode flags with SCOPE §28-correct
-// exit codes and stderr messages,
-// (b) is fully covered by seven new TestRun_* tests in
-// main_test.go (the run --help half of TG4, the run
-// --version half, the missing-prompt-file exit-2 case, the
-// invalid --output exit-2 case, the empty --base-url exit-2 case,
-// the empty --model exit-2 case, the missing --system-file exit-2
-// case), and
-// (c) leaves the handoff 023 seam clean: the flag-parsed values
-// are validated and the prompt is read into memory; the loop
-// call + emitter + error mapping is the only thing 023 has to
-// add.
+// exit codes and stderr messages (handoff 022's foundation),
+// (b) reads the prompt file's contents into memory and constructs
+// the model client + emitter + loop (handoff 024's extension),
+// (c) calls loop.RunOne and maps the returned error to the SCOPE §28
+// exit code, emitting a terminal completed(exit_code) event on the
+// failure path (the loop's success path emits Completed(0) from
+// inside RunOne), and
+// (d) lands the four run-mode testgoals end-to-end (TG1 regression,
+// full TG2 unreachable endpoint + JSONL events + exit 3, full TG3
+// every-JSONL-line-parses, full TG4 `simple-harness run --help` +
+// `./scripts/test.sh`).
 //
 // runUsage is the help text printed by `simple-harness run --help`.
 // The full text is a const so the test can pin the substring
@@ -32,11 +35,18 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
-	"strings"
+	"path/filepath"
+
+	"github.com/svend-blip/simple-harness/internal/config"
+	"github.com/svend-blip/simple-harness/internal/event"
+	"github.com/svend-blip/simple-harness/internal/loop"
+	"github.com/svend-blip/simple-harness/internal/model"
 )
 
 // runUsage is the help text printed by `simple-harness run --help`
@@ -81,13 +91,14 @@ Flags:
                           assistant_stream, completed.
 
 Exit codes (SCOPE §28):
-  0  clean exit (run-mode validation passed; handoff 023 will
-     also return 0 on a successful model turn)
-  1  generic failure (flag parse error, etc.)
+  0  clean exit (run-mode validation passed; also returned on a
+     successful model turn)
+  1  generic failure (flag parse error, runtime I/O error, etc.)
   2  configuration error (missing prompt file, invalid --output,
      empty --base-url, empty --model, missing --system-file)
-  3  model/API failure (handoff 023 — unreachable endpoint,
-     HTTP 5xx, malformed SSE)
+  3  model/API failure (unreachable endpoint, HTTP 5xx, malformed
+     SSE; the JSONL stream carries a 'status: FAILED' event and a
+     'completed(exit_code: 3)' event before the process exits)
 
 See docs/ARCHITECTURE.md §"Distribution shape" for the full
 contract and the V1 event protocol.
@@ -112,7 +123,7 @@ contract and the V1 event protocol.
 // the flag-parsed config is validated, the prompt file is read
 // (or the stdin-policy "-" case is exercised), the system file
 // is validated, and the function returns 0 with NO events
-// emitted. Handoff 023 wraps this validation with the emitter
+// emitted. Handoff 024 wraps this validation with the emitter
 // + the loop call + the error mapping. The decomposition choice
 // is documented in the handoff 022 result file's "Public-surface
 // choices" subsection.
@@ -179,7 +190,7 @@ func runRun(args []string) int {
 	// --workspace: optional. Default to os.Getwd() when empty,
 	// matching the interactive-mode default at runInteractive
 	// (line ~322). The default is computed eagerly so a future
-	// handoff 023 can use the value as-is without re-running
+	// handoff 024 can use the value as-is without re-running
 	// the resolution.
 	if *workspace == "" {
 		cwd, err := os.Getwd()
@@ -192,8 +203,8 @@ func runRun(args []string) int {
 
 	// --output: optional, must be "terminal" or "jsonl". The
 	// default is "terminal" (matches the interactive mode's
-	// human-facing surface; handoff 023 will introduce the
-	// JSONL stdout path).
+	// human-facing surface); --output jsonl is the TG3 stdout
+	// purity surface (every line on stdout is a JSON object).
 	switch *output {
 	case "terminal", "jsonl":
 		// accepted
@@ -206,7 +217,7 @@ func runRun(args []string) int {
 	// exist and be readable (same validation as --prompt-file).
 	// The system prompt is not yet used by the loop in this
 	// handoff; the validation is the only thing landing now so
-	// a handoff 023 caller cannot trip over a missing file
+	// a handoff 024 caller cannot trip over a missing file
 	// after the loop has already been invoked. The check runs
 	// BEFORE the --prompt-file "-" stdin short-circuit so a
 	// missing system file fails fast even when the prompt is
@@ -221,23 +232,22 @@ func runRun(args []string) int {
 	}
 
 	// --prompt-file: required, non-empty. The "-" value is
-	// accepted as a parseable sentinel (handoff 023 will wire
-	// the stdin-reader; for handoff 022 the validation-only
-	// path treats it as a no-op-parseable value and returns 0
-	// with no events). Any other non-empty value must point
-	// at an existing, readable file; otherwise exit 2.
+	// accepted as a parseable sentinel (the stdin-reader is a
+	// future handoff; for handoff 024 the validation-only path
+	// treats it as a no-op-parseable value and returns 0 with
+	// no events). Any other non-empty value must point at an
+	// existing, readable file; otherwise exit 2.
 	if *promptFile == "" {
 		fmt.Fprintf(os.Stderr, "config error: --prompt-file is required\n")
 		return 2
 	}
 	if *promptFile == "-" {
-		// Stdin prompt handling is a future handoff (023). For
-		// handoff 022 the flag-parsed config is valid; we return
-		// 0 without reading from stdin so the test surface
-		// (TestRun_StdinPolicy_* — out of scope this handoff
-		// per the decomposition choice documented in the
-		// result file) is not bound to a specific stdin policy.
-		// The decomposition choice is also recorded in the
+		// Stdin prompt handling is a future handoff. For
+		// handoff 024 the flag-parsed config is valid; we
+		// return 0 without reading from stdin so the test
+		// surface (TestRun_StdinPolicy_NonDashSentinel_Returns0)
+		// is not bound to a specific stdin policy. The
+		// decomposition choice is also recorded in the
 		// handoff 022 result file's "Public-surface choices"
 		// subsection. The --system-file check above has already
 		// run, so a missing system file still exits 2 even with
@@ -249,23 +259,144 @@ func runRun(args []string) int {
 		return 2
 	}
 
-	// Handoff 022's success path: the flag-parsed config is
-	// valid, the prompt file is readable, the system file (if
-	// given) is readable, the workspace is resolved, and the
-	// output mode is one of the two allowed values. The handoff
-	// 023 caller will add the emitter, the loop call, and the
-	// error mapping on top of this validated state.
+	// Handoff 024's run-execution path: the flag-parsed config
+	// is valid, the prompt file is readable, the system file
+	// (if given) is readable, the workspace is resolved, and
+	// the output mode is one of the two allowed values. Read
+	// the prompt file's full contents into memory and hand off
+	// to runModeExecute for the model-client wiring + loop
+	// invocation + error mapping.
 	//
-	// The decomposition is intentional: the flag parser + the
-	// config-error exit-2 path is the foundation, the
-	// run-execution path is the next slot. Both TGs the
-	// handoff lands (TG1 missing prompt file -> exit 2, the
-	// `run --help` half of TG4) are covered by the validation
-	// path alone; the remaining TGs (TG2, TG3, the `test.sh`
-	// half of TG4) belong to handoff 023.
-	_ = io.Discard // keep the io import in the file even though runRun's success path is currently empty
-	_ = strings.TrimSpace
-	return 0
+	// Errors that escape the existing validateReadableFile
+	// check (e.g. a TOCTOU race where the file disappears
+	// between validation and read) fall through to exit 1
+	// with a SCOPE §28 generic-failure stderr message — the
+	// config WAS valid at parse time, so this is not a config
+	// error.
+	prompt, err := os.ReadFile(*promptFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "internal error: read prompt-file: %v\n", err)
+		return 1
+	}
+	return runModeExecute(
+		string(prompt),
+		*baseURL,
+		*model,
+		*workspace,
+		*output,
+	)
+}
+
+// runModeExecute is the run-execution inner body. It is extracted
+// from runRun for testability — the four new TestRun_* tests in
+// main_test.go (TG2 + TG3 + stdin-policy pin + version-advance
+// pin) drive it indirectly through runRun, but the function is
+// its own unit so a future refactor that wants to exercise the
+// run-mode executor without the flag.NewFlagSet ceremony can call
+// it directly. It is NOT part of the public CLI surface; it is
+// internal (lowercase, same package).
+//
+// The function:
+//  1. Loads the resolved config (config.Load() — existing API).
+//  2. Generates a session ID (newSessionID() — existing helper in
+//     main.go).
+//  3. Decides the emitter writer (stdout for jsonl, sidecar for
+//     terminal).
+//  4. Decides the loop's r.out writer (io.Discard for jsonl,
+//     stdout for terminal — the TG3 stdout-purity contract).
+//  5. Constructs loop.Config + model.NewClient + loop.New.
+//  6. Calls r.RunOne(context.Background(), prompt).
+//  7. Maps the returned error to a SCOPE §28 exit code and emits
+//     Completed(exit_code) if the error path didn't already emit
+//     Completed (the loop's success path emits Completed(0) from
+//     inside RunOne).
+//
+// The function returns the SCOPE §28 exit code.
+func runModeExecute(prompt, baseURL, modelName, workspace, outputMode string) int {
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
+		return 2
+	}
+
+	sessionID, err := newSessionID()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "internal error: cannot generate session id: %v\n", err)
+		return 1
+	}
+
+	var em *event.Emitter
+	var loopOut io.Writer
+	switch outputMode {
+	case "jsonl":
+		em = event.NewEmitter(os.Stdout, sessionID)
+		loopOut = io.Discard
+	case "terminal":
+		sidecarDir := filepath.Join(workspace, "sessions", sessionID)
+		if err := os.MkdirAll(sidecarDir, 0o755); err != nil {
+			fmt.Fprintf(os.Stderr, "internal error: cannot create %s: %v\n", sidecarDir, err)
+			return 1
+		}
+		sidecarPath := filepath.Join(sidecarDir, "events.jsonl")
+		sidecar, err := os.Create(sidecarPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "internal error: cannot create %s: %v\n", sidecarPath, err)
+			return 1
+		}
+		defer sidecar.Close()
+		em = event.NewEmitter(sidecar, sessionID)
+		loopOut = os.Stdout
+	default:
+		// Pre-flag-parse validation already rejects this;
+		// defensive return for any path that bypassed the flag
+		// parser.
+		fmt.Fprintf(os.Stderr, "config error: --output must be 'terminal' or 'jsonl', got %q\n", outputMode)
+		return 2
+	}
+
+	normalizedBase := loop.NormalizeBaseURL(baseURL)
+	permissionStr := modeToLoopString(activePermissionMode)
+
+	modelOpts := model.Options{
+		BaseURL:         normalizedBase,
+		Model:           modelName,
+		APIKey:          cfg.Model.APIKey,
+		Temperature:     cfg.Model.Temperature,
+		MaxOutputTokens: cfg.Model.MaxOutputTokens,
+		RequestTimeout:  cfg.Model.RequestTimeout,
+	}
+	client := model.NewClient(modelOpts)
+	r := loop.New(loop.Config{
+		Model:      modelOpts,
+		Workspace:  workspace,
+		Permission: permissionStr,
+	}, client, em, loopOut)
+
+	_, err = r.RunOne(context.Background(), prompt)
+	if err == nil {
+		// Success path: RunOne already emitted Completed(0)
+		// from inside (loop.go lines 161-166). Return 0 — do
+		// NOT emit a second Completed.
+		return 0
+	}
+
+	// Error path: RunOne emitted a Status(FAILED|INTERRUPTED)
+	// but NOT a Completed event (loop.go lines 142-159). Emit
+	// Completed(exit_code) here so the wire has the terminal
+	// event the SCOPE §21 protocol requires.
+	var me *model.ModelError
+	if errors.As(err, &me) {
+		switch me.Kind {
+		case model.ErrHTTP, model.ErrParse, model.ErrUpstream:
+			_ = em.Completed(3)
+			return 3
+		case model.ErrTimeout:
+			_ = em.Completed(6)
+			return 6
+		}
+	}
+	_ = em.Completed(1)
+	return 1
 }
 
 // validateReadableFile returns nil if path exists and is a regular

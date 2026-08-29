@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/svend-blip/simple-harness/internal/event"
 	"github.com/svend-blip/simple-harness/internal/perm"
 	"github.com/svend-blip/simple-harness/internal/tools"
 	"github.com/svend-blip/simple-harness/internal/tools/builtins"
@@ -633,14 +635,14 @@ func TestRun_Help(t *testing.T) {
 
 // TestRun_Version pins the `simple-harness run --version` path:
 // exit 0 and stdout is the new Version literal. The exact literal
-// is the handoff 022 advance from "Run 005, handoff 021" to
-// "Run 006, handoff 022".
+// is the handoff 024 advance from "Run 006, handoff 022" to
+// "Run 006, handoff 024".
 func TestRun_Version(t *testing.T) {
 	code, out, errOut := driveRun(t, "--version")
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 006, handoff 022)"
+	want := "simple-harness 0.1.0-dev (Run 006, handoff 024)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}
@@ -746,5 +748,117 @@ func TestRun_SystemFile_Missing_Exits2(t *testing.T) {
 	}
 	if !strings.Contains(errOut, "system-file") {
 		t.Fatalf("run missing --system-file stderr missing %q; got %q", "system-file", errOut)
+	}
+}
+
+// TestRun_UnreachableEndpoint_EmitsJSONLAndExits3 is the TG2 path:
+// an unreachable endpoint (the discard prototype's port 9, reserved
+// and closed on any sane host) yields JSONL events on stdout AND
+// exits 3 (SCOPE §28 model/API failure). The event protocol's
+// minimum set (started, status, model_request, completed with
+// exit_code 3) is asserted by substring match — the test is
+// robust against the precise ordering of the FAILED-status event
+// vs the completed event (both must appear; either order).
+func TestRun_UnreachableEndpoint_EmitsJSONLAndExits3(t *testing.T) {
+	promptFile := filepath.Join(t.TempDir(), "prompt.md")
+	if err := os.WriteFile(promptFile, []byte("say hi"), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+	code, out, errOut := driveRun(t,
+		"--base-url", "http://127.0.0.1:9",
+		"--model", "test-model",
+		"--workspace", t.TempDir(),
+		"--prompt-file", promptFile,
+		"--output", "jsonl",
+	)
+	if code != 3 {
+		t.Fatalf("run unreachable-endpoint returned %d, want 3 (model error) (stderr=%q stdout=%q)", code, errOut, out)
+	}
+	for _, want := range []string{"protocol_version", `"event"`, "model_request", `completed`, `"exit_code":3`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout missing %q; got %q", want, out)
+		}
+	}
+}
+
+// TestRun_OutputJSONL_EveryLineIsJSON is the TG3 path: under
+// --output jsonl, every line on stdout parses as JSON with
+// protocol_version == "1" and event in the GOAL §2 minimum event
+// set. The test uses an unreachable endpoint (port 9) so the run
+// exits 3 quickly with a small event count; the JSONL purity
+// assertion is the binding contract, the exit code is incidental.
+func TestRun_OutputJSONL_EveryLineIsJSON(t *testing.T) {
+	promptFile := filepath.Join(t.TempDir(), "prompt.md")
+	if err := os.WriteFile(promptFile, []byte("say hi"), 0o644); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+	_, out, errOut := driveRun(t,
+		"--base-url", "http://127.0.0.1:9",
+		"--model", "test-model",
+		"--workspace", t.TempDir(),
+		"--prompt-file", promptFile,
+		"--output", "jsonl",
+	)
+	if out == "" {
+		t.Fatalf("stdout empty; got %q (stderr=%q)", out, errOut)
+	}
+	allowed := map[string]bool{
+		"started": true, "status": true, "model_request": true,
+		"assistant_stream": true, "completed": true,
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		var ev event.Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Errorf("line %q does not parse as JSON: %v", line, err)
+			continue
+		}
+		if ev.ProtocolVersion != "1" {
+			t.Errorf("line %q: protocol_version = %q, want \"1\"", line, ev.ProtocolVersion)
+		}
+		if !allowed[ev.Event] {
+			t.Errorf("line %q: event = %q, not in GOAL §2 minimum set", line, ev.Event)
+		}
+	}
+}
+
+// TestRun_StdinPolicy_NonDashSentinel_Returns0 pins handoff 022's
+// --prompt-file "-" choice: the sentinel value is parseable, validates
+// cleanly, and returns 0 with no events on stdout. A future regression
+// that wires stdin-reading into runModeExecute (or any path that
+// blocks on os.Stdin in the test process) fails this test because
+// driveRun doesn't redirect os.Stdin.
+func TestRun_StdinPolicy_NonDashSentinel_Returns0(t *testing.T) {
+	code, out, errOut := driveRun(t,
+		"--base-url", "http://127.0.0.1:9",
+		"--model", "test-model",
+		"--workspace", t.TempDir(),
+		"--prompt-file", "-",
+		"--output", "jsonl",
+	)
+	if code != 0 {
+		t.Fatalf("run --prompt-file - returned %d, want 0 (no-op sentinel) (stderr=%q)", code, errOut)
+	}
+	if out != "" {
+		t.Errorf("run --prompt-file - stdout = %q, want empty (no events emitted)", out)
+	}
+}
+
+// TestRun_Version_AdvancesToHandoff024 pins the Version literal
+// advance. The existing TestRun_Version (handoff 022) was pinned to
+// "Run 006, handoff 022"; the literal advance moves the pinned value
+// to "Run 006, handoff 024". This new test is a separate pinning of
+// the new literal — kept distinct from the existing TestRun_Version
+// so the handoff-022 baseline is still reproducible from the diff.
+func TestRun_Version_AdvancesToHandoff024(t *testing.T) {
+	code, out, errOut := driveRun(t, "--version")
+	if code != 0 {
+		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
+	}
+	want := "simple-harness 0.1.0-dev (Run 006, handoff 024)"
+	if !strings.Contains(out, want) {
+		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}
 }

@@ -16,9 +16,9 @@
 // persistence beyond the events.jsonl sidecar. The headless
 // `simple-harness run` subcommand is the Run 006 deliverable
 // (handoff 022 lands the flag parser + config-error exit-2 path
-// + the `model_request` event; handoff 023 lands the run-execution
-// path + JSONL stdout). Each remaining gap is a future Run per the
-// architecture.
+// + the `model_request` event; handoff 024 lands the run-execution
+// path + JSONL stdout + final TGs). Each remaining gap is a future
+// Run per the architecture.
 //
 // Architectural boundary: this is a Simple Harness component. It does not
 // import orchestration, harness selection, GPU/VRAM allocation,
@@ -56,7 +56,7 @@ import (
 // without shelling out or reading the binary itself. The format is a
 // single line, project-name first, so an external parser does not need to
 // interpret it to extract the version.
-const Version = "simple-harness 0.1.0-dev (Run 006, handoff 022)"
+const Version = "simple-harness 0.1.0-dev (Run 006, handoff 024)"
 
 // globalRegistry is the tool registry the `simple-harness tools`
 // subcommand lists. Handoff 013 leaves it EMPTY; Run 014 / Run 015 will
