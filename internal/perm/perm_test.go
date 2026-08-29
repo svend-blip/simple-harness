@@ -40,7 +40,7 @@ func TestAuthorize_PipelineOrdering_SchemaFirst(t *testing.T) {
 		Arguments: map[string]any{"extra": "../escape.txt"},
 	}
 
-	de := Authorize(context.Background(), call, schema, ws, NewPermissive())
+	de := Authorize(context.Background(), call, schema, ws, NewPolicy(READ_ONLY))
 	if de == nil {
 		t.Fatalf("Authorize returned nil, want *tools.DecisionError")
 	}
@@ -63,7 +63,7 @@ func TestAuthorize_PipelineOrdering_PathSecond(t *testing.T) {
 		Arguments: map[string]any{"path": "../escape.txt"},
 	}
 
-	de := Authorize(context.Background(), call, schema, ws, NewPermissive())
+	de := Authorize(context.Background(), call, schema, ws, NewPolicy(READ_ONLY))
 	if de == nil {
 		t.Fatalf("Authorize returned nil, want *tools.DecisionError")
 	}
@@ -78,8 +78,9 @@ func TestAuthorize_PipelineOrdering_PathSecond(t *testing.T) {
 }
 
 // TestAuthorize_PipelineOrdering_PolicyThird: a call with both schema
-// and path passing. The stub policy is Permissive, so the policy step
-// always returns Allowed; Authorize returns nil.
+// and path passing. The READ_ONLY policy allows read-only tools
+// ("any" is not on the mutation list), so the policy step returns
+// Allowed; Authorize returns nil.
 func TestAuthorize_PipelineOrdering_PolicyThird(t *testing.T) {
 	ws := tempWorkspace(t)
 	schema := tools.Schema{
@@ -94,9 +95,9 @@ func TestAuthorize_PipelineOrdering_PolicyThird(t *testing.T) {
 		Arguments: map[string]any{"path": "some-file.txt"},
 	}
 
-	de := Authorize(context.Background(), call, schema, ws, NewPermissive())
+	de := Authorize(context.Background(), call, schema, ws, NewPolicy(READ_ONLY))
 	if de != nil {
-		t.Fatalf("Authorize returned %v, want nil (schema and path both pass; Permissive policy allows)", de)
+		t.Fatalf("Authorize returned %v, want nil (schema and path both pass; READ_ONLY allows non-mutation tools)", de)
 	}
 }
 
@@ -114,7 +115,7 @@ func TestAuthorize_StructuredError(t *testing.T) {
 		Arguments: map[string]any{},
 	}
 
-	de := Authorize(context.Background(), call, schema, ws, NewPermissive())
+	de := Authorize(context.Background(), call, schema, ws, NewPolicy(READ_ONLY))
 	if de == nil {
 		t.Fatalf("Authorize returned nil, want *tools.DecisionError")
 	}
@@ -152,7 +153,7 @@ func TestAuthorize_SchemaPassesWhenSchemaIsEmpty(t *testing.T) {
 		Arguments: map[string]any{},
 	}
 
-	de := Authorize(context.Background(), call, schema, ws, NewPermissive())
+	de := Authorize(context.Background(), call, schema, ws, NewPolicy(READ_ONLY))
 	if de != nil {
 		t.Fatalf("Authorize(empty schema, empty args) = %v, want nil", de)
 	}
@@ -172,16 +173,107 @@ func TestDecisionError_Error(t *testing.T) {
 	}
 }
 
-// TestPolicy_Permissive_AlwaysAllows pins the stub's behavior.
-func TestPolicy_Permissive_AlwaysAllows(t *testing.T) {
+// TestAuthorize_DefaultModeIsReadOnly pins the SCOPE §12 "never
+// silent escalation" rule: the zero-value Policy is READ_ONLY (the
+// harness never silently escalates). For every tool on the mutation
+// list, the zero-value policy denies the call.
+//
+// The zero-value Policy is the natural default — when an empty
+// struct is passed where Mode has not been set, the Mode field is 0
+// which is the READ_ONLY constant. This test demonstrates the
+// default-deny semantics for mutation under the uninitialized state.
+func TestAuthorize_DefaultModeIsReadOnly(t *testing.T) {
 	ws := tempWorkspace(t)
-	d := NewPermissive().Decide(context.Background(),
-		tools.Call{Name: "any", Arguments: map[string]any{"path": "/etc/passwd"}}, ws)
-	if !d.Allowed {
-		t.Fatalf("Permissive.Decide returned Allowed=false, want true (stub allows everything)")
+	schema := tools.Schema{
+		Required:   []string{"path"},
+		Properties: map[string]tools.PropertyType{"path": tools.TypeString},
 	}
-	if d.Reason != "policy-stub" {
-		t.Fatalf("Permissive.Decide Reason = %q, want %q", d.Reason, "policy-stub")
+	var pol Policy // zero value: Mode == 0 == READ_ONLY
+
+	for toolName := range mutationTools {
+		call := tools.Call{
+			Name:      toolName,
+			Arguments: map[string]any{"path": "in-workspace.txt"},
+		}
+		de := Authorize(context.Background(), call, schema, ws, pol)
+		if de == nil {
+			t.Fatalf("Authorize(%s, zero-policy) returned nil, want *DecisionError (zero policy = READ_ONLY denies mutation)",
+				toolName)
+		}
+		if de.Stage != "policy" {
+			t.Fatalf("Authorize(%s, zero-policy) Stage = %q, want %q (zero-policy should fire at policy stage)",
+				toolName, de.Stage, "policy")
+		}
+	}
+}
+
+// TestAuthorize_PolicyWORKSPACE_WRITE_AllowsInWorkspace confirms the
+// WORKSPACE_WRITE mode lets a mutation tool reach Execute when the
+// path is inside the workspace.
+func TestAuthorize_PolicyWORKSPACE_WRITE_AllowsInWorkspace(t *testing.T) {
+	ws := tempWorkspace(t)
+	schema := tools.Schema{
+		Required:   []string{"path"},
+		Properties: map[string]tools.PropertyType{"path": tools.TypeString},
+	}
+	for toolName := range mutationTools {
+		call := tools.Call{
+			Name:      toolName,
+			Arguments: map[string]any{"path": "in-workspace.txt"},
+		}
+		de := Authorize(context.Background(), call, schema, ws, NewPolicy(WORKSPACE_WRITE))
+		if de != nil {
+			t.Fatalf("Authorize(%s, WS_WRITE, in-ws) = %v, want nil", toolName, de)
+		}
+	}
+}
+
+// TestAuthorize_PolicyWORKSPACE_WRITE_RejectsEscape_CONFIRMS_PATH_LAYER:
+// the WORKSPACE_WRITE mode's escape detection is a SECOND line of
+// defense. The primary escape detection is the path-normalization
+// step in Authorize itself (step 2), which catches every form the
+// normalizer recognizes (parent_traversal, absolute_path, symlink_
+// escape). The policy step's escape detection matters only for paths
+// the path step has already approved — which is rare in practice
+// (today there's no such case) — but the contract is the
+// TestPolicy_WORKSPACE_WRITE_RejectsEscape test in policy_test.go
+// that exercises Policy.Decide directly.
+//
+// This test documents the layered behavior: a call whose path
+// escapes the workspace is rejected at the PATH stage by the
+// normalizer, NOT at the policy stage. The policy stage's escape
+// detection is enforced when the workspace normalizer was bypassed
+// (e.g. an injected Authorize without the path step) — a failure
+// mode the test fixtures do not exercise.
+func TestAuthorize_PolicyWORKSPACE_WRITE_RejectsEscape_CONFIRMS_PATH_LAYER(t *testing.T) {
+	ws := tempWorkspace(t)
+	schema := tools.Schema{
+		Required:   []string{"path"},
+		Properties: map[string]tools.PropertyType{"path": tools.TypeString},
+	}
+	for toolName := range mutationTools {
+		call := tools.Call{
+			Name:      toolName,
+			Arguments: map[string]any{"path": "../escape"},
+		}
+		de := Authorize(context.Background(), call, schema, ws, NewPolicy(WORKSPACE_WRITE))
+		if de == nil {
+			t.Fatalf("Authorize(%s, WS_WRITE, escape) = nil, want *DecisionError", toolName)
+		}
+		// The path stage catches the escape FIRST (it's part of
+		// SCOPE §13's "schema → path → policy" pipeline order).
+		// The policy stage never runs in this scenario — the
+		// layered defense means the policy stage's escape
+		// detection is exercised via the direct Policy.Decide test
+		// in policy_test.go, not through Authorize.
+		if de.Stage != "path" {
+			t.Fatalf("Authorize(%s, WS_WRITE, escape) Stage = %q, want %q (path stage catches escape first)",
+				toolName, de.Stage, "path")
+		}
+		if de.Reason != path.ReasonParentTraversal {
+			t.Fatalf("Authorize(%s, WS_WRITE, escape) Reason = %q, want %q",
+				toolName, de.Reason, path.ReasonParentTraversal)
+		}
 	}
 }
 

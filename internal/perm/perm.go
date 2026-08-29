@@ -23,8 +23,18 @@ import (
 //
 //	registry.Dispatch(ctx, call, ws, pol, perm.Authorize)
 //
-// Run 004 adds the Mode parameter and replaces the stub policy; the
-// pipeline order stays the same.
+// Run 004 replaces the Run-003 Permissive policy stub with the mode-
+// aware Policy type. The Mode is carried by the Policy parameter
+// (constructed via perm.NewPolicy(mode) or perm.Policy{Mode: mode});
+// the same Authorize signature is preserved so tools.AuthorizeFunc
+// stays compatible with perm.Authorize without a tools/types.go
+// modification. The mode-aware decision happens inside pol.Decide
+// (the policy step). Pipeline order is unchanged.
+//
+// The `pol` parameter remains as the future-extension-point seam per
+// handoff 016: Run 005+ may grow Policy with stateful or context-
+// dependent fields beyond Mode; today Policy is `{Mode Mode}` and
+// the Mode field alone drives the decision.
 func Authorize(ctx context.Context, call tools.Call, schema tools.Schema, ws path.Workspace, pol tools.Policy) *tools.DecisionError {
 	// 1. Schema check — delegate to tools.Validate. The validator
 	// returns a *ToolError; we map Kind="schema_violation" to the

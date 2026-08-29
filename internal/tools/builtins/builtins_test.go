@@ -185,7 +185,7 @@ func TestReadFile_Integration_Dispatch_PassesAll(t *testing.T) {
 		Name:      "read_file",
 		Arguments: map[string]any{"path": "test.txt"},
 	}
-	res := r.Dispatch(context.Background(), call, ws, perm.NewPermissive(), perm.Authorize)
+	res := r.Dispatch(context.Background(), call, ws, perm.NewPolicy(perm.READ_ONLY), perm.Authorize)
 	if res.Status != "ok" {
 		t.Fatalf("Status = %q, want %q (error=%+v)", res.Status, "ok", res.Error)
 	}
@@ -222,7 +222,7 @@ func TestListDirectory_Integration_Dispatch_PassesAll(t *testing.T) {
 		Name:      "list_directory",
 		Arguments: map[string]any{"path": "."},
 	}
-	res := r.Dispatch(context.Background(), call, ws, perm.NewPermissive(), perm.Authorize)
+	res := r.Dispatch(context.Background(), call, ws, perm.NewPolicy(perm.READ_ONLY), perm.Authorize)
 	if res.Status != "ok" {
 		t.Fatalf("Status = %q, want %q (error=%+v)", res.Status, "ok", res.Error)
 	}
@@ -265,7 +265,7 @@ func TestIntegration_SchemaViolation_SchemaFirst(t *testing.T) {
 			"start_line": "not-an-int",
 		},
 	}
-	res := r.Dispatch(context.Background(), call, ws, perm.NewPermissive(), perm.Authorize)
+	res := r.Dispatch(context.Background(), call, ws, perm.NewPolicy(perm.READ_ONLY), perm.Authorize)
 	if res.Status != "error" {
 		t.Fatalf("Status = %q, want %q", res.Status, "error")
 	}
@@ -288,7 +288,7 @@ func TestIntegration_PathEscape_PathSecond(t *testing.T) {
 		Name:      "read_file",
 		Arguments: map[string]any{"path": "../escape.txt"},
 	}
-	res := r.Dispatch(context.Background(), call, ws, perm.NewPermissive(), perm.Authorize)
+	res := r.Dispatch(context.Background(), call, ws, perm.NewPolicy(perm.READ_ONLY), perm.Authorize)
 	if res.Status != "error" {
 		t.Fatalf("Status = %q, want %q", res.Status, "error")
 	}
@@ -315,7 +315,7 @@ func TestIntegration_UnknownTool_Rejects(t *testing.T) {
 		Name:      "no_such_tool",
 		Arguments: map[string]any{},
 	}
-	res := r.Dispatch(context.Background(), call, ws, perm.NewPermissive(), perm.Authorize)
+	res := r.Dispatch(context.Background(), call, ws, perm.NewPolicy(perm.READ_ONLY), perm.Authorize)
 	if res.Status != "error" {
 		t.Fatalf("Status = %q, want %q", res.Status, "error")
 	}
@@ -351,7 +351,7 @@ func TestIntegration_BinaryRejection_ViaDispatch(t *testing.T) {
 		Name:      "read_file",
 		Arguments: map[string]any{"path": "binary.bin"},
 	}
-	res := r.Dispatch(context.Background(), call, ws, perm.NewPermissive(), perm.Authorize)
+	res := r.Dispatch(context.Background(), call, ws, perm.NewPolicy(perm.READ_ONLY), perm.Authorize)
 	if res.Status != "error" {
 		t.Fatalf("Status = %q, want %q", res.Status, "error")
 	}
@@ -379,7 +379,7 @@ func TestIntegration_SearchFiles_Dispatch_PassesAll(t *testing.T) {
 		Name:      "search_files",
 		Arguments: map[string]any{"pattern": "txt", "path": "."},
 	}
-	res := r.Dispatch(context.Background(), call, ws, perm.NewPermissive(), perm.Authorize)
+	res := r.Dispatch(context.Background(), call, ws, perm.NewPolicy(perm.READ_ONLY), perm.Authorize)
 	if res.Status != "ok" {
 		t.Fatalf("Status = %q, want %q (error=%+v)", res.Status, "ok", res.Error)
 	}
@@ -411,7 +411,7 @@ func TestIntegration_Grep_Dispatch_PassesAll_Native(t *testing.T) {
 		Name:      "grep",
 		Arguments: map[string]any{"pattern": "needle", "path": "."},
 	}
-	res := r.Dispatch(context.Background(), call, ws, perm.NewPermissive(), perm.Authorize)
+	res := r.Dispatch(context.Background(), call, ws, perm.NewPolicy(perm.READ_ONLY), perm.Authorize)
 	if res.Status != "ok" {
 		t.Fatalf("Status = %q, want %q (error=%+v)", res.Status, "ok", res.Error)
 	}
@@ -450,7 +450,7 @@ func TestIntegration_Grep_Dispatch_PassesAll_RG(t *testing.T) {
 		Name:      "grep",
 		Arguments: map[string]any{"pattern": "needle", "path": "."},
 	}
-	res := r.Dispatch(context.Background(), call, ws, perm.NewPermissive(), perm.Authorize)
+	res := r.Dispatch(context.Background(), call, ws, perm.NewPolicy(perm.READ_ONLY), perm.Authorize)
 	if res.Status != "ok" {
 		t.Fatalf("Status = %q, want %q (error=%+v)", res.Status, "ok", res.Error)
 	}
@@ -493,7 +493,7 @@ func TestIntegration_SearchFiles_SchemaViolation_SchemaFirst(t *testing.T) {
 			"path":    ".",
 		},
 	}
-	res := r.Dispatch(context.Background(), call, ws, perm.NewPermissive(), perm.Authorize)
+	res := r.Dispatch(context.Background(), call, ws, perm.NewPolicy(perm.READ_ONLY), perm.Authorize)
 	if res.Status != "error" {
 		t.Fatalf("Status = %q, want %q", res.Status, "error")
 	}
@@ -515,11 +515,79 @@ func TestIntegration_Grep_PathEscape_PathSecond(t *testing.T) {
 		Name:      "grep",
 		Arguments: map[string]any{"pattern": "needle", "path": "../escape"},
 	}
-	res := r.Dispatch(context.Background(), call, ws, perm.NewPermissive(), perm.Authorize)
+	res := r.Dispatch(context.Background(), call, ws, perm.NewPolicy(perm.READ_ONLY), perm.Authorize)
 	if res.Status != "error" {
 		t.Fatalf("Status = %q, want %q", res.Status, "error")
 	}
 	if res.Error == nil || res.Error.Kind != "path_escape" {
 		t.Fatalf("Error.Kind = %v, want \"path_escape\"", res.Error)
 	}
+}
+
+// TestIntegration_PermissionDenial_READ_ONLY: a write_file call under
+// READ_ONLY mode is rejected at the policy stage. Dispatch returns a
+// Result with Status="error" and Error.Kind="permission_denied". The
+// policy decision fires AFTER schema and path steps pass — the test
+// verifies the load-bearing SCOPE §13 "policy sits between path and
+// execute" contract for a mutation tool.
+//
+// A stub write_file tool is registered with an empty Schema and a
+// no-op Execute so the test reaches the policy stage (mutation
+// detection runs on the registered tool name "write_file" — the
+// heuristic in Policy.Decide uses mutationTools which lists
+// "write_file"; this test needs the name, not the implementation).
+//
+// The stub lives next to the test rather than in a separate file
+// because the integration tests are intentionally self-contained and
+// do not import from each other. The stub's schema is permissive
+// (no required, no properties) so the call reaches the policy stage
+// regardless of the argument shape.
+func TestIntegration_PermissionDenial_READ_ONLY(t *testing.T) {
+	ws := tempWorkspace(t)
+	chdirWorkspace(t, ws)
+
+	r := tools.NewRegistry()
+	RegisterBuiltins(r)
+	// Register the stub write_file next to the V1 read-only tools
+	// so the policy step actually runs (Dispatch's policy lookup
+	// uses mutationTools based on the registered name).
+	r.Register(stubWriteFile{})
+
+	call := tools.Call{
+		Name:      "write_file",
+		Arguments: map[string]any{"path": "in-workspace.txt", "content": "hello"},
+	}
+	res := r.Dispatch(context.Background(), call, ws, perm.NewPolicy(perm.READ_ONLY), perm.Authorize)
+	if res.Status != "error" {
+		t.Fatalf("Status = %q, want %q (READ_ONLY should deny the write_file call)", res.Status, "error")
+	}
+	if res.Error == nil || res.Error.Kind != "permission_denied" {
+		t.Fatalf("Error.Kind = %v, want %q", res.Error, "permission_denied")
+	}
+}
+
+// stubWriteFile is a minimal Tool used to exercise the policy step
+// for write_file (the real tool lands on handoff 017). The stub
+// accepts any call (empty schema) and returns Status="ok" — if the
+// policy step doesn't deny the call, Execute runs and would return
+// "ok", which is the test's failure signal ("the policy should have
+// denied this").
+type stubWriteFile struct{}
+
+func (stubWriteFile) Meta() tools.ToolMeta {
+	return tools.ToolMeta{Name: "write_file", Description: "stub for permission-denial test"}
+}
+func (stubWriteFile) Schema() tools.Schema {
+	// Permissive schema with required=path and AdditionalProperties=true
+	// so any extra arguments (like "content") pass validation. The
+	// policy step is the load-bearing assertion in this test, not the
+	// schema step.
+	return tools.Schema{
+		Required:             []string{"path"},
+		Properties:           map[string]tools.PropertyType{"path": tools.TypeString},
+		AdditionalProperties: true,
+	}
+}
+func (stubWriteFile) Execute(_ context.Context, _ tools.Call) (tools.Result, error) {
+	return tools.Result{Status: "ok", Content: "stub-write-succeeded"}, nil
 }

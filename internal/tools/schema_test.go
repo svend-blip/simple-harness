@@ -104,6 +104,46 @@ func TestSchema_Validate_NumberType(t *testing.T) {
 	}
 }
 
+// TestSchema_TypeInt_AcceptsFloat64NoFraction: JSON-decoded arguments
+// arrive as float64 (encoding/json's canonical number type) even
+// when the wire form is a non-fractional integer literal. The pre-
+// Run-004 typeMatches used v.(int) only; a JSON-decoded 5 arrived
+// as float64(5), failed the int assertion, and the validator
+// rejected what the model intended as an integer.
+//
+// The fix: typeMatches for TypeInt accepts BOTH the Go literal int
+// AND a float64 with no fractional part (i.e. one whose value is
+// exactly int64(f)). This test pins that contract — a JSON-decoded
+// integer argument round-trips through the validator end-to-end.
+func TestSchema_TypeInt_AcceptsFloat64NoFraction(t *testing.T) {
+	schema := Schema{Properties: map[string]PropertyType{"n": TypeInt}}
+	call := Call{Arguments: map[string]any{"n": float64(5)}}
+
+	err := Validate(call, schema)
+	if err != nil {
+		t.Fatalf("Validate(n=float64(5), TypeInt) returned %v, want nil (float64 with no fractional part validates as TypeInt)", err)
+	}
+}
+
+// TestSchema_TypeInt_RejectsFloat64Fraction: a JSON-decoded argument
+// that DOES have a fractional part must NOT validate as TypeInt. The
+// schema promised an integer and the value carries fractional
+// information that an int would lose. This is the load-bearing
+// asymmetry of the TypeInt-Above fix: float64(5) is an integer-shaped
+// number and validates; float64(5.5) is not and is rejected.
+func TestSchema_TypeInt_RejectsFloat64Fraction(t *testing.T) {
+	schema := Schema{Properties: map[string]PropertyType{"n": TypeInt}}
+	call := Call{Arguments: map[string]any{"n": float64(5.5)}}
+
+	err := Validate(call, schema)
+	if err == nil {
+		t.Fatalf("Validate(n=float64(5.5), TypeInt) returned nil, want *ToolError")
+	}
+	if err.Kind != "schema_violation" {
+		t.Fatalf("Kind = %q, want %q", err.Kind, "schema_violation")
+	}
+}
+
 // TestSchema_Validate_AllJSONTypes: a single test that walks every
 // PropertyType through a matching value (string / int / bool / number /
 // array / object) and asserts nil. Defensive coverage: if a future

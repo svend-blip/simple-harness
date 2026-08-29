@@ -24,8 +24,10 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -41,6 +43,7 @@ import (
 	"github.com/svend-blip/simple-harness/internal/event"
 	"github.com/svend-blip/simple-harness/internal/loop"
 	"github.com/svend-blip/simple-harness/internal/model"
+	"github.com/svend-blip/simple-harness/internal/perm"
 	"github.com/svend-blip/simple-harness/internal/tools"
 	"github.com/svend-blip/simple-harness/internal/tools/builtins"
 )
@@ -50,7 +53,7 @@ import (
 // without shelling out or reading the binary itself. The format is a
 // single line, project-name first, so an external parser does not need to
 // interpret it to extract the version.
-const Version = "simple-harness 0.1.0-dev (Run 003, handoff 015)"
+const Version = "simple-harness 0.1.0-dev (Run 004, handoff 016)"
 
 // globalRegistry is the tool registry the `simple-harness tools`
 // subcommand lists. Handoff 013 leaves it EMPTY; Run 014 / Run 015 will
@@ -60,6 +63,16 @@ const Version = "simple-harness 0.1.0-dev (Run 003, handoff 015)"
 // across invocations and so a future init() / RegisterAll helper can
 // populate it before run() is called.
 var globalRegistry = tools.NewRegistry()
+
+// activePermissionMode is the resolved permission mode for the current
+// harness execution. Set by the global --permission flag parser in
+// run(); read by runConfig() to emit the "permission" field in its JSON
+// output. Default is READ_ONLY (SCOPE §12: never silent escalation).
+//
+// Tests in main_test.go save and restore this var around calls that
+// set it, mirroring the globalRegistry snapshot+restore pattern in
+// TestToolsSubcommand_EmptyRegistry.
+var activePermissionMode = perm.READ_ONLY
 
 // usage is the brief usage summary printed by --help and by the
 // interactive-mode /help command. Kept short on purpose; later
@@ -73,8 +86,10 @@ Flags:
   --version             print the runtime version and exit 0
   --help                print this usage summary and exit 0
   --workspace <dir>     workspace directory (interactive mode; default: cwd)
-  --permission <mode>   permission mode (interactive mode; one of
-                        READ_ONLY, WORKSPACE_WRITE, FULL_ACCESS; default: READ_ONLY)
+  --permission <mode>   permission mode (one of read_only,
+                        workspace_write, full_access; default: read_only).
+                        Global flag — applies to every subcommand and the
+                        interactive mode. SCOPE §12.
 
 Subcommands:
   config show           print the resolved configuration (secrets redacted)
@@ -98,16 +113,41 @@ See docs/ARCHITECTURE.md §"Distribution shape" for the full contract.
 // interactive mode. The struct is a thin seam so runInteractive's
 // variadic-args signature can stay unchanged across handoffs (the
 // zero-args path passes nothing; the flag-parsed path passes one).
+//
+// Permission is intentionally NOT here in Run 004 — the active
+// mode is set by the global --permission parser (parsePermissionGlobal)
+// and read directly from the package-level activePermissionMode var
+// inside runInteractive. Exposing permission via opts would require
+// either a separate flag at the subcommand level or duplicating the
+// parser; the global-flag approach is the simpler and correct one
+// per SCOPE §12.
 type interactiveOpts struct {
-	workspace  string
-	permission string
+	workspace string
 }
 
 // run is the testable inner entry point. It returns the process
 // exit code rather than calling os.Exit directly so the unit tests
 // in main_test.go can drive the same code path the CLI uses without
 // forking the binary.
+//
+// Flag-parsing order (binding per handoff 016):
+//
+//  1. The --permission flag is a GLOBAL flag: it parses BEFORE
+//     subcommand dispatch. SCOPE §12 binds the mode to every
+//     subcommand (config show surfaces the resolved mode; interactive
+//     mode applies it). Unknown values abort with exit 2 (configuration
+//     error).
+//  2. Subcommand dispatch ("config" / "tools").
+//  3. Interactive-mode flag parsing (the remaining --workspace /
+//     --version / --help).
 func run(args []string) int {
+	mode, args, err := parsePermissionGlobal(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "simple-harness: %v\n", err)
+		return 2
+	}
+	activePermissionMode = mode
+
 	// Subcommand dispatch: "config show" and "tools" are the V1
 	// subcommands; everything else falls through to flag parsing.
 	if len(args) > 0 && args[0] == "config" {
@@ -128,14 +168,12 @@ func run(args []string) int {
 
 	version := fs.Bool("version", false, "print the runtime version and exit 0")
 	help := fs.Bool("help", false, "print the usage summary and exit 0")
-	// The --workspace and --permission flags are parsed here ONLY
-	// for their value; their semantics live in runInteractive. We
-	// don't reject --workspace/--permission when not in interactive
-	// mode — the flag parser doesn't know yet whether we'll go
-	// interactive — so we let them through and let runInteractive
-	// validate the values.
+	// --workspace is parsed here for interactive mode. --permission
+	// was already consumed by parsePermissionGlobal; if it slipped
+	// through (e.g. a test that bypassed the global parser) the
+	// inner flag parser would reject it via TG4 (exit 1), which is
+	// also acceptable per SCOPE §28 generic-failure.
 	workspace := fs.String("workspace", "", "workspace directory (interactive mode only; defaults to cwd)")
-	permission := fs.String("permission", "READ_ONLY", "permission mode (interactive mode only; one of READ_ONLY, WORKSPACE_WRITE, FULL_ACCESS)")
 
 	if err := fs.Parse(args); err != nil {
 		// flag.ContinueOnError already printed the parse error to
@@ -155,16 +193,69 @@ func run(args []string) int {
 	}
 
 	// Flags parsed, no --version/--help. Enter interactive mode
-	// with those settings.
+	// with --workspace; the permission mode was set at the top.
 	return runInteractive(os.Stdin, os.Stdout, os.Stderr,
 		interactiveOpts{
-			workspace:  *workspace,
-			permission: *permission,
+			workspace: *workspace,
 		})
+}
+
+// parsePermissionGlobal extracts --permission <value> (or
+// --permission=<value>) from args and returns the resolved mode plus
+// the remaining args. The flag is GLOBAL: it's consumed here so
+// subcommand dispatch and the inner flag parser never see it.
+//
+// An unknown value (anything other than read_only / workspace_write
+// / full_access, per SCOPE §12) returns an error; the caller in run()
+// converts the error to exit 2. An absent flag defaults to
+// perm.READ_ONLY (SCOPE §12: never silent escalation).
+func parsePermissionGlobal(args []string) (perm.Mode, []string, error) {
+	for i := 0; i < len(args); i++ {
+		var (
+			value    string
+			consumed int
+		)
+		switch {
+		case args[i] == "--permission":
+			if i+1 >= len(args) {
+				return perm.READ_ONLY, args, fmt.Errorf("--permission requires a value")
+			}
+			value = args[i+1]
+			consumed = 2
+		case strings.HasPrefix(args[i], "--permission="):
+			value = strings.TrimPrefix(args[i], "--permission=")
+			consumed = 1
+		default:
+			continue
+		}
+		mode, err := perm.ParseMode(value)
+		if err != nil {
+			return perm.READ_ONLY, args, err
+		}
+		rest := make([]string, 0, len(args)-consumed)
+		rest = append(rest, args[:i]...)
+		rest = append(rest, args[i+consumed:]...)
+		return mode, rest, nil
+	}
+	return perm.READ_ONLY, args, nil
 }
 
 // runConfig handles the "config" subcommand. In V1 the only verb is
 // "show"; everything else is rejected with usage + exit 1.
+//
+// The resolved-configuration JSON output now surfaces the active
+// permission mode as a top-level "permission" field (SCOPE §13:
+// "The active effective permission level must always be externally
+// observable"). The implementation renders config.Config via the
+// existing Render() (which handles api_key redaction per SCOPE §30)
+// into a bytes.Buffer, parses that buffer, adds the "permission"
+// field, and re-emits with json.MarshalIndent so the field ordering
+// is stable.
+//
+// Why the round-trip instead of a Config struct field? internal/config
+// is a Run 002 deliverable and is read-only for Run 004 (per the
+// scope fence). The post-hoc merge is the smallest change that
+// satisfies TG2 + TG3 without touching internal/config.
 func runConfig(args []string) int {
 	if len(args) != 1 || args[0] != "show" {
 		fmt.Fprintf(os.Stderr, "Usage: simple-harness config show\n")
@@ -175,10 +266,33 @@ func runConfig(args []string) int {
 		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
 		return 2 // SCOPE §28, configuration error
 	}
-	if err := cfg.Render(os.Stdout); err != nil {
+
+	// Render the redacted config into a buffer (preserves the
+	// "<redacted>" substitution for non-empty api_key per SCOPE §30).
+	var buf bytes.Buffer
+	if err := cfg.Render(&buf); err != nil {
 		fmt.Fprintf(os.Stderr, "config render error: %v\n", err)
 		return 1 // SCOPE §28, generic failure
 	}
+
+	// Parse the rendered JSON so we can add the "permission" field
+	// on top, then re-emit with stable indentation. The renderView
+	// types inside internal/config define the JSON shape; parsing
+	// into map[string]any is enough to add fields without a struct
+	// change in this package.
+	var doc map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &doc); err != nil {
+		fmt.Fprintf(os.Stderr, "config parse error: %v\n", err)
+		return 1
+	}
+	doc["permission"] = activePermissionMode.String()
+
+	out, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config marshal error: %v\n", err)
+		return 1
+	}
+	fmt.Println(string(out))
 	return 0
 }
 
@@ -189,13 +303,17 @@ func runConfig(args []string) int {
 // nothing (so the existing tests stay simple). When opts is empty,
 // the defaults are applied: workspace=cwd, permission=READ_ONLY
 // (matching the flag defaults).
+//
+// The permission mode is read from the package-level
+// activePermissionMode var (set by parsePermissionGlobal in run()).
+// The loop's Permission field uses the upper-case form
+// ("READ_ONLY" / "WORKSPACE_WRITE" / "FULL_ACCESS") to keep the
+// Run-002 sidecar contract intact; the config-show JSON and the
+// --permission CLI surface use the Mode.String() lower-case form.
 func runInteractive(stdin io.Reader, stdout, stderr io.Writer, opts ...interactiveOpts) int {
 	var o interactiveOpts
 	if len(opts) > 0 {
 		o = opts[0]
-	}
-	if o.permission == "" {
-		o.permission = "READ_ONLY"
 	}
 
 	// Validate the workspace. Default to cwd when empty; reject
@@ -213,13 +331,13 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, opts ...interacti
 		fmt.Fprintf(stderr, "config error: workspace %q is not a directory\n", o.workspace)
 		return 2
 	}
-	switch o.permission {
-	case "READ_ONLY", "WORKSPACE_WRITE", "FULL_ACCESS":
-		// ok — the loop can trust the value
-	default:
-		fmt.Fprintf(stderr, "config error: invalid permission %q (must be READ_ONLY, WORKSPACE_WRITE, or FULL_ACCESS)\n", o.permission)
-		return 2
-	}
+
+	// The mode was set by parsePermissionGlobal. Convert to the
+	// upper-case string form the loop expects (the loop's
+	// Permission field predates the Mode type and is part of the
+	// Run-002 sidecar contract; not modifying internal/loop/ in
+	// this Run).
+	permissionStr := modeToLoopString(activePermissionMode)
 
 	// Load resolved config (model, endpoint, api_key, etc.).
 	cfg, err := config.Load()
@@ -260,7 +378,7 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, opts ...interacti
 	fmt.Fprintf(stderr, "model:      %s\n", cfg.Model.Model)
 	fmt.Fprintf(stderr, "endpoint:   %s\n", normalizedBase)
 	fmt.Fprintf(stderr, "workspace:  %s\n", o.workspace)
-	fmt.Fprintf(stderr, "permission: %s\n", o.permission)
+	fmt.Fprintf(stderr, "permission: %s\n", permissionStr)
 	fmt.Fprintf(stderr, "events:     %s\n", sidecarPath)
 	fmt.Fprintf(stderr, "(type /help for built-in commands, /exit to quit, Ctrl+D to exit)\n")
 	fmt.Fprintln(stderr)
@@ -299,7 +417,7 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, opts ...interacti
 			RequestTimeout:  cfg.Model.RequestTimeout,
 		},
 		Workspace:  o.workspace,
-		Permission: o.permission,
+		Permission: permissionStr,
 	}, client, em, stdout)
 
 	scanner := bufio.NewScanner(stdin)
@@ -425,6 +543,33 @@ func runTools(args []string) int {
 		fmt.Println(name)
 	}
 	return 0
+}
+
+// modeToLoopString maps a perm.Mode to the upper-case string form the
+// internal/loop package expects (loop.Config.Permission predates the
+// perm.Mode type and is part of the Run-002 sidecar contract). Unknown
+// modes default to "READ_ONLY" per SCOPE §12's never-silent-escalation
+// rule.
+//
+// NOTE: the loop-side string is the canonical upper-case form ("READ_ONLY"
+// etc.) because that's what the existing sidecar JSONL events carry.
+// internal/config/ is read-only for Run 004, so the canonical Mode is
+// communicated to runConfig via Mode.String() (the lower-case wire form
+// per SCOPE §12) rather than to internal/loop/ via this helper. The two
+// surfaces are independent: the JSON-L wire (config-show JSON) uses
+// lower-case; the JSONL sidecar (loop events) uses upper-case. A future
+// Run may unify the two by adding a Permission field to internal/config
+// (out of scope for Run 004).
+func modeToLoopString(m perm.Mode) string {
+	switch m {
+	case perm.READ_ONLY:
+		return "READ_ONLY"
+	case perm.WORKSPACE_WRITE:
+		return "WORKSPACE_WRITE"
+	case perm.FULL_ACCESS:
+		return "FULL_ACCESS"
+	}
+	return "READ_ONLY"
 }
 
 func main() {

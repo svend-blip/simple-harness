@@ -63,14 +63,28 @@ func Validate(call Call, s Schema) *ToolError {
 // matches float64 (and the int variants that JSON considers numeric are
 // also covered via Go's dynamic typing — the validator treats float64
 // as the canonical JSON number).
+//
+// TypeInt accepts BOTH the Go literal `int` (used by Go-constructed
+// call.Arguments maps in tests) AND `float64` (the canonical JSON-
+// decoded number). A float64 with no fractional part is accepted
+// (since JSON integer literals round-trip through float64 even when
+// they have no decimal point — e.g. `{"x": 5}` decodes as
+// float64(5)). A float64 with a fractional part is rejected for
+// TypeInt (the schema promised an integer, not a real).
 func typeMatches(v any, t PropertyType) bool {
 	switch t {
 	case TypeString:
 		_, ok := v.(string)
 		return ok
 	case TypeInt:
-		_, ok := v.(int)
-		return ok
+		if i, ok := v.(int); ok {
+			_ = i
+			return ok
+		}
+		if f, ok := v.(float64); ok {
+			return f == float64(int64(f))
+		}
+		return false
 	case TypeBool:
 		_, ok := v.(bool)
 		return ok

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/svend-blip/simple-harness/internal/perm"
 	"github.com/svend-blip/simple-harness/internal/tools"
 	"github.com/svend-blip/simple-harness/internal/tools/builtins"
 )
@@ -382,6 +383,123 @@ func TestToolsSubcommand_ListsRegisteredTools(t *testing.T) {
 	if got := string(out); got != expected {
 		t.Fatalf("simple-harness tools output = %q, want %q",
 			got, expected)
+	}
+}
+
+// TestPermissionFlag_AcceptsValues: each of the three SCOPE §12
+// modes (read_only / workspace_write / full_access) accepts via the
+// --permission flag; `config show` exits 0 and the JSON output
+// contains the matching "permission" field value (case-insensitive
+// grep).
+//
+// The test saves and restores activePermissionMode around each
+// invocation (mirroring the globalRegistry snapshot+restore pattern)
+// so the same package-level var is clean across the three
+// invocations AND so a future test run doesn't see leaks between
+// cases.
+func TestPermissionFlag_AcceptsValues(t *testing.T) {
+	saved := activePermissionMode
+	t.Cleanup(func() { activePermissionMode = saved })
+
+	cases := []struct {
+		mode string
+		want string
+	}{
+		{"read_only", "read_only"},
+		{"workspace_write", "workspace_write"},
+		{"full_access", "full_access"},
+	}
+	for _, tc := range cases {
+		activePermissionMode = perm.READ_ONLY // reset
+
+		origStdout := os.Stdout
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatalf("pipe: %v", err)
+		}
+		os.Stdout = w
+		t.Cleanup(func() { os.Stdout = origStdout })
+
+		code := run([]string{"--permission", tc.mode, "config", "show"})
+
+		_ = w.Close()
+		out, _ := io.ReadAll(r)
+		if code != 0 {
+			t.Fatalf("run(--permission %s config show) returned %d, want 0 (output: %q)",
+				tc.mode, code, out)
+		}
+		body := string(out)
+		want := `"permission": "` + tc.want + `"`
+		if !strings.Contains(body, want) {
+			t.Fatalf("run(--permission %s config show) JSON output missing %q; got %q",
+				tc.mode, want, body)
+		}
+	}
+}
+
+// TestPermissionFlag_RejectsBogusValue: an unknown --permission value
+// aborts the harness with exit 2 (SCOPE §28 configuration error)
+// BEFORE any subcommand dispatch. The stderr message names the
+// unknown value AND lists the three allowed values (the handoff's
+// "bogus-tg2" sentinel is the canonical example).
+func TestPermissionFlag_RejectsBogusValue(t *testing.T) {
+	saved := activePermissionMode
+	t.Cleanup(func() { activePermissionMode = saved })
+
+	origStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = origStderr })
+
+	code := run([]string{"--permission", "bogus-tg2", "config", "show"})
+
+	_ = w.Close()
+	body, _ := io.ReadAll(r)
+	if code != 2 {
+		t.Fatalf("run(--permission bogus-tg2 config show) returned %d, want 2 (configuration error)", code)
+	}
+	out := string(body)
+	if !strings.Contains(out, "bogus-tg2") {
+		t.Fatalf("stderr message does not name the unknown value %q; got %q", "bogus-tg2", out)
+	}
+	for _, allowed := range []string{"read_only", "workspace_write", "full_access"} {
+		if !strings.Contains(out, allowed) {
+			t.Fatalf("stderr message does not name allowed value %q; got %q", allowed, out)
+		}
+	}
+}
+
+// TestConfigShow_IncludesPermission: --permission workspace_write
+// config show's JSON output contains "permission": "workspace_write"
+// (case-insensitive grep). This is the TG3 literal command from the
+// handoff's evidence list.
+func TestConfigShow_IncludesPermission(t *testing.T) {
+	saved := activePermissionMode
+	t.Cleanup(func() { activePermissionMode = saved })
+	activePermissionMode = perm.READ_ONLY
+
+	origStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = origStdout })
+
+	code := run([]string{"--permission", "workspace_write", "config", "show"})
+
+	_ = w.Close()
+	body, _ := io.ReadAll(r)
+	if code != 0 {
+		t.Fatalf("run(...) returned %d, want 0 (output: %q)", code, body)
+	}
+	out := strings.ToLower(string(body))
+	if !strings.Contains(out, "workspace_write") {
+		t.Fatalf("config-show JSON does not contain %q (case-insensitive); got %q",
+			"workspace_write", out)
 	}
 }
 

@@ -157,6 +157,27 @@ func TestNormalize_RejectsSymlinkEscape(t *testing.T) {
 	}
 }
 
+// TestNormalize_DotDotPrefixFile: a file whose name LITERALLY starts
+// with the characters ".." (e.g. "..oddfile") is inside the workspace
+// by construction — the leading ".." is part of the filename, not a
+// parent segment. The pre-Run-004 prefix check
+// strings.HasPrefix(rel, "..") wrongly rejected such a path. The
+// segment-boundary-safe form (rel == ".." ||
+// strings.HasPrefix(rel, ".."+sep)) accepts it and returns the
+// cleaned absolute path under the workspace root.
+func TestNormalize_DotDotPrefixFile(t *testing.T) {
+	ws := tempWorkspace(t)
+
+	got, err := ws.Normalize("..oddfile")
+	if err != nil {
+		t.Fatalf("Normalize(..oddfile): %v (the leading '..' is part of the filename, not a parent segment)", err)
+	}
+	want := filepath.Join(ws.Root(), "..oddfile")
+	if got != want {
+		t.Fatalf("Normalize(..oddfile) = %q, want %q", got, want)
+	}
+}
+
 // tempWorkspace creates a temporary directory and returns a Workspace
 // rooted at it. The directory is cleaned up automatically at the end of
 // the test.

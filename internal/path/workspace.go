@@ -153,10 +153,17 @@ func (w Workspace) Normalize(p string) (string, error) {
 	// (an absolute reference to a file inside the workspace is the same
 	// file as the relative one); an absolute path outside the root is
 	// rejected as an absolute_path escape.
+	//
+	// The "outside" check is segment-boundary-safe: a literal string-
+	// prefix match against ".." is wrong (e.g. a file whose cleaned
+	// relative path begins with "..oddfile" would be wrongly flagged).
+	// The correct test is "rel is exactly '..' OR rel starts with '..'
+	// followed by a path separator" — both forms mean "the cleaned
+	// path resolves to a parent or higher level of the root".
 	if filepath.IsAbs(p) {
 		cleaned := filepath.Clean(p)
 		rel, err := filepath.Rel(w.root, cleaned)
-		if err != nil || strings.HasPrefix(rel, "..") || rel == ".." {
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return "", &EscapeError{
 				Path:      p,
 				Workspace: w.root,
@@ -170,10 +177,14 @@ func (w Workspace) Normalize(p string) (string, error) {
 		return cleaned, nil
 	}
 
-	// Step 3: join and clean; check the cleaned string against the root.
+	// Step 3: join and clean; check the cleaned string against the
+	// root. The "outside" check is segment-boundary-safe (see step 2
+	// for the rationale — a literal ".."-prefix match is wrong; the
+	// correct test is "rel is exactly '..' OR rel starts with '..'
+	// followed by a path separator").
 	candidate := filepath.Clean(filepath.Join(w.root, p))
 	rel, err := filepath.Rel(w.root, candidate)
-	if err != nil || strings.HasPrefix(rel, "..") || rel == ".." {
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", &EscapeError{
 			Path:      p,
 			Workspace: w.root,
@@ -200,7 +211,7 @@ func (w Workspace) Normalize(p string) (string, error) {
 	}
 
 	rel, err = filepath.Rel(w.root, evaluated)
-	if err != nil || strings.HasPrefix(rel, "..") || rel == ".." {
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", &EscapeError{
 			Path:      p,
 			Workspace: w.root,
