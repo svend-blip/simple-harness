@@ -1,3 +1,24 @@
+// Package builtins ships the concrete Tool implementations Simple
+// Harness registers against the foundation's tool registry
+// (internal/tools). Handoff 014 registered the first two of the four
+// V1 read-only tools (read_file and list_directory); handoff 015
+// registers the remaining two (search_files and grep) via the same
+// RegisterBuiltins registrar.
+//
+// The package is a thin layer over internal/tools: each builtin
+// implements the tools.Tool interface (Meta, Schema, Execute) and is
+// registered through a single RegisterBuiltins(*tools.Registry) call
+// that cmd/simple-harness/main.go invokes at startup. The package
+// imports ONLY the Go standard library plus internal/tools and the
+// perm package (for the integration tests in builtins_test.go); it
+// does NOT introduce new dependencies, new architecture layers, or
+// new pipeline stages.
+//
+// Architectural boundary: this is a Simple Harness component. It does
+// not import orchestration, harness selection, GPU/VRAM allocation,
+// model lifecycle, or Model Allocator policy. It imports only the Go
+// standard library and the local internal/tools package (and the
+// internal/perm package from tests, where the seam exists).
 package builtins
 
 import "github.com/svend-blip/simple-harness/internal/tools"
@@ -9,10 +30,10 @@ import "github.com/svend-blip/simple-harness/internal/tools"
 // sorts on output, but the registration list itself is the human-
 // readable documentation of "what's wired up".
 //
-// Handoff 014 registers read_file and list_directory. Handoff 015
-// will add search_files and grep via the same Registrar pattern; the
-// implementer of 015 extends this list and updates the package
-// documentation.
+// Run 003 (handoffs 014 + 015) registers all four V1 read-only
+// tools: grep, list_directory, read_file, search_files. The write
+// tools (write_file, apply_patch, shell) belong to Run 004 / Run
+// 005 and are NOT registered here.
 //
 // RegisterBuiltins is idempotent only in the sense that calling it
 // twice on the same registry PANICS — Registry.Register panics on
@@ -22,6 +43,8 @@ import "github.com/svend-blip/simple-harness/internal/tools"
 // RegisterBuiltins exactly once.
 func RegisterBuiltins(r *tools.Registry) {
 	// Order: alphabetical by tool name.
+	r.Register(Grep{})
 	r.Register(ListDirectory{})
 	r.Register(ReadFile{})
+	r.Register(SearchFiles{})
 }

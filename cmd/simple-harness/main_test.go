@@ -337,13 +337,12 @@ func TestToolsSubcommand_EmptyRegistry(t *testing.T) {
 	}
 }
 
-// TestToolsSubcommand_ListsRegisteredTools pins handoff 014's
-// partial TG1: after RegisterBuiltins(globalRegistry), the
-// `simple-harness tools` subcommand prints the registered tool
-// names sorted, one per line. Handoff 014 registers exactly two
-// tools (read_file + list_directory); handoff 015 will add
-// search_files + grep and update this test (the same shape, more
-// entries).
+// TestToolsSubcommand_ListsRegisteredTools pins handoff 015's full
+// TG1: after RegisterBuiltins(globalRegistry), the `simple-harness
+// tools` subcommand prints the registered tool names sorted, one
+// per line. Handoff 015 registers all four V1 read-only tools
+// (grep, list_directory, read_file, search_files); the test's
+// expected output reflects the four-tool listing.
 //
 // The test snapshots and restores globalRegistry around the call
 // so the test does not depend on whether RegisterBuiltins has
@@ -378,11 +377,8 @@ func TestToolsSubcommand_ListsRegisteredTools(t *testing.T) {
 		t.Fatalf("run(tools) returned %d, want 0 (output: %q)", code, out)
 	}
 
-	// Expected output: one tool name per line, sorted. The
-	// exact expected output for handoff 014 is the two-tool
-	// listing. (After handoff 015 ships, update this test to
-	// the four-tool listing.)
-	expected := "list_directory\nread_file\n"
+	// Expected output: one tool name per line, sorted.
+	expected := "grep\nlist_directory\nread_file\nsearch_files\n"
 	if got := string(out); got != expected {
 		t.Fatalf("simple-harness tools output = %q, want %q",
 			got, expected)

@@ -12,15 +12,16 @@ import (
 	"github.com/svend-blip/simple-harness/internal/tools"
 )
 
-// TestRegisterBuiltins_RegistersBothTools: a fresh registry +
-// RegisterBuiltins lists both tools, sorted, before any pipeline
-// integration.
-func TestRegisterBuiltins_RegistersBothTools(t *testing.T) {
+// TestRegisterBuiltins_RegistersAllFourTools: a fresh registry +
+// RegisterBuiltins lists all four V1 read-only tools, sorted,
+// before any pipeline integration. This is the load-bearing
+// assertion for full TG1 at the registrar level.
+func TestRegisterBuiltins_RegistersAllFourTools(t *testing.T) {
 	r := tools.NewRegistry()
 	RegisterBuiltins(r)
 
 	names := r.Names()
-	want := []string{"list_directory", "read_file"}
+	want := []string{"grep", "list_directory", "read_file", "search_files"}
 	if len(names) != len(want) {
 		t.Fatalf("len(names) = %d, want %d (got %v)", len(names), len(want), names)
 	}
@@ -75,6 +76,44 @@ func TestRegisterBuiltins_MetaAndSchema(t *testing.T) {
 	if string(s.Properties["path"]) != string(tools.TypeString) {
 		t.Fatalf("list_directory path type = %q, want %q",
 			s.Properties["path"], tools.TypeString)
+	}
+
+	gr, ok := r.Get("grep")
+	if !ok || gr == nil {
+		t.Fatalf("Get(grep) = (%v, %v), want (non-nil, true)", gr, ok)
+	}
+	if gr.Meta().Name != "grep" {
+		t.Fatalf("grep Meta().Name = %q, want %q", gr.Meta().Name, "grep")
+	}
+	if gr.Meta().Description == "" {
+		t.Fatalf("grep Meta().Description is empty")
+	}
+	gs := gr.Schema()
+	if len(gs.Required) != 1 || gs.Required[0] != "pattern" {
+		t.Fatalf("grep Schema.Required = %v, want [pattern]", gs.Required)
+	}
+	if string(gs.Properties["pattern"]) != string(tools.TypeString) {
+		t.Fatalf("grep pattern type = %q, want %q",
+			gs.Properties["pattern"], tools.TypeString)
+	}
+
+	sf, ok := r.Get("search_files")
+	if !ok || sf == nil {
+		t.Fatalf("Get(search_files) = (%v, %v), want (non-nil, true)", sf, ok)
+	}
+	if sf.Meta().Name != "search_files" {
+		t.Fatalf("search_files Meta().Name = %q, want %q", sf.Meta().Name, "search_files")
+	}
+	if sf.Meta().Description == "" {
+		t.Fatalf("search_files Meta().Description is empty")
+	}
+	ss := sf.Schema()
+	if len(ss.Required) != 1 || ss.Required[0] != "pattern" {
+		t.Fatalf("search_files Schema.Required = %v, want [pattern]", ss.Required)
+	}
+	if string(ss.Properties["pattern"]) != string(tools.TypeString) {
+		t.Fatalf("search_files pattern type = %q, want %q",
+			ss.Properties["pattern"], tools.TypeString)
 	}
 }
 
@@ -318,5 +357,169 @@ func TestIntegration_BinaryRejection_ViaDispatch(t *testing.T) {
 	}
 	if res.Error == nil || res.Error.Kind != "binary_file" {
 		t.Fatalf("Error.Kind = %v, want \"binary_file\"", res.Error)
+	}
+}
+
+// TestIntegration_SearchFiles_Dispatch_PassesAll: a real workspace
+// with files matching a pattern. Dispatch through the full pipeline
+// reaches the SearchFiles tool. Result.Status is "ok" and the
+// matches slice is non-empty.
+func TestIntegration_SearchFiles_Dispatch_PassesAll(t *testing.T) {
+	ws := tempWorkspace(t)
+	writeFile(t, ws.Root(), "alpha.txt", []byte("x"))
+	writeFile(t, ws.Root(), "beta.txt", []byte("x"))
+	writeFile(t, ws.Root(), "gamma.go", []byte("x"))
+
+	chdirWorkspace(t, ws)
+
+	r := tools.NewRegistry()
+	RegisterBuiltins(r)
+
+	call := tools.Call{
+		Name:      "search_files",
+		Arguments: map[string]any{"pattern": "txt", "path": "."},
+	}
+	res := r.Dispatch(context.Background(), call, ws, perm.NewPermissive(), perm.Authorize)
+	if res.Status != "ok" {
+		t.Fatalf("Status = %q, want %q (error=%+v)", res.Status, "ok", res.Error)
+	}
+	sfr, ok := res.Content.(SearchFilesResult)
+	if !ok {
+		t.Fatalf("Content type = %T, want SearchFilesResult", res.Content)
+	}
+	if len(sfr.Files) == 0 {
+		t.Fatalf("Files is empty, want non-empty (alpha.txt + beta.txt match)")
+	}
+}
+
+// TestIntegration_Grep_Dispatch_PassesAll_Native: a real workspace
+// with a file containing a matching line; the test stubs
+// execLookPath to force the native-fallback path; Dispatch through
+// the full pipeline reaches the Grep tool with Backend="native".
+func TestIntegration_Grep_Dispatch_PassesAll_Native(t *testing.T) {
+	withNativeLookPath(t)
+
+	ws := tempWorkspace(t)
+	writeFile(t, ws.Root(), "test.txt", []byte("line one\nline two with needle\nline three\n"))
+
+	chdirWorkspace(t, ws)
+
+	r := tools.NewRegistry()
+	RegisterBuiltins(r)
+
+	call := tools.Call{
+		Name:      "grep",
+		Arguments: map[string]any{"pattern": "needle", "path": "."},
+	}
+	res := r.Dispatch(context.Background(), call, ws, perm.NewPermissive(), perm.Authorize)
+	if res.Status != "ok" {
+		t.Fatalf("Status = %q, want %q (error=%+v)", res.Status, "ok", res.Error)
+	}
+	gr, ok := res.Content.(GrepResult)
+	if !ok {
+		t.Fatalf("Content type = %T, want GrepResult", res.Content)
+	}
+	if gr.Backend != "native" {
+		t.Fatalf("Backend = %q, want %q (execLookPath stubbed to force native)",
+			gr.Backend, "native")
+	}
+	if len(gr.Matches) != 1 {
+		t.Fatalf("len(Matches) = %d, want 1 (matches=%v)", len(gr.Matches), gr.Matches)
+	}
+	if gr.Matches[0].File != "test.txt" {
+		t.Fatalf("Matches[0].File = %q, want %q", gr.Matches[0].File, "test.txt")
+	}
+}
+
+// TestIntegration_Grep_Dispatch_PassesAll_RG: same workspace as the
+// native test, but with the production execLookPath (rg is in
+// $PATH). Dispatch reaches the Grep tool with Backend="rg" and
+// produces the same match row.
+func TestIntegration_Grep_Dispatch_PassesAll_RG(t *testing.T) {
+	withRGLookPath(t)
+
+	ws := tempWorkspace(t)
+	writeFile(t, ws.Root(), "test.txt", []byte("line one\nline two with needle\nline three\n"))
+
+	chdirWorkspace(t, ws)
+
+	r := tools.NewRegistry()
+	RegisterBuiltins(r)
+
+	call := tools.Call{
+		Name:      "grep",
+		Arguments: map[string]any{"pattern": "needle", "path": "."},
+	}
+	res := r.Dispatch(context.Background(), call, ws, perm.NewPermissive(), perm.Authorize)
+	if res.Status != "ok" {
+		t.Fatalf("Status = %q, want %q (error=%+v)", res.Status, "ok", res.Error)
+	}
+	gr, ok := res.Content.(GrepResult)
+	if !ok {
+		t.Fatalf("Content type = %T, want GrepResult", res.Content)
+	}
+	if gr.Backend != "rg" {
+		t.Fatalf("Backend = %q, want %q", gr.Backend, "rg")
+	}
+	if len(gr.Matches) != 1 {
+		t.Fatalf("len(Matches) = %d, want 1 (matches=%v)", len(gr.Matches), gr.Matches)
+	}
+	if gr.Matches[0].File != "test.txt" {
+		t.Fatalf("Matches[0].File = %q, want %q", gr.Matches[0].File, "test.txt")
+	}
+	if gr.Matches[0].Line != 2 {
+		t.Fatalf("Matches[0].Line = %d, want 2", gr.Matches[0].Line)
+	}
+	if gr.Matches[0].Text != "line two with needle" {
+		t.Fatalf("Matches[0].Text = %q, want %q", gr.Matches[0].Text, "line two with needle")
+	}
+}
+
+// TestIntegration_SearchFiles_SchemaViolation_SchemaFirst: a call
+// with a schema violation (pattern is an int, not a string). The
+// schema check fires FIRST; the path and policy stages never run.
+func TestIntegration_SearchFiles_SchemaViolation_SchemaFirst(t *testing.T) {
+	ws := tempWorkspace(t)
+
+	chdirWorkspace(t, ws)
+
+	r := tools.NewRegistry()
+	RegisterBuiltins(r)
+
+	call := tools.Call{
+		Name: "search_files",
+		Arguments: map[string]any{
+			"pattern": 42,
+			"path":    ".",
+		},
+	}
+	res := r.Dispatch(context.Background(), call, ws, perm.NewPermissive(), perm.Authorize)
+	if res.Status != "error" {
+		t.Fatalf("Status = %q, want %q", res.Status, "error")
+	}
+	if res.Error == nil || res.Error.Kind != "schema_violation" {
+		t.Fatalf("Error.Kind = %v, want \"schema_violation\"", res.Error)
+	}
+}
+
+// TestIntegration_Grep_PathEscape_PathSecond: a call with a valid
+// schema but a path escape. The schema check passes; the path
+// check fires. Result.Kind is "path_escape".
+func TestIntegration_Grep_PathEscape_PathSecond(t *testing.T) {
+	ws := tempWorkspace(t)
+
+	r := tools.NewRegistry()
+	RegisterBuiltins(r)
+
+	call := tools.Call{
+		Name:      "grep",
+		Arguments: map[string]any{"pattern": "needle", "path": "../escape"},
+	}
+	res := r.Dispatch(context.Background(), call, ws, perm.NewPermissive(), perm.Authorize)
+	if res.Status != "error" {
+		t.Fatalf("Status = %q, want %q", res.Status, "error")
+	}
+	if res.Error == nil || res.Error.Kind != "path_escape" {
+		t.Fatalf("Error.Kind = %v, want \"path_escape\"", res.Error)
 	}
 }
