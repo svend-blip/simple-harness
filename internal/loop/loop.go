@@ -27,14 +27,19 @@ package loop
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 
 	contextpkg "github.com/svend-blip/simple-harness/internal/context"
 	"github.com/svend-blip/simple-harness/internal/event"
 	"github.com/svend-blip/simple-harness/internal/model"
+	"github.com/svend-blip/simple-harness/internal/path"
+	"github.com/svend-blip/simple-harness/internal/perm"
 	"github.com/svend-blip/simple-harness/internal/skill"
+	"github.com/svend-blip/simple-harness/internal/tools"
 )
 
 // HarnessSystem is the canonical minimal harness system prompt
@@ -83,6 +88,33 @@ type Config struct {
 	// SystemExternal and BEFORE the user task. Skills with empty
 	// Content are skipped. Nil/empty means skip the skills slot.
 	Skills []skill.Skill
+	// Tools is the registered tool registry the loop dispatches
+	// against in a multi-turn agent run. Nil means the loop does
+	// NOT dispatch tools — the new RunAgent method below emits
+	// an explicit configuration error and exits non-zero before
+	// calling the model client (so a non-nil Tools is a
+	// precondition for tool dispatch, not a soft default).
+	//
+	// The wiring from cmd/simple-harness/main.go's
+	// builtins.RegisterBuiltins(globalRegistry) into this field
+	// lands in handoff 041; for THIS handoff the binding pins
+	// construct loop.Run with Tools set directly in the test
+	// setup, bypassing the cmd surface. The field is purely
+	// additive per SCOPE §42.
+	//
+	// MaxTurns is the upper bound on the agent's
+	// model-request / tool-execution cycles. <= 0 means the loop
+	// defaults to 8 per the GOAL §2 deliverable 6 default; the
+	// loop enforces the limit as the simple-iteration guard:
+	// each call to model.Client.ChatStream counts as one turn; if
+	// turn count exceeds MaxTurns, the loop emits a
+	// "TOOL_DISPATCH_OVERFLOW" status event + a completed event
+	// with exit_code 1 per the SCOPE §3 "exceeding a limit must
+	// produce an explicit observable result" discipline and
+	// returns a sentinel error (*MaxTurnsError) that the cmd
+	// maps to exit 1.
+	Tools    *tools.Registry
+	MaxTurns int
 }
 
 // Run is a single-turn interactive loop session. It owns the model
@@ -366,4 +398,448 @@ func ComposeMessages(cfg Config, prompt string) []model.Message {
 	}
 	messages = append(messages, model.Message{Role: "user", Content: prompt})
 	return messages
+}
+
+// --- handoff 040: Run 017 / LOOP-CORE ---
+
+// MaxTurnsError signals that the agent run exhausted the
+// configured MaxTurns bound without the model emitting a
+// tool-call-free final response. SCOPE §3 "exceeding a limit
+// must produce an explicit observable result" — the cmd maps
+// this to exit 1 (SCOPE §28, generic failure, since the task
+// did not complete).
+type MaxTurnsError struct{ Limit int }
+
+func (e *MaxTurnsError) Error() string {
+	return fmt.Sprintf("loop: max-turns %d exceeded", e.Limit)
+}
+
+// PermissionError signals that the agent run's first
+// permission-violating tool call was rejected by the
+// perm.Authorize pipeline. The cmd maps this to exit 4
+// (SCOPE §28, permission violation). The dispatch pipeline
+// ran the validate → authorize steps and the policy denied;
+// the underlying tool was not executed.
+type PermissionError struct{ Underlying error }
+
+func (e *PermissionError) Error() string {
+	return fmt.Sprintf("loop: permission denied: %v", e.Underlying)
+}
+func (e *PermissionError) Unwrap() error { return e.Underlying }
+
+// ConfigError signals that loop.Config.Tools was nil when
+// RunAgent was called — a precondition failure the loop
+// refuses to paper over. The cmd maps this to exit 2
+// (SCOPE §28, configuration error).
+type ConfigError struct{ Reason string }
+
+func (e *ConfigError) Error() string { return "loop: " + e.Reason }
+
+// defaultMaxTurns is the default upper bound on agent-loop
+// iterations when loop.Config.MaxTurns is left at its zero
+// value. GOAL §2 deliverable 6 names 8 as the default; the
+// cmd-side wiring in handoff 041 sets the explicit value
+// before calling RunAgent so this constant is the safety net
+// for direct test callers that pass 0.
+const defaultMaxTurns = 8
+
+// RunAgent executes the SCOPE §3 multi-turn agent cycle:
+//
+//	model request → stream → tool calls?
+//	  ├── no  → final response
+//	  └── yes → validate → authorize → execute → record → append → model request
+//
+// The method is the multi-turn supersession of RunOne: a
+// tool-dispatching run uses RunAgent; a non-tool-dispatching
+// single-turn caller continues to use RunOne. RunOne's
+// behavior is unchanged.
+//
+// Preconditions (both checked at entry; the second is the
+// safety-net defaulting for direct test callers; the cmd-side
+// wiring in handoff 041 sets the explicit value before
+// invoking RunAgent):
+//
+//   - r.cfg.Tools != nil — otherwise returns *ConfigError
+//     (the loop refuses to silently degrade to a non-
+//     dispatching run; this is a precondition failure, not a
+//     soft default).
+//   - r.cfg.MaxTurns > 0 — defaults to defaultMaxTurns (8)
+//     when <= 0; no warning is emitted because the cmd is
+//     expected to set the value explicitly and the constant
+//     is the documented safety net.
+//
+// Per-turn flow:
+//
+//  1. Emit model_request for the first turn (the V1 single-
+//     turn pattern).
+//  2. Initialize the per-Run message history from
+//     ComposeMessages (HarnessSystem + ExternalSystem +
+//     Skill(s) + user task).
+//  3. For each turn (1 to MaxTurns):
+//     a. Call r.client.ChatStream with the running history
+//        and the onDelta callback that (i) accumulates
+//        per-index tool-call deltas into a per-turn
+//        accumulatedCall map, (ii) emits the existing
+//        assistant_stream event for any ev.Delta text, (iii)
+//        emits status: STREAMING on first non-empty event.
+//     b. If zero tool calls accumulated (all per-index
+//        accumulators are nil/empty), this is a "no tool
+//        calls" final response → emits status: COMPLETED +
+//        completed(exit_code: 0) and returns the accumulated
+//        text.
+//     c. If one or more tool calls accumulated, dispatch
+//        each in sequence via r.cfg.Tools.Dispatch(ctx,
+//        call, ws, pol, perm.Authorize). On error, append a
+//        tool-result message with status="error" + the
+//        structured error JSON to the message history and
+//        continue to the next turn (the SCOPE §31
+//        "untrusted input" discipline: structured rejection
+//        is the harness's contract with the model, not a
+//        hard failure).
+//     d. If a permission violation surfaces, emit
+//        status: FAILED + completed(exit_code: 4) and
+//        return *PermissionError.
+//     e. After all tool calls in the current turn are
+//        dispatched, increment the turn counter and loop
+//        back to step 3a.
+//
+// On exhaustion: emit status: FAILED with reason
+// "TOOL_DISPATCH_OVERFLOW: max-turns <N> exceeded" +
+// completed(exit_code: 1) and return *MaxTurnsError.
+//
+// The ledger interactions are limited to the first turn's
+// PopulateLedger(prompt) call (same as RunOne's V1 single-
+// turn behavior); multi-turn tool-call messages are tracked
+// in the message history only, not the ledger.
+func (r *Run) RunAgent(ctx context.Context, prompt string) (string, error) {
+	if r.cfg.Tools == nil {
+		_ = r.em.Status("FAILED")
+		_ = r.em.Completed(2)
+		return "", &ConfigError{Reason: "RunAgent requires loop.Config.Tools to be non-nil"}
+	}
+	maxTurns := r.cfg.MaxTurns
+	if maxTurns <= 0 {
+		maxTurns = defaultMaxTurns
+	}
+
+	if err := r.em.Started(event.SessionConfig{
+		Model:      r.cfg.Model.Model,
+		Endpoint:   r.cfg.Model.BaseURL,
+		Workspace:  r.cfg.Workspace,
+		Permission: r.cfg.Permission,
+	}); err != nil {
+		return "", err
+	}
+
+	// Populate the per-Run ledger exactly once per RunAgent call
+	// (matches the V1 RunOne's single PopulateLedger call per
+	// invocation; multi-turn tool-call messages accumulate in the
+	// model-facing message history but not in the accounting
+	// ledger — the ledger tracks prompt composition, not
+	// conversation history).
+	r.PopulateLedger(prompt)
+
+	history := ComposeMessages(r.cfg, prompt)
+
+	var (
+		accumulatedText strings.Builder
+		streamed        bool
+	)
+
+	// Pre-build the workspace + policy once per RunAgent (the
+	// workspace path is stable; the policy is stable for the
+	// whole agent run; per-call re-construction is wasteful).
+	ws, err := workspaceFromPath(r.cfg.Workspace)
+	if err != nil {
+		_ = r.em.Status("FAILED")
+		_ = r.em.Completed(2)
+		return "", &ConfigError{Reason: fmt.Sprintf("invalid workspace %q: %v", r.cfg.Workspace, err)}
+	}
+	pol, err := policyFromPermission(r.cfg.Permission)
+	if err != nil {
+		_ = r.em.Status("FAILED")
+		_ = r.em.Completed(2)
+		return "", &ConfigError{Reason: fmt.Sprintf("invalid permission %q: %v", r.cfg.Permission, err)}
+	}
+
+	// Implementer's chosen semantic for the MaxTurns overflow:
+	// the check fires at the START of each turn (BEFORE the
+	// ChatStream call). The sequence per iteration is:
+	//   1. Emit model_request (the SCOPE §21 / GOAL §2 signal
+	//      that the harness is about to invoke the model client).
+	//   2. Check if the current turn number exceeds MaxTurns; if
+	//      so, emit the overflow status + status: FAILED +
+	//      completed(exit_code: 1) and return *MaxTurnsError.
+	//   3. Otherwise call ChatStream; process the response; if
+	//      the model returned zero tool calls, return success;
+	//      otherwise dispatch the calls, append the results to
+	//      the message history, and increment the turn counter.
+	//
+	// This means with MaxTurns=N the loop emits N+1
+	// model_request events when every turn returns tool calls
+	// (turn 1, 2, ..., N are within the bound and fire
+	// ChatStream; turn N+1 fires model_request + overflow but
+	// no ChatStream). The binding pin's "exactly 3
+	// model_request events for MaxTurns=2" assertion documents
+	// this chosen semantic.
+	for turn := 1; ; turn++ {
+		if err := r.em.ModelRequest(); err != nil {
+			return "", err
+		}
+		if turn > maxTurns {
+			// Overflow: the bound was exceeded. Emit the
+			// structured overflow signal so the JSONL sidecar
+			// carries the explicit reason per SCOPE §3.
+			_ = r.em.Status(fmt.Sprintf("TOOL_DISPATCH_OVERFLOW: max-turns %d exceeded", maxTurns))
+			_ = r.em.Status("FAILED")
+			_ = r.em.Completed(1)
+			return accumulatedText.String(), &MaxTurnsError{Limit: maxTurns}
+		}
+
+		var perIndexAccum map[int]*tools.Call
+		var firstNonEmpty bool
+
+		onDelta := func(ev model.StreamEvent) error {
+			if !firstNonEmpty && (ev.Delta != "" || ev.FinishReason != "" ||
+				ev.ToolCallDelta != nil || ev.Usage != nil) {
+				if err := r.em.Status("STREAMING"); err != nil {
+					return err
+				}
+				firstNonEmpty = true
+				streamed = true
+			}
+			if ev.Delta != "" {
+				if _, err := io.WriteString(r.out, ev.Delta); err != nil {
+					return err
+				}
+				accumulatedText.WriteString(ev.Delta)
+				if err := r.em.AssistantStream(ev.Delta); err != nil {
+					return err
+				}
+			}
+			if ev.ToolCallDelta != nil {
+				if perIndexAccum == nil {
+					perIndexAccum = make(map[int]*tools.Call)
+				}
+				if err := accumulateToolCallFragment(perIndexAccum, ev.ToolCallDelta); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+
+		if err := r.client.ChatStream(ctx, model.ChatRequest{
+			Messages: history,
+		}, onDelta); err != nil {
+			var me *model.ModelError
+			if errors.As(err, &me) {
+				switch me.Kind {
+				case model.ErrHTTP, model.ErrParse, model.ErrUpstream:
+					_ = r.em.Status("FAILED")
+				case model.ErrTimeout:
+					_ = r.em.Status("INTERRUPTED")
+				}
+			} else {
+				_ = r.em.Status("FAILED")
+			}
+			return accumulatedText.String(), err
+		}
+
+		// No tool calls accumulated → final response (single-turn
+		// success path; matches the V1 RunOne happy path).
+		if len(perIndexAccum) == 0 {
+			if !streamed {
+				// No events at all — still emit STREAMING so the
+				// sidecar carries the documented sequence.
+				_ = r.em.Status("STREAMING")
+			}
+			if err := r.em.Status("COMPLETED"); err != nil {
+				return accumulatedText.String(), err
+			}
+			if err := r.em.Completed(0); err != nil {
+				return accumulatedText.String(), err
+			}
+			return accumulatedText.String(), nil
+		}
+
+		// At least one tool call accumulated. Append an
+		// assistant message carrying every completed call to the
+		// message history so the model sees its own tool-call on
+		// the next turn, then dispatch each call in order.
+		//
+		// The assistant message's Content is empty for tool-call
+		// turns (the OpenAI wire shape: the assistant message
+		// emits content + tool_calls; we carry the parsed
+		// tool_calls in the message history but do not re-emit
+		// them on the wire). Future handoff 041 may extend
+		// model.Message with a ToolCalls field; for THIS handoff
+		// the message history carries the assistant's textual
+		// content as an empty string and the subsequent tool-
+		// result messages carry the dispatch outcomes.
+		history = append(history, model.Message{Role: "assistant", Content: ""})
+
+		anyPermissionViolation := false
+		var permUnderlying error
+		for idx := 0; idx < len(perIndexAccum); idx++ {
+			call, ok := perIndexAccum[idx]
+			if !ok || call == nil {
+				continue
+			}
+			result := r.cfg.Tools.Dispatch(ctx, *call, ws, pol, perm.Authorize)
+			if result.Status == "error" && result.Error != nil && result.Error.Kind == "permission_denied" {
+				anyPermissionViolation = true
+				permUnderlying = fmt.Errorf("%s: %s", result.Error.Kind, result.Error.Message)
+				break
+			}
+			// Encode the result as a tool message so the model
+			// sees the outcome on the next turn.
+			encoded, encErr := encodeToolResult(call, result)
+			if encErr != nil {
+				_ = r.em.Status("FAILED")
+				_ = r.em.Completed(1)
+				return accumulatedText.String(), fmt.Errorf("loop: encode tool result for %s: %w", call.Name, encErr)
+			}
+			history = append(history, model.Message{Role: "tool", Content: encoded})
+		}
+
+		if anyPermissionViolation {
+			_ = r.em.Status("FAILED")
+			_ = r.em.Completed(4)
+			return accumulatedText.String(), &PermissionError{Underlying: permUnderlying}
+		}
+	}
+}
+
+// encodeToolResult produces the message-body string for a tool
+// dispatch outcome. On success, the result content is JSON-encoded
+// verbatim; on error, the structured ToolError is JSON-encoded so
+// the model receives a parseable description of what went wrong.
+// The encoding is the simplest viable form for THIS handoff —
+// handoff 041 may extend this to a richer wire shape (an explicit
+// tool_call_id field, etc.).
+func encodeToolResult(call *tools.Call, result tools.Result) (string, error) {
+	if result.Status == "ok" {
+		body := map[string]any{
+			"name":    call.Name,
+			"status":  "ok",
+			"content": result.Content,
+		}
+		b, err := json.Marshal(body)
+		if err != nil {
+			return "", err
+		}
+		return string(b), nil
+	}
+	body := map[string]any{
+		"name":  call.Name,
+		"status": "error",
+		"error": result.Error,
+	}
+	b, err := json.Marshal(body)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// accumulateToolCallFragment merges a ToolCallFragment into the
+// per-index accumulator. The first fragment for a given Index
+// initializes the tools.Call with Name + a fresh Arguments map;
+// subsequent fragments for the same Index merge ArgsDelta into
+// the Arguments map by json.Unmarshal of the accumulated buffer
+// (this is the "model client assembles complete tool calls from
+// stream deltas" behavior the GOAL §2 deliverable 3 names; THIS
+// handoff places the assembly in the loop — handoff 041 may
+// refactor it into the model client).
+//
+// Returns an error if the accumulated JSON is malformed (the
+// SCOPE §31 "untrusted input" discipline says structured
+// rejection is the harness's contract with the model, not a hard
+// failure; the caller continues the loop and the model gets to
+// retry on the next turn).
+func accumulateToolCallFragment(accum map[int]*tools.Call, frag *model.ToolCallFragment) error {
+	if frag == nil {
+		return nil
+	}
+	existing, ok := accum[frag.Index]
+	if !ok || existing == nil {
+		existing = &tools.Call{
+			Name:      frag.Name,
+			Arguments: map[string]any{},
+		}
+		accum[frag.Index] = existing
+	}
+	if frag.Name != "" {
+		existing.Name = frag.Name
+	}
+	if frag.ArgsDelta == "" {
+		return nil
+	}
+	// Merge the ArgsDelta into the Arguments map by re-parsing
+	// the running buffer. The model emits ArgsDelta as a partial
+	// JSON object that becomes a complete object once the
+	// upstream emits the closing brace; we re-parse the buffer
+	// each step so partial state survives across fragments.
+	var merged map[string]any
+	if err := json.Unmarshal([]byte(frag.ArgsDelta), &merged); err != nil {
+		return fmt.Errorf("loop: parse tool-call args delta: %w", err)
+	}
+	for k, v := range merged {
+		existing.Arguments[k] = v
+	}
+	return nil
+}
+
+// parseToolCallArgs parses the accumulated JSON ArgsDelta into a
+// map[string]any. It is the parseToolCallArgs helper named in
+// the GOAL §2 deliverable 6 partial: the helper handles the
+// common case where the model emits a single {"path": "file",
+// "patch": "..."} JSON object. If the JSON is malformed (not an
+// object, or unparseable), returns a *json.SyntaxError — the
+// loop's caller appends the parse error to the message history
+// as a tool-result message with status="error" and the model
+// gets to retry (SCOPE §31 "untrusted input" discipline).
+//
+// NOTE: this helper is exposed for the binding pin's contract;
+// the per-fragment merge in accumulateToolCallFragment already
+// performs per-delta unmarshalling for the streaming path. The
+// helper exists for callers that have an accumulated JSON string
+// (e.g. a non-streaming tool-call) and need to parse it.
+func parseToolCallArgs(argsJSON string) (map[string]any, error) {
+	if argsJSON == "" {
+		return map[string]any{}, nil
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(argsJSON), &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// workspaceFromPath constructs a tools.Workspace (= path.Workspace)
+// from the configured workspace directory. Returns the workspace
+// or an error if the path is invalid (e.g. a non-existent
+// workspace root when path.New's EvalSymlinks rejects it).
+func workspaceFromPath(workspaceDir string) (tools.Workspace, error) {
+	if workspaceDir == "" {
+		return tools.Workspace{}, fmt.Errorf("empty workspace directory")
+	}
+	// path.New is the canonical constructor; the loop's import
+	// surface is the tools.Workspace alias which IS
+	// path.Workspace (per tools/types.go). Symlink evaluation
+	// and workspace-root stability semantics are honored via
+	// the canonical path.New path.
+	return path.New(workspaceDir)
+}
+
+// policyFromPermission parses the loop's permission string (one
+// of "READ_ONLY", "WORKSPACE_WRITE", "FULL_ACCESS") into a
+// tools.Policy. Returns the policy or an error if the string is
+// unknown.
+func policyFromPermission(permStr string) (tools.Policy, error) {
+	mode, err := perm.ParseMode(strings.ToLower(permStr))
+	if err != nil {
+		return nil, err
+	}
+	return perm.NewPolicy(mode), nil
 }
