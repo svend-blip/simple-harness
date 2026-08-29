@@ -70,6 +70,121 @@ type ToolCallFragment struct {
 	ArgsDelta string `json:"args_delta,omitempty"`
 }
 
+// ToolCall is the assembled tool call after the loop
+// has merged all per-index ToolCallFragment deltas
+// emitted by the upstream during a single model turn.
+// Index is the position in the upstream tool_calls
+// array; ID is the upstream-assigned call identifier
+// (used on the tool_call + tool_result events for
+// correlation); Name is the tool name; Arguments is
+// the JSON-decoded form (strings as Go strings,
+// numbers as float64, booleans as bool, arrays as
+// []any, objects as map[string]any).
+//
+// The GOAL §2 deliverable 3 delta-assembly seam lives
+// in this file: the helpers ParseToolCallArgs +
+// AccumulateToolCallFragment below let callers
+// assemble complete ToolCall values from stream
+// deltas. The loop's existing private
+// accumulateToolCallFragment + parseToolCallArgs
+// helpers stay in place until handoff 042 either
+// migrates them or folds them away.
+type ToolCall struct {
+	Index     int            `json:"index"`
+	ID        string         `json:"id,omitempty"`
+	Name      string         `json:"name"`
+	Arguments map[string]any `json:"arguments"`
+}
+
+// ParseToolCallArgs parses the accumulated JSON
+// ArgsDelta into a map[string]any. The helper handles
+// the common case where the model emits a single
+// {"path": "file", "patch": "..."} JSON object. If the
+// JSON is malformed (not an object, or unparseable),
+// returns a *json.SyntaxError — the loop's caller
+// appends the parse error to the message history as
+// a tool-result message with status="error" and the
+// model gets to retry (SCOPE §31 "untrusted input"
+// discipline: structured rejection, never a crash).
+//
+// An empty argsJSON returns an empty map (not nil)
+// and a nil error; the loop treats this as a
+// parameterless tool call.
+//
+// The helper is the model-side counterpart to the
+// loop's private parseToolCallArgs (handoff 040).
+// handoff 042 will either migrate the loop's caller
+// to this exported helper or fold the private
+// duplicate away.
+func ParseToolCallArgs(argsJSON string) (map[string]any, error) {
+	if argsJSON == "" {
+		return map[string]any{}, nil
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(argsJSON), &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// AccumulateToolCallFragment merges a ToolCallFragment
+// into the per-index accumulator. The first fragment
+// for a given Index initializes the ToolCall with
+// Name + a fresh Arguments map; subsequent fragments
+// for the same Index merge ArgsDelta into the
+// Arguments map by re-parsing the accumulated buffer
+// (the model emits ArgsDelta as a partial JSON object
+// that becomes a complete object once the upstream
+// emits the closing brace; we re-parse the buffer
+// each step so partial state survives across
+// fragments).
+//
+// Returns an error if the accumulated JSON is
+// malformed. The caller (the loop's onDelta handler)
+// treats the error as a per-delta parse failure: the
+// SCOPE §31 "untrusted input" discipline says
+// structured rejection is the harness's contract with
+// the model, not a hard failure; the loop continues
+// and the model gets to retry on the next turn.
+//
+// The helper is the model-side counterpart to the
+// loop's private accumulateToolCallFragment
+// (handoff 040). handoff 042 will either migrate the
+// loop's caller to this exported helper or fold the
+// private duplicate away.
+func AccumulateToolCallFragment(accum map[int]*ToolCall, frag *ToolCallFragment) error {
+	if frag == nil {
+		return nil
+	}
+	existing, ok := accum[frag.Index]
+	if !ok || existing == nil {
+		existing = &ToolCall{
+			Index:     frag.Index,
+			ID:        frag.ID,
+			Name:      frag.Name,
+			Arguments: map[string]any{},
+		}
+		accum[frag.Index] = existing
+	}
+	if frag.ID != "" {
+		existing.ID = frag.ID
+	}
+	if frag.Name != "" {
+		existing.Name = frag.Name
+	}
+	if frag.ArgsDelta == "" {
+		return nil
+	}
+	var merged map[string]any
+	if err := json.Unmarshal([]byte(frag.ArgsDelta), &merged); err != nil {
+		return fmt.Errorf("model: parse tool-call args delta: %w", err)
+	}
+	for k, v := range merged {
+		existing.Arguments[k] = v
+	}
+	return nil
+}
+
 // Usage carries the token-count block from upstream, when present
 // (typically only on the final event). Zero value otherwise.
 type Usage struct {

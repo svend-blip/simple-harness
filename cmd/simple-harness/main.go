@@ -85,7 +85,7 @@ import (
 // without shelling out or reading the binary itself. The format is a
 // single line, project-name first, so an external parser does not need to
 // interpret it to extract the version.
-const Version = "simple-harness 0.1.0-dev (Run 017, handoff 040)"
+const Version = "simple-harness 0.1.0-dev (Run 017, handoff 041)"
 
 // globalRegistry is the tool registry the `simple-harness tools`
 // subcommand lists. Handoff 013 leaves it EMPTY; Run 014 / Run 015 will
@@ -676,6 +676,23 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, seams ...any) int
 	if o.skill != nil {
 		skills = []skill.Skill{*o.skill}
 	}
+	// Run 017 / handoff 041: registry wiring into
+	// loop.New(loop.Config{Tools: ...}) per the GOAL §2
+	// deliverable 4. Interactive mode stays on RunOne
+	// (single-turn; the interactive REPL's semantics are
+	// unchanged), but the field is populated so the
+	// wiring is symmetric with runModeExecute's. MaxTurns
+	// is left at 0 in interactive mode (interactive mode
+	// does NOT expose --max-turns; the field is only
+	// meaningful when RunAgent is invoked, which is
+	// run-mode only). The interactive REPL's existing
+	// /skill NAME mid-session command already mutates
+	// r.cfg.Skills via r.SetSkills; handoff 041 does NOT
+	// add a corresponding /tools mid-session command
+	// (the registry is fixed at startup per the GOAL §3
+	// FROZEN list — `internal/tools/builtins/` is
+	// "consumed, not modified"; mid-session registration
+	// is a future concern).
 	r := loop.New(loop.Config{
 		Model: model.Options{
 			BaseURL:         normalizedBase,
@@ -690,6 +707,8 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, seams ...any) int
 		System:         loop.HarnessSystem,
 		SystemExternal: "",
 		Skills:         skills,
+		Tools:          globalRegistry,
+		MaxTurns:       0,
 	}, client, em, stdout)
 
 	scanner := bufio.NewScanner(stdin)

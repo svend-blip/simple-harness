@@ -273,3 +273,80 @@ func TestEmit_Interrupted_ProducesCorrectEventType(t *testing.T) {
 		t.Errorf("ExitCode = %d, want 0 (omitempty-tagged; the interrupted event has no exit_code)", ev.ExitCode)
 	}
 }
+
+// TestToolCall_WritesCallIDAndTool pins the SCOPE §42 additive
+// `tool_call` event type (Run 017 / handoff 041): the Emitter
+// produces one JSONL line whose event field is "tool_call",
+// call_id is the per-call identifier, tool is the tool name,
+// protocol_version is the V1 default "1", session_id is the
+// emitter's session id. Run-time emissions land in handoff 042;
+// this binding pin verifies the event TYPE exists beside the V1
+// six per TG2.
+func TestToolCall_WritesCallIDAndTool(t *testing.T) {
+	var buf bytes.Buffer
+	em := NewEmitter(&buf, "sess-tc")
+
+	if err := em.ToolCall("call_xyz", "apply_patch"); err != nil {
+		t.Fatalf("ToolCall: %v", err)
+	}
+
+	var got Event
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &got); err != nil {
+		t.Fatalf("unmarshal: %v (raw=%q)", err, buf.String())
+	}
+	if got.Event != "tool_call" {
+		t.Errorf("Event = %q, want tool_call", got.Event)
+	}
+	if got.CallID != "call_xyz" {
+		t.Errorf("CallID = %q, want call_xyz", got.CallID)
+	}
+	if got.Tool != "apply_patch" {
+		t.Errorf("Tool = %q, want apply_patch", got.Tool)
+	}
+	if got.ProtocolVersion != "1" {
+		t.Errorf("ProtocolVersion = %q, want 1", got.ProtocolVersion)
+	}
+	if got.SessionID != "sess-tc" {
+		t.Errorf("SessionID = %q, want sess-tc", got.SessionID)
+	}
+}
+
+// TestToolResult_WritesCallIDAndStatus pins the SCOPE §42 additive
+// `tool_result` event type (Run 017 / handoff 041): the Emitter
+// produces one JSONL line whose event field is "tool_result",
+// call_id is the per-call identifier, tool_result_status is the
+// result status, content carries the result body, protocol_version
+// is the V1 default "1", session_id is the emitter's session id.
+// Run-time emissions land in handoff 042; this binding pin verifies
+// the event TYPE exists beside the V1 six per TG2.
+func TestToolResult_WritesCallIDAndStatus(t *testing.T) {
+	var buf bytes.Buffer
+	em := NewEmitter(&buf, "sess-tr")
+
+	if err := em.ToolResult("call_xyz", "ok", "patched"); err != nil {
+		t.Fatalf("ToolResult: %v", err)
+	}
+
+	var got Event
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &got); err != nil {
+		t.Fatalf("unmarshal: %v (raw=%q)", err, buf.String())
+	}
+	if got.Event != "tool_result" {
+		t.Errorf("Event = %q, want tool_result", got.Event)
+	}
+	if got.CallID != "call_xyz" {
+		t.Errorf("CallID = %q, want call_xyz", got.CallID)
+	}
+	if got.ResultStatus != "ok" {
+		t.Errorf("ResultStatus = %q, want ok", got.ResultStatus)
+	}
+	if got.Content != "patched" {
+		t.Errorf("Content = %q, want patched", got.Content)
+	}
+	if got.ProtocolVersion != "1" {
+		t.Errorf("ProtocolVersion = %q, want 1", got.ProtocolVersion)
+	}
+	if got.SessionID != "sess-tr" {
+		t.Errorf("SessionID = %q, want sess-tr", got.SessionID)
+	}
+}

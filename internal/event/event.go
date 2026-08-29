@@ -48,6 +48,26 @@ type Event struct {
 	Delta    string         `json:"delta,omitempty"`
 	ExitCode int            `json:"exit_code,omitempty"`
 	Config   *SessionConfig `json:"config,omitempty"`
+
+	// CallID is the per-call identifier on tool_call and
+	// tool_result events. The model emits a unique call_id
+	// per tool invocation; the harness echoes the same value
+	// on the matching tool_result so an external controller
+	// can correlate the two events for a single dispatch
+	// round. Populated on tool_call + tool_result events;
+	// absent (omitempty) on all other event types.
+	CallID string `json:"call_id,omitempty"`
+	// Tool is the tool name on tool_call events. Populated
+	// on tool_call events only; absent (omitempty) on all
+	// other event types. The model-targeted tool name (e.g.
+	// "apply_patch", "read_file") matches the
+	// tools.Registry name space.
+	Tool string `json:"tool,omitempty"`
+	// ResultStatus is the tool-result status on tool_result
+	// events. One of "ok" or "error"; absent (omitempty) on
+	// all other event types. The exact status value matches
+	// tools.Result.Status verbatim.
+	ResultStatus string `json:"tool_result_status,omitempty"`
 }
 
 // SessionConfig is the identity card emitted in the `started` event.
@@ -187,6 +207,50 @@ func (e *Emitter) Interrupted(sessionID string) error {
 	ev := Event{Event: "interrupted"}
 	if sessionID != "" {
 		ev.SessionID = sessionID
+	}
+	return e.Emit(ev)
+}
+
+// ToolCall emits a "tool_call" event when the model
+// emits a tool-call delta the harness has chosen to
+// dispatch. callID is the per-call identifier the model
+// assigned to this dispatch (used on the matching
+// tool_result event for correlation); toolName is the
+// tool name from the assembled tools.Call. The event
+// carries no payload beyond the base fields +
+// call_id + tool. Run-time emissions of this event
+// land in handoff 042 (the binding-pin slot); for
+// handoff 041 the event TYPE exists beside the V1 six
+// (satisfies TG2) but no production code path emits
+// it yet.
+func (e *Emitter) ToolCall(callID, toolName string) error {
+	return e.Emit(Event{
+		Event: "tool_call",
+		CallID: callID,
+		Tool:   toolName,
+	})
+}
+
+// ToolResult emits a "tool_result" event after the
+// tools.Registry.Dispatch pipeline returns for a call.
+// callID is the same per-call identifier the
+// corresponding tool_call event carried (so an
+// external controller can pair them); status is the
+// tools.Result.Status value ("ok" or "error");
+// content is the result body for ok results or the
+// structured error for error results (the dispatch
+// pipeline's structured-error JSON). Run-time
+// emissions of this event land in handoff 042; for
+// handoff 041 the event TYPE exists beside the V1
+// six (satisfies TG2).
+func (e *Emitter) ToolResult(callID, status, content string) error {
+	ev := Event{
+		Event:        "tool_result",
+		CallID:       callID,
+		ResultStatus: status,
+	}
+	if content != "" {
+		ev.Content = content
 	}
 	return e.Emit(ev)
 }

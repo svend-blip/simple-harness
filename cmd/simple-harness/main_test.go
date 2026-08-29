@@ -1046,7 +1046,7 @@ func TestRun_Version(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 017, handoff 040)"
+	want := "simple-harness 0.1.0-dev (Run 017, handoff 041)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}
@@ -1206,9 +1206,22 @@ func TestRun_OutputJSONL_EveryLineIsJSON(t *testing.T) {
 	if out == "" {
 		t.Fatalf("stdout empty; got %q (stderr=%q)", out, errOut)
 	}
+	// Run 017 / handoff 041: extend the allowed event-name
+	// map with the two new event types (tool_call,
+	// tool_result) added by handoff 041. The map is the
+	// documented set of event types the run-mode surface
+	// may emit (SCOPE §42 additive-evolution discipline);
+	// a regression that drops one of the V1 events fails
+	// the test, and adding the new events keeps the
+	// superset current. The existing run-mode tests use
+	// unreachable endpoints (port 9) that never reach
+	// tool dispatch, so the actual emitted event set is
+	// unchanged — the test's allowed set is the
+	// superset, the actual events are the subset.
 	allowed := map[string]bool{
 		"started": true, "status": true, "model_request": true,
 		"assistant_stream": true, "completed": true,
+		"tool_call": true, "tool_result": true,
 	}
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		if line == "" {
@@ -1351,7 +1364,7 @@ func TestRun_Version_AdvancesToHandoff024(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 017, handoff 040)"
+	want := "simple-harness 0.1.0-dev (Run 017, handoff 041)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}
@@ -2060,7 +2073,7 @@ func TestRun_Version_AdvancesToHandoff030(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 017, handoff 040)"
+	want := "simple-harness 0.1.0-dev (Run 017, handoff 041)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}

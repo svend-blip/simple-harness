@@ -244,3 +244,75 @@ func TestRequestTimeout(t *testing.T) {
 		t.Errorf("Kind = %v, want ErrTimeout (err=%v)", me, err)
 	}
 }
+
+// TestParseToolCallArgs_HappyPath pins the SCOPE §31
+// structured-rejection discipline (Run 017 / handoff 041):
+// a complete JSON object parses into a map[string]any
+// with the expected keys. The binding pin is the
+// delta-assembly seam's GOAL §2 deliverable 3 contract.
+func TestParseToolCallArgs_HappyPath(t *testing.T) {
+	argsJSON := `{"path":"/tmp/x","patch":"@@ -1 +1 @@\n-old\n+new\n"}`
+	got, err := ParseToolCallArgs(argsJSON)
+	if err != nil {
+		t.Fatalf("ParseToolCallArgs: %v", err)
+	}
+	if got["path"] != "/tmp/x" {
+		t.Errorf("args[path] = %v, want /tmp/x", got["path"])
+	}
+	if got["patch"] == nil {
+		t.Errorf("args[patch] missing")
+	}
+}
+
+// TestParseToolCallArgs_MalformedJSON_ReturnsSyntaxError pins
+// the SCOPE §31 contract: a truncated JSON object surfaces
+// as a *json.SyntaxError (the caller appends a tool-result
+// message with status="error" so the model gets to retry).
+func TestParseToolCallArgs_MalformedJSON_ReturnsSyntaxError(t *testing.T) {
+	_, err := ParseToolCallArgs(`{"path":"/tmp/x"`) // truncated
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var se *json.SyntaxError
+	if !errors.As(err, &se) {
+		t.Errorf("err is not *json.SyntaxError: %T %v", err, err)
+	}
+}
+
+// TestAccumulateToolCallFragment_MergesArgs exercises the
+// per-fragment merge end-to-end: the first fragment
+// initializes the ToolCall with Name + partial args; the
+// second fragment merges additional args into the same
+// ToolCall. The resulting Arguments map has both keys.
+func TestAccumulateToolCallFragment_MergesArgs(t *testing.T) {
+	accum := map[int]*ToolCall{}
+	// Fragment 1: first half — name + partial path.
+	if err := AccumulateToolCallFragment(accum, &ToolCallFragment{
+		Index:     0,
+		ID:        "call_1",
+		Name:      "apply_patch",
+		ArgsDelta: `{"path":"/tmp/x"}`,
+	}); err != nil {
+		t.Fatalf("first fragment: %v", err)
+	}
+	// Fragment 2: closing half — patch only.
+	if err := AccumulateToolCallFragment(accum, &ToolCallFragment{
+		Index:     0,
+		ArgsDelta: `{"patch":"@@ -1 +1 @@\n-old\n+new\n"}`,
+	}); err != nil {
+		t.Fatalf("second fragment: %v", err)
+	}
+	call, ok := accum[0]
+	if !ok {
+		t.Fatal("no tool call at index 0")
+	}
+	if call.Name != "apply_patch" {
+		t.Errorf("Name = %q, want apply_patch", call.Name)
+	}
+	if call.Arguments["path"] != "/tmp/x" {
+		t.Errorf("Arguments[path] = %v, want /tmp/x", call.Arguments["path"])
+	}
+	if call.Arguments["patch"] == nil {
+		t.Errorf("Arguments[patch] missing")
+	}
+}

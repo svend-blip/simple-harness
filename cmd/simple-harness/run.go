@@ -115,6 +115,17 @@ Flags:
                           is checked for overflow AFTER the model
                           call returns; an overflow exits 2 with
                           the SCOPE §18 overflow error. SCOPE §18.
+  --max-turns <n>         upper bound on the agent's
+                          model-request/tool-execution cycles
+                          (default: 8 per GOAL §2 deliverable 6).
+                          Exceeding the limit emits an explicit
+                          overflow reason and a completed event
+                          with a non-zero exit code (SCOPE §3).
+                          The flag is required because the
+                          run-mode surface dispatches tool calls
+                          via loop.RunAgent (handoff 041);
+                          without it the loop could recurse
+                          unbounded.
 
 Exit codes (SCOPE §28):
   0  clean exit (run-mode validation passed; also returned on a
@@ -196,6 +207,29 @@ func runRun(args []string) int {
 	// exit code is 2 so the operator notices the
 	// misconfiguration). SCOPE §18.
 	limit := fs.Int("limit", 0, "configured context limit in tokens (default: 0 = unknown, no overflow check). When set, the populated ledger is checked for overflow AFTER the model call returns; an overflow exits 2 with the SCOPE §18 overflow error. SCOPE §18.")
+	// Run 017 / handoff 041: --max-turns <n> flag. Default
+	// is 8 per the GOAL §2 deliverable 6 default. The value
+	// flows into loop.Config.MaxTurns; the run-mode
+	// invocation switches from RunOne to RunAgent in this
+	// handoff so the limit is enforced end-to-end. The
+	// loop's MaxTurnsError maps to exit 1 (SCOPE §28
+	// generic failure, since the task did not complete);
+	// PermissionError maps to exit 4 (SCOPE §28 permission
+	// violation). The wiring is via the canonical
+	// r.cfg.Tools.Dispatch(ctx, call, ws, pol,
+	// perm.Authorize) invocation in loop.RunAgent (handoff
+	// 040's plumbing), so the permission check is in the
+	// dispatch seam per the V1 Dispatch contract.
+	//
+	// A --max-turns value <= 0 is a configuration error
+	// (exit 2): the limit must be a positive integer. The
+	// loop itself defaults MaxTurns to 8 when zero, but
+	// the cmd-side wiring treats 0 as "use the default 8"
+	// for direct backward compatibility with the existing
+	// run-mode surface (the flag's default value is 8 per
+	// the flag declaration; an explicit --max-turns 0 is
+	// rejected with exit 2).
+	maxTurns := fs.Int("max-turns", 8, "upper bound on the agent's model-request/tool-execution cycles (default: 8 per GOAL §2 deliverable 6). Exceeding the limit emits an explicit overflow reason and completed(exit_code: 1) per SCOPE §3 'exceeding a limit must produce an explicit observable result'. 0 is a configuration error.")
 
 	if err := fs.Parse(args); err != nil {
 		// flag.ContinueOnError already printed the parse error to
@@ -342,6 +376,20 @@ func runRun(args []string) int {
 		loadedSkill = s
 	}
 
+	// Run 017 / handoff 041: --max-turns validation.
+	// Negative values are a SCOPE §28 configuration error
+	// (the limit must be a positive integer or zero per
+	// the help text above; the loop itself defaults
+	// MaxTurns to 8 when the cmd leaves it at zero). The
+	// validation runs BEFORE the --prompt-file check so
+	// a missing prompt file doesn't mask an invalid
+	// --max-turns value (and so the error message is
+	// about --max-turns, not the prompt).
+	if *maxTurns < 0 {
+		fmt.Fprintf(os.Stderr, "config error: --max-turns must be >= 0, got %d\n", *maxTurns)
+		return 2
+	}
+
 	// --prompt-file: required, non-empty. The "-" value is
 	// accepted as a parseable sentinel (the stdin-reader is a
 	// future handoff; for handoff 024 the validation-only path
@@ -400,6 +448,7 @@ func runRun(args []string) int {
 		systemFileContent,
 		loadedSkill,
 		*limit,
+		*maxTurns,
 	)
 }
 
@@ -453,7 +502,7 @@ func runRun(args []string) int {
 //  8. Checks r.Ledger().Overflow() if limit > 0 (handoff 038).
 //
 // The function returns the SCOPE §28 exit code.
-func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir, systemText, systemFileContent string, loadedSkill *skill.Skill, limit int) int {
+func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir, systemText, systemFileContent string, loadedSkill *skill.Skill, limit, maxTurns int) int {
 	// Defensive double-check on the mutual-exclusion of --system
 	// and --system-file. runRun already rejects this with exit 2
 	// before this function is reached; the inner check covers any
@@ -608,6 +657,17 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir,
 		RequestTimeout:  cfg.Model.RequestTimeout,
 	}
 	client := model.NewClient(modelOpts)
+	// Run 017 / handoff 041: registry wiring into
+	// loop.New(loop.Config{Tools: ...}) per the GOAL §2
+	// deliverable 4. The registry is the FROZEN
+	// `*tools.Registry` instance populated by
+	// builtins.RegisterBuiltins(globalRegistry) in main()
+	// (cmd/simple-harness/main.go:1044); wiring it into
+	// loop.Config.Tools enables loop.RunAgent (handoff
+	// 040) to dispatch tool calls. MaxTurns is the
+	// --max-turns flag value (0 means "use the loop's
+	// default 8", which is the documented cmd-side
+	// behavior per the flag's help text above).
 	r := loop.New(loop.Config{
 		Model:          modelOpts,
 		Workspace:      workspace,
@@ -615,6 +675,8 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir,
 		System:         loop.HarnessSystem,
 		SystemExternal: systemExternal,
 		Skills:         skills,
+		Tools:          globalRegistry,
+		MaxTurns:       maxTurns,
 	}, client, em, loopOut)
 
 	// Run 010 / handoff 038: --limit <n> overflow wiring on the
@@ -630,7 +692,35 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir,
 	// messages.jsonl before the model call.
 	_ = sessWriter.AppendMessage("user", prompt)
 
-	response, err := r.RunOne(ctx, prompt)
+	// Run 017 / handoff 041: switch the run-mode invocation
+	// from r.RunOne(ctx, prompt) to r.RunAgent(ctx, prompt)
+	// so the --max-turns <n> flag is enforced end-to-end
+	// (the GOAL §2 deliverable 6 "exceeding the limit must
+	// produce an explicit observable result" discipline).
+	// The single-turn happy path (model returns text, no
+	// tool calls) has identical observable behavior
+	// between RunOne and RunAgent — both emit the same
+	// sequence of started + model_request +
+	// status(STREAMING) + assistant_stream deltas +
+	// status(COMPLETED) + completed(exit_code: 0).
+	//
+	// The unreachable-endpoint failure path is also
+	// identical: the model client returns *model.ModelError
+	// before any tool-call accumulation, so the existing
+	// mapping (ErrHTTP|ErrParse|ErrUpstream -> exit 3,
+	// ErrTimeout -> exit 6) in the error-handling block
+	// below continues to work without modification.
+	//
+	// The permission-violation path is NEW: RunAgent's
+	// loop calls r.cfg.Tools.Dispatch with the loop's
+	// canonical perm.Authorize pipeline; when the first
+	// dispatched call is a permission_denied the loop
+	// emits status(FAILED) + completed(exit_code: 4) and
+	// returns *loop.PermissionError. The new mapping
+	// below handles the sentinel error BEFORE the
+	// *model.ModelError mapping so the exit code is 4
+	// (permission violation), not 1 (generic failure).
+	response, err := r.RunAgent(ctx, prompt)
 
 	// If the signal fired, the SCOPE §26 sequence is: emit
 	// `interrupted` event -> flush sidecar (if terminal) -> exit 6.
@@ -689,6 +779,39 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir,
 	// AFTER the terminal event so the events.jsonl in state-dir
 	// captures the terminal Completed event (the MultiWriter in
 	// jsonl mode writes to both sidecar + stdout).
+	//
+	// Run 017 / handoff 041: loop sentinel error →
+	// SCOPE §28 exit-code mapping. The mappings run
+	// BEFORE the *model.ModelError mapping because
+	// RunAgent's PermissionError wraps a tool dispatch
+	// error (not a model error) and must map to exit 4
+	// (permission violation), not exit 1 (generic
+	// failure). The loop's RunAgent already emits
+	// Completed(exit_code) on the failure path
+	// (Completed(4) for *PermissionError,
+	// Completed(1) for *MaxTurnsError, Completed(2) for
+	// *ConfigError) — run-mode does NOT re-emit
+	// Completed; it just maps the sentinel to the
+	// SCOPE §28 exit code and returns.
+	if err != nil {
+		var permErr *loop.PermissionError
+		var maxTurnsErr *loop.MaxTurnsError
+		var cfgErr *loop.ConfigError
+		switch {
+		case errors.As(err, &permErr):
+			_ = sidecar.Sync()
+			_ = sidecar.Close()
+			return 4
+		case errors.As(err, &maxTurnsErr):
+			_ = sidecar.Sync()
+			_ = sidecar.Close()
+			return 1
+		case errors.As(err, &cfgErr):
+			_ = sidecar.Sync()
+			_ = sidecar.Close()
+			return 2
+		}
+	}
 	var me *model.ModelError
 	if errors.As(err, &me) {
 		switch me.Kind {
