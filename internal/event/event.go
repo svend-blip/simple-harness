@@ -159,6 +159,17 @@ func (e *Emitter) Completed(exitCode int) error {
 	})
 }
 
+// ModelRequest emits a "model_request" event immediately before
+// each model-client invocation. The event is the SCOPE §21 / GOAL
+// §2-named signal that external controllers use to detect "the
+// harness currently has an active model request". No payload beyond
+// the base fields (protocol_version, event, timestamp, session_id).
+func (e *Emitter) ModelRequest() error {
+	return e.Emit(Event{
+		Event: "model_request",
+	})
+}
+
 // SessionID returns the session_id this emitter stamps onto events.
 func (e *Emitter) SessionID() string {
 	return e.sessionID

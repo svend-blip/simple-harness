@@ -21,11 +21,11 @@ import (
 // standard SSE deltas, construct a Run with a model.Client pointed
 // at it and a bytes.Buffer as the human-facing stdout, call
 // RunOne, and assert (a) the buffer has the concatenated deltas,
-// (b) the sidecar has the expected sequence (started → status:
-// STREAMING → N assistant_stream → status: COMPLETED → completed
-// with exit_code 0), and (c) the returned string matches the
-// buffer. The reviewer can sed-replace any of these assertions to
-// confirm the test is load-bearing.
+// (b) the sidecar has the expected sequence (started →
+// model_request → status: STREAMING → N assistant_stream → status:
+// COMPLETED → completed with exit_code 0), and (c) the returned
+// string matches the buffer. The reviewer can sed-replace any of
+// these assertions to confirm the test is load-bearing.
 func TestRunOne_HappyPath_AccumulatesAndStreams(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -64,11 +64,12 @@ func TestRunOne_HappyPath_AccumulatesAndStreams(t *testing.T) {
 		t.Errorf("stdout buffer = %q, want %q", stdout.String(), "Hello, world!")
 	}
 
-	// Sidecar sequence: started, status STREAMING, 3x assistant_stream,
-	// status COMPLETED, completed exit_code 0 -> 7 lines.
+	// Sidecar sequence: started, model_request, status STREAMING,
+	// 3x assistant_stream, status COMPLETED, completed exit_code 0
+	// -> 8 lines.
 	lines := strings.Split(strings.TrimRight(sidecar.String(), "\n"), "\n")
-	if len(lines) != 7 {
-		t.Fatalf("got %d sidecar lines, want 7 (output=%q)", len(lines), sidecar.String())
+	if len(lines) != 8 {
+		t.Fatalf("got %d sidecar lines, want 8 (output=%q)", len(lines), sidecar.String())
 	}
 
 	var s event.Event
@@ -83,15 +84,23 @@ func TestRunOne_HappyPath_AccumulatesAndStreams(t *testing.T) {
 		t.Errorf("line 0 Config = %+v", s.Config)
 	}
 
-	var st1 event.Event
-	if err := json.Unmarshal([]byte(lines[1]), &st1); err != nil {
+	var mr event.Event
+	if err := json.Unmarshal([]byte(lines[1]), &mr); err != nil {
 		t.Fatalf("line 1 unmarshal: %v", err)
 	}
-	if st1.Event != "status" || st1.Status != "STREAMING" {
-		t.Errorf("line 1 = %+v, want status STREAMING", st1)
+	if mr.Event != "model_request" {
+		t.Errorf("line 1 = %+v, want model_request", mr)
 	}
 
-	for i := 2; i < 5; i++ {
+	var st1 event.Event
+	if err := json.Unmarshal([]byte(lines[2]), &st1); err != nil {
+		t.Fatalf("line 2 unmarshal: %v", err)
+	}
+	if st1.Event != "status" || st1.Status != "STREAMING" {
+		t.Errorf("line 2 = %+v, want status STREAMING", st1)
+	}
+
+	for i := 3; i < 6; i++ {
 		var a event.Event
 		if err := json.Unmarshal([]byte(lines[i]), &a); err != nil {
 			t.Fatalf("line %d unmarshal: %v", i, err)
@@ -102,19 +111,19 @@ func TestRunOne_HappyPath_AccumulatesAndStreams(t *testing.T) {
 	}
 
 	var st2 event.Event
-	if err := json.Unmarshal([]byte(lines[5]), &st2); err != nil {
-		t.Fatalf("line 5 unmarshal: %v", err)
+	if err := json.Unmarshal([]byte(lines[6]), &st2); err != nil {
+		t.Fatalf("line 6 unmarshal: %v", err)
 	}
 	if st2.Event != "status" || st2.Status != "COMPLETED" {
-		t.Errorf("line 5 = %+v, want status COMPLETED", st2)
+		t.Errorf("line 6 = %+v, want status COMPLETED", st2)
 	}
 
 	var c event.Event
-	if err := json.Unmarshal([]byte(lines[6]), &c); err != nil {
-		t.Fatalf("line 6 unmarshal: %v", err)
+	if err := json.Unmarshal([]byte(lines[7]), &c); err != nil {
+		t.Fatalf("line 7 unmarshal: %v", err)
 	}
 	if c.Event != "completed" || c.ExitCode != 0 {
-		t.Errorf("line 6 = %+v, want completed exit_code 0", c)
+		t.Errorf("line 7 = %+v, want completed exit_code 0", c)
 	}
 }
 
@@ -215,5 +224,84 @@ func TestNormalizeBaseURL(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("NormalizeBaseURL(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// TestRunOne_EmitsModelRequestBeforeChatStream pins the
+// model_request event ordering (Run 006 / handoff 022): the loop
+// must emit "started" first, then "model_request" immediately
+// before the model-client invocation, then continue with the
+// existing status / assistant_stream / completed sequence. The
+// test uses an httptest server returning a single
+// `data: [DONE]\n\n` payload so the loop completes cleanly
+// without exercising the streaming path; the assertion is on
+// the FIRST TWO events only (per the handoff's "the test
+// should NOT assert anything about subsequent events beyond
+// model_request being the second" rule). A future regression
+// that drops the model_request emission, reorders it after
+// ChatStream, or fires it twice will fail this test.
+func TestRunOne_EmitsModelRequestBeforeChatStream(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	var sidecar bytes.Buffer
+	em := event.NewEmitter(&sidecar, "sess-mr-loop")
+	var stdout bytes.Buffer
+	client := model.NewClient(model.Options{
+		BaseURL:        srv.URL,
+		Model:          "qwen",
+		RequestTimeout: 2 * time.Second,
+	})
+	r := New(Config{
+		Model:      model.Options{BaseURL: srv.URL, Model: "qwen"},
+		Workspace:  "/tmp/ws",
+		Permission: "READ_ONLY",
+	}, client, em, &stdout)
+
+	if _, err := r.RunOne(context.Background(), "hi"); err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimRight(sidecar.String(), "\n"), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("got %d sidecar lines, want >= 2 (output=%q)", len(lines), sidecar.String())
+	}
+
+	// First event must be "started" with config populated
+	// (the SessionConfig emitted on every turn per the loop's
+	// RunOne contract).
+	var first event.Event
+	if err := json.Unmarshal([]byte(lines[0]), &first); err != nil {
+		t.Fatalf("line 0 unmarshal: %v (line=%q)", err, lines[0])
+	}
+	if first.Event != "started" {
+		t.Errorf("line 0 Event = %q, want started", first.Event)
+	}
+	if first.Config == nil {
+		t.Fatalf("line 0 Config = nil, want populated SessionConfig")
+	}
+	if first.Config.Model != "qwen" {
+		t.Errorf("line 0 Config.Model = %q, want qwen", first.Config.Model)
+	}
+
+	// Second event must be "model_request" with no payload
+	// beyond the base fields (the GOAL §2 minimum event set
+	// names model_request with no event-specific fields).
+	var second event.Event
+	if err := json.Unmarshal([]byte(lines[1]), &second); err != nil {
+		t.Fatalf("line 1 unmarshal: %v (line=%q)", err, lines[1])
+	}
+	if second.Event != "model_request" {
+		t.Errorf("line 1 Event = %q, want model_request", second.Event)
+	}
+	if second.Config != nil {
+		t.Errorf("line 1 Config = %+v, want nil (model_request has no payload)", second.Config)
+	}
+	if second.Role != "" || second.Content != "" || second.Status != "" ||
+		second.Delta != "" || second.ExitCode != 0 {
+		t.Errorf("line 1 has non-empty payload: %+v", second)
 	}
 }

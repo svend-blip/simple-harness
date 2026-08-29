@@ -13,8 +13,11 @@
 // SIGTERM as exit-6 interruptions per SCOPE §§25, 26, 28.
 //
 // No tools, no permission enforcement, no multi-turn, no sessions
-// persistence beyond the events.jsonl sidecar, no headless
-// `simple-harness run` mode. Each of those is a future Run per the
+// persistence beyond the events.jsonl sidecar. The headless
+// `simple-harness run` subcommand is the Run 006 deliverable
+// (handoff 022 lands the flag parser + config-error exit-2 path
+// + the `model_request` event; handoff 023 lands the run-execution
+// path + JSONL stdout). Each remaining gap is a future Run per the
 // architecture.
 //
 // Architectural boundary: this is a Simple Harness component. It does not
@@ -53,7 +56,7 @@ import (
 // without shelling out or reading the binary itself. The format is a
 // single line, project-name first, so an external parser does not need to
 // interpret it to extract the version.
-const Version = "simple-harness 0.1.0-dev (Run 005, handoff 021)"
+const Version = "simple-harness 0.1.0-dev (Run 006, handoff 022)"
 
 // globalRegistry is the tool registry the `simple-harness tools`
 // subcommand lists. Handoff 013 leaves it EMPTY; Run 014 / Run 015 will
@@ -93,6 +96,7 @@ Flags:
 
 Subcommands:
   config show           print the resolved configuration (secrets redacted)
+  run                   execute one turn non-interactively, emit JSONL events
 
 Interactive mode (the default when no flags or subcommands are given)
 reads prompts from stdin and streams responses to stdout. Built-in
@@ -155,6 +159,9 @@ func run(args []string) int {
 	}
 	if len(args) > 0 && args[0] == "tools" {
 		return runTools(args[1:])
+	}
+	if len(args) > 0 && args[0] == "run" {
+		return runRun(args[1:])
 	}
 
 	// No args: enter interactive mode (deliverable 4). The REPL

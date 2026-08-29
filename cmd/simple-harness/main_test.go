@@ -564,3 +564,187 @@ func TestInteractiveMode_DoesNotPolluteSourceTree(t *testing.T) {
 			after-before, sessionsDir, before, after)
 	}
 }
+
+// driveRun is the shared test helper for the `simple-harness run`
+// subcommand (handoff 022). It redirects os.Stdout and os.Stderr to
+// pipes, calls run(args) with the run subcommand prefix prepended
+// (so the tests can pass the flag set directly without remembering
+// to write "run" --<flag>), and returns the exit code plus the
+// captured stdout and stderr bodies.
+//
+// The redirection mirrors the driveInteractive pattern (and the
+// per-test pipe dance in TestConfigShowDoesNotLeakAPIKey /
+// TestToolsSubcommand_ListsRegisteredTools). The helper is
+// intentionally simple: a tests that needs a different
+// redirection (e.g. only stderr) can do its own pipe dance the
+// way TestPermissionFlag_RejectsBogusValue does.
+func driveRun(t *testing.T, runArgs ...string) (int, string, string) {
+	t.Helper()
+
+	origStdout := os.Stdout
+	origStderr := os.Stderr
+	t.Cleanup(func() {
+		os.Stdout = origStdout
+		os.Stderr = origStderr
+	})
+
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	os.Stdout = outW
+
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stderr pipe: %v", err)
+	}
+	os.Stderr = errW
+
+	fullArgs := append([]string{"run"}, runArgs...)
+	code := run(fullArgs)
+
+	_ = outW.Close()
+	_ = errW.Close()
+	var outBuf, errBuf bytes.Buffer
+	_, _ = io.Copy(&outBuf, outR)
+	_, _ = io.Copy(&errBuf, errR)
+	return code, outBuf.String(), errBuf.String()
+}
+
+// TestRun_Help pins the `simple-harness run --help` path: exit 0
+// and stdout contains the runUsage block (the substring
+// "model_request" anchors the GOAL §2 minimum event set in the
+// help text; "Usage: simple-harness run" anchors the subcommand
+// surface). This is the run --help half of TG4 (the other half
+// — scripts/test.sh exits 0 — is exercised by the wrapper-level
+// evidence in the result file).
+func TestRun_Help(t *testing.T) {
+	code, out, errOut := driveRun(t, "--help")
+	if code != 0 {
+		t.Fatalf("run(--help) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
+	}
+	if !strings.Contains(out, "Usage: simple-harness run") {
+		t.Fatalf("run --help stdout missing %q; got %q", "Usage: simple-harness run", out)
+	}
+	if !strings.Contains(out, "model_request") {
+		t.Fatalf("run --help stdout missing %q; got %q", "model_request", out)
+	}
+}
+
+// TestRun_Version pins the `simple-harness run --version` path:
+// exit 0 and stdout is the new Version literal. The exact literal
+// is the handoff 022 advance from "Run 005, handoff 021" to
+// "Run 006, handoff 022".
+func TestRun_Version(t *testing.T) {
+	code, out, errOut := driveRun(t, "--version")
+	if code != 0 {
+		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
+	}
+	want := "simple-harness 0.1.0-dev (Run 006, handoff 022)"
+	if !strings.Contains(out, want) {
+		t.Fatalf("run --version stdout missing %q; got %q", want, out)
+	}
+}
+
+// TestRun_MissingPromptFile_Exits2 is the TG1 path: a non-empty
+// --prompt-file value that does not point at an existing file
+// exits 2 with a stderr message that includes "config error" so
+// an external controller can detect the config-error mode from
+// the exit code AND the stderr substring (GOAL §5 reviewer duty
+// #1, partial fulfillment — the full events-on-stdout path is
+// handoff 023's deliverable).
+func TestRun_MissingPromptFile_Exits2(t *testing.T) {
+	code, _, errOut := driveRun(t,
+		"--base-url", "http://x",
+		"--model", "m",
+		"--workspace", t.TempDir(),
+		"--prompt-file", "/nonexistent-tg1.md",
+		"--output", "jsonl",
+	)
+	if code != 2 {
+		t.Fatalf("run --prompt-file /nonexistent-tg1.md returned %d, want 2 (config error) (stderr=%q)", code, errOut)
+	}
+	if !strings.Contains(errOut, "config error") {
+		t.Fatalf("run --prompt-file missing stderr missing %q; got %q", "config error", errOut)
+	}
+}
+
+// TestRun_InvalidOutput_Exits2 pins the SCOPE §28 config-error
+// exit for an --output value that is not one of the two allowed
+// values. The stderr message must mention "output" AND echo the
+// bad value so the operator can see which value was rejected.
+func TestRun_InvalidOutput_Exits2(t *testing.T) {
+	code, _, errOut := driveRun(t,
+		"--base-url", "http://x",
+		"--model", "m",
+		"--workspace", t.TempDir(),
+		"--prompt-file", "-",
+		"--output", "bogus",
+	)
+	if code != 2 {
+		t.Fatalf("run --output bogus returned %d, want 2 (config error) (stderr=%q)", code, errOut)
+	}
+	if !strings.Contains(errOut, "output") {
+		t.Fatalf("run --output bogus stderr missing %q; got %q", "output", errOut)
+	}
+	if !strings.Contains(errOut, "bogus") {
+		t.Fatalf("run --output bogus stderr missing rejected value %q; got %q", "bogus", errOut)
+	}
+}
+
+// TestRun_MissingBaseURL_Exits2 pins the SCOPE §28 config-error
+// exit for an empty --base-url. The flag default is the empty
+// string; the validation runs after flag parse, so any caller
+// that omits --base-url lands in this branch.
+func TestRun_MissingBaseURL_Exits2(t *testing.T) {
+	code, _, errOut := driveRun(t,
+		"--model", "m",
+		"--workspace", t.TempDir(),
+		"--prompt-file", "-",
+	)
+	if code != 2 {
+		t.Fatalf("run with no --base-url returned %d, want 2 (config error) (stderr=%q)", code, errOut)
+	}
+	if !strings.Contains(errOut, "base-url") {
+		t.Fatalf("run missing --base-url stderr missing %q; got %q", "base-url", errOut)
+	}
+}
+
+// TestRun_MissingModel_Exits2 pins the SCOPE §28 config-error
+// exit for an empty --model. Same pattern as
+// TestRun_MissingBaseURL_Exits2.
+func TestRun_MissingModel_Exits2(t *testing.T) {
+	code, _, errOut := driveRun(t,
+		"--base-url", "http://x",
+		"--workspace", t.TempDir(),
+		"--prompt-file", "-",
+	)
+	if code != 2 {
+		t.Fatalf("run with no --model returned %d, want 2 (config error) (stderr=%q)", code, errOut)
+	}
+	if !strings.Contains(errOut, "model") {
+		t.Fatalf("run missing --model stderr missing %q; got %q", "model", errOut)
+	}
+}
+
+// TestRun_SystemFile_Missing_Exits2 pins the SCOPE §28 config-error
+// exit for a non-empty --system-file that does not point at an
+// existing file. The system prompt is not yet used by the loop,
+// but the validation is the only thing landing in this handoff so
+// a handoff 023 caller cannot trip over a missing file after the
+// loop has already been invoked.
+func TestRun_SystemFile_Missing_Exits2(t *testing.T) {
+	code, _, errOut := driveRun(t,
+		"--base-url", "http://x",
+		"--model", "m",
+		"--workspace", t.TempDir(),
+		"--prompt-file", "-",
+		"--system-file", "/nonexistent-system.md",
+	)
+	if code != 2 {
+		t.Fatalf("run --system-file /nonexistent-system.md returned %d, want 2 (config error) (stderr=%q)", code, errOut)
+	}
+	if !strings.Contains(errOut, "system-file") {
+		t.Fatalf("run missing --system-file stderr missing %q; got %q", "system-file", errOut)
+	}
+}

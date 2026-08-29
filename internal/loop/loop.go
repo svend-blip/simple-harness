@@ -106,6 +106,9 @@ func (r *Run) RunOne(ctx context.Context, prompt string) (string, error) {
 	}); err != nil {
 		return "", err
 	}
+	if err := r.em.ModelRequest(); err != nil {
+		return "", err
+	}
 
 	var (
 		accumulated strings.Builder

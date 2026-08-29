@@ -194,3 +194,44 @@ func TestSessionID(t *testing.T) {
 		t.Errorf("SessionID = %q, want the-session-id", got)
 	}
 }
+
+// TestEmit_ModelRequest_ProducesCorrectEventType pins the
+// ModelRequest helper (Run 006 / handoff 022): one Emit call
+// produces one JSONL line whose event field is "model_request",
+// protocol_version is the V1 default "1", session_id is the
+// emitter's session id, and timestamp is a non-empty RFC3339 UTC
+// value. The helper is the GOAL §2-named signal that an external
+// controller can use to detect "the harness currently has an
+// active model request" — the test pins the wire shape so a
+// future regression that drops the base fields or renames the
+// event type fails.
+func TestEmit_ModelRequest_ProducesCorrectEventType(t *testing.T) {
+	var buf bytes.Buffer
+	em := NewEmitter(&buf, "sess-mr")
+
+	if err := em.ModelRequest(); err != nil {
+		t.Fatalf("ModelRequest: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("got %d lines, want 1 (output=%q)", len(lines), buf.String())
+	}
+
+	var got Event
+	if err := json.Unmarshal([]byte(lines[0]), &got); err != nil {
+		t.Fatalf("line is not valid JSON: %v (line=%q)", err, lines[0])
+	}
+	if got.Event != "model_request" {
+		t.Errorf("Event = %q, want model_request", got.Event)
+	}
+	if got.ProtocolVersion != "1" {
+		t.Errorf("ProtocolVersion = %q, want 1", got.ProtocolVersion)
+	}
+	if got.SessionID != "sess-mr" {
+		t.Errorf("SessionID = %q, want sess-mr", got.SessionID)
+	}
+	if got.Timestamp == "" {
+		t.Errorf("Timestamp empty, want non-empty RFC3339 UTC")
+	}
+}
