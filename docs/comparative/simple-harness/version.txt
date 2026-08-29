@@ -1,0 +1,2 @@
+simple-harness 0.1.0-dev (Run 017, handoff 043)
+git HEAD at measurement: 2c0be605903778d8870ecb6c4e2508a4d462cc46 (Run 012 / handoff 047 close)

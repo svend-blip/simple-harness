@@ -1,0 +1,41 @@
+# Simple Harness — resolved configuration
+
+```
+$ simple-harness config show
+{
+  "model": {
+    "api_key": "",
+    "base_url": "http://127.0.0.1:8080/v1",
+    "max_output_tokens": 8192,
+    "model": "qwen",
+    "provider": "openai_compatible",
+    "request_timeout": "30s",
+    "temperature": 0.2
+  },
+  "permission": "read_only"
+}
+```
+
+## Notes
+
+- The default `base_url` and `model` shown by `config show` are the
+  repo-defaults (per `internal/config`). The Run 013 measurement
+  OVERRIDES them on the command line per the dispatch prompt's binding
+  (`--base-url http://127.0.0.1:11434/v1 --model kimi-k3:cloud`).
+- The default model endpoint `http://127.0.0.1:8080/v1` was NOT
+  reachable at measurement time (curl returned 000 connection refused),
+  but the measurement did not use it — it used the Human-pinned endpoint.
+- `permission: read_only` is the default; `--permission read_only`
+  on the run invocation is a no-op confirmation.
+- The resolved JSON does NOT include tools, sessions, or workspace
+  fields (those are per-run, not config).
+- `max_output_tokens: 8192` and `temperature: 0.2` are session defaults;
+  neither is surfaced as a CLI flag in `simple-harness run` (they're
+  config-file concerns, not command-line overrides).
+
+## Context fields carried into the model request (per SCOPE §14)
+
+The composed context is `minimal harness system -> external system/governance
+(--system/--system-file) -> loaded skills (--skill NAME) -> user task`.
+The Run 013 measurement used none of `--system`, `--system-file`, or
+`--skill`, so the context was `minimal harness system + user task`.

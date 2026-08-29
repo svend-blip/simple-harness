@@ -1,0 +1,37 @@
+=== ~/.simple-harness/ AFTER ===
+2026-08-29T20:10:22+02:00
+totalt 156
+drwxr-xr-x    3 svend svend   4096 aug 29 10:06 .
+drwxr-x---  124 svend svend  32768 aug 29 19:50 ..
+drwxr-xr-x 1544 svend svend 114688 aug 29 20:10 sessions
+=== sessions count AFTER ===
+1542
+=== latest 3 sessions AFTER ===
+01a04eb6-feb5-772c-bc45-607f57048c48
+01a04e8d-ab51-7ccc-87a8-1cfb60fa81dd
+01a04e8a-92f7-7639-ad69-337891a9573c
+=== sessions total size AFTER ===
+24M	/home/svend/.simple-harness/sessions/
+=== new session detail ===
+totalt 132
+drwxr-xr-x    2 svend svend   4096 aug 29 20:10 .
+drwxr-xr-x 1544 svend svend 114688 aug 29 20:10 ..
+-rw-rw-r--    1 svend svend   4061 aug 29 20:10 events.jsonl
+-rw-r--r--    1 svend svend    157 aug 29 20:10 messages.jsonl
+-rw-r--r--    1 svend svend    422 aug 29 20:10 session.json
+=== session.json ===
+{
+  "session_id": "01a04eb6-feb5-772c-bc45-607f57048c48",
+  "started_at": "2026-08-29T18:10:10.742411625Z",
+  "ended_at": "2026-08-29T18:10:13.179574343Z",
+  "status": "failed",
+  "exit_code": 3,
+  "config": {
+    "base_url": "http://127.0.0.1:11434",
+    "model": "kimi-k3:cloud",
+    "workspace": "/tmp/run013-scratch-sh/",
+    "permission": "READ_ONLY",
+    "output_mode": "jsonl"
+  },
+  "events_path": "events.jsonl"
+}

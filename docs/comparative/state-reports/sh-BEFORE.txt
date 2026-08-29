@@ -1,0 +1,16 @@
+=== ~/.simple-harness/ BEFORE ===
+2026-08-29T20:10:10+02:00
+totalt 156
+drwxr-xr-x    3 svend svend   4096 aug 29 10:06 .
+drwxr-x---  124 svend svend  32768 aug 29 19:50 ..
+drwxr-xr-x 1543 svend svend 114688 aug 29 19:25 sessions
+=== sessions count BEFORE ===
+1541
+=== latest 5 sessions BEFORE ===
+01a04e8d-ab51-7ccc-87a8-1cfb60fa81dd
+01a04e8a-92f7-7639-ad69-337891a9573c
+01a04e8a-85db-7a14-b091-19487808e627
+01a04e8a-3026-79b2-a6c6-8cef1e8b732e
+01a04e8a-1e2c-7ce3-b91d-5a1c7c0645f4
+=== sessions total size BEFORE ===
+24M	/home/svend/.simple-harness/sessions/

@@ -1,0 +1,54 @@
+# Simple Harness — interrupt behavior
+
+## Test setup
+
+Launched `simple-harness run` with a long prompt via `setsid` (to isolate
+signal propagation) and sent SIGINT ~1.5s after launch (mid-model-turn).
+
+```
+$ cat /tmp/long-prompt.txt
+Look at calculator.py. Then look at test_calculator.py. Explain in extreme
+detail what is wrong with calculator.py. Then list every change that would
+need to be made to make the test pass, in order of priority. Then describe
+the dependency graph of all functions in the file. Then summarize the
+architectural style of the code. Then provide a critique of the code style.
+Do not modify any files.
+
+$ setsid simple-harness run \
+    --base-url http://127.0.0.1:11434/v1 \
+    --model kimi-k3:cloud \
+    --workspace /tmp/run013-scratch-sh/ \
+    --permission read_only \
+    --output jsonl \
+    --prompt-file /tmp/long-prompt.txt \
+    --max-turns 8 > /tmp/sh-int3-stdout.jsonl 2>/dev/null &
+$ PID=...
+$ sleep 1.5
+$ kill -INT $PID
+```
+
+## Outcome
+
+- Simple Harness responded to SIGINT cleanly.
+- Exited with **exit_code = 6** (the documented "interrupted (SIGINT/SIGTERM on the harness process)" code per the run --help exit code table).
+- The JSONL stream carried the expected interrupt events:
+  ```
+  {"event":"started", ...}
+  {"event":"model_request", ...}
+  {"event":"status", "status":"INTERRUPTED"}
+  {"event":"interrupted", ...}
+  ```
+- No orphan `simple-harness` processes after exit (pgrep confirmed empty).
+- sha256 of `calculator.py` and `test_calculator.py` UNCHANGED before and after SIGINT.
+
+## Cross-tool contrast
+
+| Tool | SIGINT response | Documented? |
+|------|-----------------|-------------|
+| Pi   | exit_code = -2 (signal interrupt propagates as is) | not explicitly documented |
+| Whip | exit_code = 0 (clean shutdown via SIGINT handler) | implicit |
+| Simple Harness | exit_code = 6 (documented as "interrupted") | YES — `--help` exit code table |
+
+Simple Harness has the most explicit interrupt contract: a dedicated
+`interrupted` event in the JSONL stream AND a dedicated exit code (6)
+distinct from model-timeout exit 6.

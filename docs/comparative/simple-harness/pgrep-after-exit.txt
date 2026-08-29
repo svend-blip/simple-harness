@@ -1,0 +1,33 @@
+# Simple Harness — process cleanup check
+
+After all Run 013 runs (canonical 2.44s run + interrupt test + setsid SIGINT test):
+
+```
+$ date -Iseconds
+2026-08-29T20:10:52+02:00
+
+$ ps aux | grep -E '(^| )(simple-harness)' | grep -v grep | head -5
+(no output — no simple-harness processes)
+
+$ pgrep -af 'simple-harness' | grep -v 'bash\|grep'
+(no output — no simple-harness processes)
+```
+
+Confirmed by scanning /proc/*/comm for any process whose name contains "simple-harness":
+```
+orphans: []
+```
+
+## Reference
+
+- Simple Harness is a single static ELF (`bin/simple-harness-runtime`).
+  When killed (SIGINT/SIGTERM/exit), it leaves no children.
+- Session state is durable in `~/.simple-harness/sessions/<session-id>/`
+  (session.json + events.jsonl + messages.jsonl). The session directory
+  persists across runs — the JSONL stream for each run is the source of truth.
+- Three runs from this measurement pass produced three new session dirs
+  under `~/.simple-harness/sessions/`:
+    - `01a04eb6-feb5-772c-bc45-607f57048c48` (canonical 2.44s run; exit_code=3 FAILED)
+    - `01a04eb7-59be-7788-a3ec-e5f7e357ca35` (4.24s run that completed normally)
+    - `01a04eb7-7be4-7609-bfcc-0f99b817b3a6` (SIGINT test 2 — TERM-killed; no completed event)
+    - `01a04eb7-9ddf-7c68-8842-f5704d089408` (SIGINT test 3 — clean interrupt; exit_code=6)

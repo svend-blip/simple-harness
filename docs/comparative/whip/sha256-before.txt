@@ -1,0 +1,2 @@
+e2a82b024838be2552616c45baf6d0883ae9e55ecbb976a9aec042d3e290ea02  calculator.py
+6a5b6e957ab42819d06cf99759b2213dc6fd0d7800f303beca6df605e66a1f6e  test_calculator.py

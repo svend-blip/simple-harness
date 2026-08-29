@@ -1,0 +1,57 @@
+2026-08-29T19:30:42+02:00
+=== ~/.whip/ BEFORE ===
+totalt 404
+drwx------   2 svend svend   4096 2026-08-29 19:26:38.199993674 +0200 .
+drwxr-x--- 124 svend svend  32768 2026-08-29 19:29:50.739923913 +0200 ..
+-rw-------   1 svend svend    987 2026-08-29 19:26:26.060998354 +0200 config.json
+-rw-------   1 svend svend    398 2026-08-28 11:55:35.166218146 +0200 me.md
+-rw-------   1 svend svend    232 2026-08-29 19:26:26.112998333 +0200 models.json
+-rw-r--r--   1 svend svend  53248 2026-08-29 19:26:26.114998333 +0200 sessions.db
+-rw-r--r--   1 svend svend  32768 2026-08-29 19:30:02.741919805 +0200 sessions.db-shm
+-rw-r--r--   1 svend svend 259592 2026-08-29 19:30:02.743919805 +0200 sessions.db-wal
+-rw-------   1 svend svend     63 2026-08-29 19:23:35.858068441 +0200 trusted.json
+-rw-------   1 svend svend     69 2026-08-29 19:23:34.325069115 +0200 update.json
+-rw-------   1 svend svend   3970 2026-08-29 19:29:34.179929621 +0200 whip.log
+=== ~/.pi/ BEFORE ===
+/home/svend/.pi/:
+totalt 44
+drwx------   3 svend svend  4096 2026-08-12 09:54:06.501660945 +0200 .
+drwxr-x--- 124 svend svend 32768 2026-08-29 19:29:50.739923913 +0200 ..
+drwx------   4 svend svend  4096 2026-08-29 19:30:22.704913028 +0200 agent
+
+/home/svend/.pi/agent:
+totalt 244
+drwx------ 4 svend svend   4096 2026-08-29 19:30:22.704913028 +0200 .
+drwx------ 3 svend svend   4096 2026-08-12 09:54:06.501660945 +0200 ..
+-rw------- 1 svend svend      2 2026-08-12 09:54:06.501660945 +0200 auth.json
+drwxrwxr-x 2 svend svend   4096 2026-08-12 09:57:08.205208521 +0200 bin
+-rw-rw-r-- 1 svend svend    473 2026-08-12 20:30:13.268431104 +0200 models.json
+-rw------- 1 svend svend 217762 2026-08-16 09:26:47.548749102 +0200 models-store.json
+drwxrwxr-x 4 svend svend   4096 2026-08-13 09:19:29.030063395 +0200 sessions
+-rw-rw-r-- 1 svend svend     57 2026-08-12 09:57:08.224208473 +0200 settings.json
+
+/home/svend/.pi/agent/bin:
+totalt 3980
+drwxrwxr-x 2 svend svend    4096 2026-08-12 09:57:08.205208521 +0200 .
+drwx------ 4 svend svend    4096 2026-08-29 19:30:22.704913028 +0200 ..
+-rwxr-xr-x 1 svend svend 4065136 2026-03-10 08:38:19.000000000 +0100 fd
+
+/home/svend/.pi/agent/sessions:
+totalt 16
+drwxrwxr-x 4 svend svend 4096 2026-08-13 09:19:29.030063395 +0200 .
+drwx------ 4 svend svend 4096 2026-08-29 19:30:22.704913028 +0200 ..
+drwxrwxr-x 2 svend svend 4096 2026-08-12 09:57:27.539160242 +0200 --home-svend--
+drwxrwxr-x 2 svend svend 4096 2026-08-13 09:19:51.948764677 +0200 --home-svend-music-video-orchestrator--
+
+/home/svend/.pi/agent/sessions/--home-svend--:
+totalt 12
+drwxrwxr-x 2 svend svend 4096 2026-08-12 09:57:27.539160242 +0200 .
+drwxrwxr-x 4 svend svend 4096 2026-08-13 09:19:29.030063395 +0200 ..
+-rw-rw-r-- 1 svend svend 2396 2026-08-12 09:57:37.274135920 +0200 2026-08-12T07-56-37-079Z_019ff4f9-2757-75e1-b314-98e604ebbf75.jsonl
+
+/home/svend/.pi/agent/sessions/--home-svend-music-video-orchestrator--:
+totalt 16
+drwxrwxr-x 2 svend svend 4096 2026-08-13 09:19:51.948764677 +0200 .
+drwxrwxr-x 4 svend svend 4096 2026-08-13 09:19:29.030063395 +0200 ..
+-rw-rw-r-- 1 svend svend 1626 2026-08-13 09:19:30.129764035 +0200 2026-08-13T07-19-29-031Z_019ff9fd-8407-732e-9001-54bb65909534.jsonl
+-rw-rw-r-- 1 svend svend 1672 2026-08-13 09:19:51.948764677 +0200 2026-08-13T07-19-48-532Z_019ff9fd-d034-7afa-b318-4138f608dfa1.jsonl

@@ -1,0 +1,76 @@
+# Simple Harness — startup-timing evidence
+
+## bench (help/version path)
+
+```
+$ time simple-harness --version
+simple-harness 0.1.0-dev (Run 017, handoff 043)
+real    0m0,008s   # binary launch + version print
+```
+
+## help path
+
+```
+$ time simple-harness --help
+... (printed help) ...
+real    0m0,012s   # binary launch + help print
+```
+
+## bounded-task run (the actual measurement)
+
+```
+$ /usr/bin/time -f '%e' simple-harness run \
+    --base-url http://127.0.0.1:11434/v1 \
+    --model kimi-k3:cloud \
+    --workspace /tmp/run013-scratch-sh/ \
+    --permission read_only \
+    --output jsonl \
+    --prompt-file docs/comparative/bounded-task-prompt.txt \
+    --max-turns 8
+2.44   # wall-clock seconds (from the first run, model tried to call a `system` tool)
+4.24   # wall-clock seconds (from the second run, model answered in text and completed)
+```
+
+The 2.44s run was the canonical measurement; the 4.24s run was a re-attempt
+with a longer prompt that completed normally.
+
+## Per-event timing from the JSONL
+
+Session `01a04eb6-feb5-772c-bc45-607f57048c48` (the canonical 2.44s run):
+
+| event              | timestamp (UTC)              | delta from start (ms) |
+|--------------------|------------------------------|------------------------|
+| started            | 2026-08-29T18:10:10.742521Z  | 0                      |
+| model_request      | 2026-08-29T18:10:10.742624Z  | 0.10                   |
+| status STREAMING   | 2026-08-29T18:10:12.071631Z  | 1329.11                |
+| first delta        | 2026-08-29T18:10:12.071701Z  | 1329.18                |
+| ... 13 more deltas|                              |                        |
+| tool_call          | 2026-08-29T18:10:12.995600Z  | 2253.08                |
+| tool_result        | 2026-08-29T18:10:12.995691Z  | 2253.17                |
+| model_request (2nd)| 2026-08-29T18:10:12.995711Z  | 2253.19                |
+| status FAILED      | 2026-08-29T18:10:13.170549Z  | 2428.03                |
+| completed          | 2026-08-29T18:08:13.170661Z  | 2428.14                |
+
+Total wall-clock: 2437ms (matches /usr/bin/time output 2.44s).
+
+- Time to first STREAMING status: **1329ms** (HTTP request round-trip + model start)
+- Time to first assistant delta: **1329ms** (delta arrives within 0.07ms of STREAMING status)
+- Time to model failure: **2428ms** (tool_result → model_request → no response → FAILED)
+- Time to process exit: **2428ms** (no further work after FAILED)
+
+## Per-tool comparison (startup behavior)
+
+- **Pi**: time-to-first-byte = 648ms (`time_to_first_byte=0.648s` from
+  `pi/startup-timing.txt`; Pi's run captured stdout lines, which include
+  the trust prompt dismissal and model response).
+- **Whip**: time-to-first-init = 14ms (whip -bench exits in 14ms with
+  config.load done); TUI time-to-first-byte not measurable in script(1).
+- **Simple Harness**: time-to-first-byte = 1329ms (HTTP round-trip to
+  endpoint + model start). The first non-event emitted is the `started`
+  event at t=0, but the first user-meaningful output (assistant delta)
+  arrives at 1329ms.
+
+The 1329ms is dominated by HTTP round-trip + kimi-k3:cloud's first-token
+latency. Simple Harness itself adds negligible overhead before that
+(measurement shows the `started` event is emitted in <1ms after
+invocation; the wait is the network + model).

@@ -1,0 +1,29 @@
+# whip -bench output
+
+`whip -bench` is a flag that "does full startup init (config, routing, key, agent)
+then exit; for task benchmark". It is a non-TUI init smoke test.
+
+```
+$ /usr/bin/time -f '%e' /home/svend/.local/bin/whip -bench
+exit_code=0
+real    0m0,014s
+user    0m0,018s
+sys     0m0,004s
+```
+
+Output: **empty** on both stdout and stderr. The init succeeds silently.
+
+whip.log evidence (UTC, from /home/svend/.whip/whip.log):
+```
+2026-08-29T18:09:40Z config.load      pid=737856 ok (providers=2 models=5 default="Qwen3.6-35B-A3B" compact="deepseek-v4-flash-0731")
+```
+
+bench mode does NOT touch mcp-light (no `mcp ... ready` line) — the MCP server is
+only initialized when the TUI starts. This is a meaningful TUI-vs-bench surface
+difference: bench measures init time without the MCP overlay.
+
+Per the dispatch prompt's "Pi and Whip run with whatever model access they are
+already configured for" binding, the configured model for Whip is
+`Qwen3.6-35B-A3B` routed via `model-allocator` (http://127.0.0.1:8088/v1). bench
+mode does NOT generate any model traffic (it is init-only), so the model
+endpoint is not exercised by bench.

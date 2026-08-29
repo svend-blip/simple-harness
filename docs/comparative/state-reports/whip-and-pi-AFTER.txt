@@ -1,0 +1,75 @@
+=== ~/.whip/ AFTER (post-Run-013 measurement) ===
+2026-08-29T20:10:31+02:00
+totalt 496
+drwx------   3 svend svend   4096 aug 29 20:09 .
+drwxr-x--- 124 svend svend  32768 aug 29 19:50 ..
+drwx------   4 svend svend   4096 aug 29 19:34 browser
+-rw-------   1 svend svend    987 aug 29 19:26 config.json
+-rw-------   1 svend svend    398 aug 28 11:55 me.md
+-rw-------   1 svend svend    232 aug 29 19:26 models.json
+-rw-r--r--   1 svend svend 430080 aug 29 19:38 sessions.db
+-rw-------   1 svend svend    101 aug 29 19:34 trusted.json
+-rw-------   1 svend svend     69 aug 29 19:23 update.json
+-rw-------   1 svend svend   9396 aug 29 20:09 whip.log
+
+=== ~/.whip/browser/ subdir (created during this session by whip TUI) ===
+totalt 16
+drwx------ 4 svend svend 4096 aug 29 19:34 .
+drwx------ 3 svend svend 4096 aug 29 20:09 ..
+drwx------ 3 svend svend 4096 aug 29 19:34 dedicated-profile
+drwx------ 3 svend svend 4096 aug 29 19:34 dedicated-profile.stale-20260829193445
+
+=== ~/.whip/trusted.json (paths granted trust this session) ===
+{
+  "paths": {
+    "/home/svend/harness-allocator": true,
+    "/tmp/run013-scratch-whip": true
+  }
+}
+
+
+=== ~/.whip/whip.log latest entries (Run 013 measurement window) ===
+2026-08-29T17:51:53Z mcp              pid=723886 server mcp-light -> ready 
+2026-08-29T17:55:02Z config.load      pid=726350 ok (providers=2 models=5 default="Qwen3.6-35B-A3B" compact="deepseek-v4-flash-0731")
+2026-08-29T17:55:02Z mcp              pid=726350 server mcp-light -> ready 
+2026-08-29T17:58:41Z config.load      pid=729156 ok (providers=2 models=5 default="Qwen3.6-35B-A3B" compact="deepseek-v4-flash-0731")
+2026-08-29T17:58:50Z config.load      pid=729350 ok (providers=2 models=5 default="Qwen3.6-35B-A3B" compact="deepseek-v4-flash-0731")
+2026-08-29T17:58:50Z mcp              pid=729350 server mcp-light -> ready 
+2026-08-29T18:03:18Z config.load      pid=732685 ok (providers=2 models=5 default="Qwen3.6-35B-A3B" compact="deepseek-v4-flash-0731")
+2026-08-29T18:03:18Z mcp              pid=732685 server mcp-light -> ready 
+2026-08-29T18:05:54Z config.load      pid=734590 ok (providers=2 models=5 default="Qwen3.6-35B-A3B" compact="deepseek-v4-flash-0731")
+2026-08-29T18:05:57Z config.load      pid=734659 ok (providers=2 models=5 default="Qwen3.6-35B-A3B" compact="deepseek-v4-flash-0731")
+2026-08-29T18:05:57Z mcp              pid=734659 server mcp-light -> ready 
+2026-08-29T18:08:16Z config.load      pid=736495 ok (providers=2 models=5 default="Qwen3.6-35B-A3B" compact="deepseek-v4-flash-0731")
+2026-08-29T18:08:16Z mcp              pid=736495 server mcp-light -> ready 
+2026-08-29T18:08:54Z config.load      pid=737035 ok (providers=2 models=5 default="Qwen3.6-35B-A3B" compact="deepseek-v4-flash-0731")
+2026-08-29T18:08:54Z mcp              pid=737035 server mcp-light -> ready 
+2026-08-29T18:09:09Z config.load      pid=737310 ok (providers=2 models=5 default="Qwen3.6-35B-A3B" compact="deepseek-v4-flash-0731")
+2026-08-29T18:09:09Z mcp              pid=737310 server mcp-light -> ready 
+2026-08-29T18:09:28Z config.load      pid=737618 ok (providers=2 models=5 default="Qwen3.6-35B-A3B" compact="deepseek-v4-flash-0731")
+2026-08-29T18:09:28Z mcp              pid=737618 server mcp-light -> ready 
+2026-08-29T18:09:40Z config.load      pid=737856 ok (providers=2 models=5 default="Qwen3.6-35B-A3B" compact="deepseek-v4-flash-0731")
+
+=== ~/.pi/ AFTER (post-Run-013 measurement) ===
+totalt 44
+drwx------   3 svend svend  4096 aug 12 09:54 .
+drwxr-x--- 124 svend svend 32768 aug 29 19:50 ..
+drwx------   4 svend svend  4096 aug 29 19:51 agent
+
+=== ~/.pi/agent/sessions/ (sessions added/modified by this run) ===
+totalt 20
+drwxrwxr-x 5 svend svend 4096 aug 29 19:31 .
+drwx------ 4 svend svend 4096 aug 29 19:51 ..
+drwxrwxr-x 2 svend svend 4096 aug 12 09:57 --home-svend--
+drwxrwxr-x 2 svend svend 4096 aug 13 09:19 --home-svend-music-video-orchestrator--
+drwxrwxr-x 2 svend svend 4096 aug 29 19:32 --tmp-run013-scratch-pi--
+
+=== NEW Pi session dir created by this run: --tmp-run013-scratch-pi-- ===
+totalt 160
+drwxrwxr-x 2 svend svend  4096 aug 29 19:32 .
+drwxrwxr-x 5 svend svend  4096 aug 29 19:31 ..
+-rw-rw-r-- 1 svend svend  4726 aug 29 19:31 2026-08-29T17-31-16-716Z_01a04e93-616c-7b87-bc07-98f0b808c8f0.jsonl
+-rw-rw-r-- 1 svend svend  4676 aug 29 19:32 2026-08-29T17-31-58-743Z_01a04e94-0597-7803-b8a6-ef8ef3ebab08.jsonl
+-rw-rw-r-- 1 svend svend 65237 aug 29 19:32 2026-08-29T17-32-16-782Z_01a04e94-4c0e-7a91-a844-6d3f14d80bb6.jsonl
+-rw-rw-r-- 1 svend svend  8796 aug 29 19:32 2026-08-29T17-32-37-023Z_01a04e94-9b1f-757c-bd7c-0cce1a08c617.jsonl
+-rw-rw-r-- 1 svend svend 59644 aug 29 19:33 2026-08-29T17-32-52-859Z_01a04e94-d8fb-75d1-a022-ce5832ddab27.jsonl

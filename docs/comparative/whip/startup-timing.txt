@@ -1,0 +1,42 @@
+# Whip — startup-timing evidence
+
+## bench mode (init only, no TUI)
+
+```
+$ /usr/bin/time -f '%e' /home/svend/.local/bin/whip -bench
+exit_code=0
+real    0m0,014s
+user    0m0,018s
+sys     0m0,004s
+```
+
+bench mode runs config.load + exit in **~14 ms** wall clock. No stdout, no stderr.
+
+whip.log confirms one config.load entry per -bench invocation:
+```
+2026-08-29T18:09:40Z config.load      pid=737856 ok (providers=2 models=5 default="Qwen3.6-35B-A3B" compact="deepseek-v4-flash-0731")
+```
+
+## TUI mode (interactive PTY)
+
+TUI startup is not measurable in the sense of "first text output to a pipe":
+whip renders a full-screen TUI via terminfo. When launched under `script(1)`,
+the script transcript contains raw escape sequences (CSI + cursor positioning)
+but no clean "first line of user-visible text". Detection via `/tmp/whip-ttfb-transcript.bin`
+file-size polling returned no bytes within the 5s observation window — meaning
+the TUI did not flush a complete PTY write within 5s (the TUI likely waits
+for the trust prompt interaction before any meaningful chat-area rendering).
+
+Wider evidence: the full TUI run under `script -q -c 'whip -cautious'` ran
+for 132 seconds and the resulting transcript.bin was 16,697 bytes — almost
+entirely cursor-positioning escape sequences, with no extractable chat content
+(see `session-transcript.txt`).
+
+For the comparative table: TUI-mode time-to-first-output is `not measurable
+without a real interactive terminal session`. bench mode is **0.014s**.
+
+## Reference
+
+- Whip binary: `/home/svend/.local/bin/whip` (statically linked stripped ELF)
+- bench flag defined in `Usage`: `do full startup init (config, routing, key, agent) then exit; for task benchmark`
+- `whip -bench` is the only headless-invocable Whip mode.

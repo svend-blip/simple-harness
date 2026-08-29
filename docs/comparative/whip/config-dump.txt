@@ -1,0 +1,42 @@
+{
+  "defaultModel": "Qwen3.6-35B-A3B",
+  "compactModel": "deepseek-v4-flash-0731",
+  "providers": {
+    "model-allocator": {
+      "name": "Model Allocator",
+      "baseUrl": "http://127.0.0.1:8088/v1",
+      "api": "openai-completions",
+      "apiKey": "dummy"
+    },
+    "inference-net": {
+      "name": "Inference.net",
+      "baseUrl": "https://api.inference.net/v1",
+      "api": "openai-completions",
+      "apiKeyEnv": "INFERENCE_API_KEY"
+    }
+  },
+  "models": {
+    "Qwen3.6-35B-A3B": {
+      "providers": ["model-allocator"],
+      "context": 262144
+    },
+    "deepseek-v4-flash-0731": {
+      "providers": ["inference-net"],
+      "context": 384000
+    },
+    "glm-5.2-fast": {
+      "providers": ["inference-net"],
+      "context": 128000
+    },
+    "kimi-k3": {
+      "providers": ["inference-net"],
+      "context": 1048576,
+      "vision": true
+    },
+    "kimi-k3-fast": {
+      "providers": ["inference-net"],
+      "context": 1048576,
+      "vision": true
+    }
+  }
+}

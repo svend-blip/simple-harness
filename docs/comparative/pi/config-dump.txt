@@ -1,0 +1,21 @@
+{
+  "providers": {
+    "llama-local": {
+      "baseUrl": "http://127.0.0.1:8080/v1",
+      "api": "openai-completions",
+      "apiKey": "local",
+      "compat": {
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": false
+      },
+      "models": [
+        {
+          "id": "glm-4.5-air-derestricted",
+          "contextWindow": 65536,
+          "maxTokens": 16384,
+          "name": "GLM-4.5-Air-Derestricted (IQ4_XS)"
+        }
+      ]
+    }
+  }
+}

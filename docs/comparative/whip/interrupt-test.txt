@@ -1,0 +1,43 @@
+# Whip — interrupt behavior
+
+## Test setup
+
+Launched `whip -cautious` under `script(1)` from `/tmp/run013-scratch-whip/`.
+Sent `y\n` to dismiss the trust prompt, waited 5s for TUI to settle, then
+sent SIGINT to the whip process.
+
+## Sequence
+
+```
+t=0.0s   script(1) launched; whip spawned (pid=737310)
+t=0.3s   stdin 'y' written to trust prompt
+t=5.0s   SIGINT sent to whip pid 737310
+t=5.3s   whip exited (ProcessLookupError on pid 0 kill confirms reaped)
+t=8.3s   script(1) wrapper terminated; exit_code=0
+```
+
+## Outcome
+
+- Whip responded to SIGINT and exited cleanly.
+- The script wrapper exited with **exit code 0** (whip's exit propagated as success to the script parent).
+- No orphan `whip` processes remain (`pgrep -af '/home/svend/.local/bin/whip'` returned empty).
+- sha256 of `calculator.py` and `test_calculator.py` UNCHANGED before and after SIGINT (no model turn completed before interrupt).
+
+## Cross-tool contrast
+
+| Tool | SIGINT response |
+|------|-----------------|
+| Pi   | exit_code=-2 (SIGINT handler returned immediately; see `pi/interrupt-test.txt`) |
+| Whip | exit_code=0 (clean shutdown via SIGINT handler) |
+
+Whip implements a graceful SIGINT handler; Pi does not.
+
+## Caveat
+
+This is an interrupt BEFORE the first model turn (the bounded task never
+produced output before the signal). Whip's TUI trust prompt blocks before
+model interaction, so SIGINT here interrupts the TUI idle loop, not the model.
+A more meaningful interrupt test would be mid-model-turn, but reaching
+mid-model-turn via headless PTY allocation was not achievable in the
+measurement pass (see `headless-usability` discussion in
+`docs/comparative/cross-tool/observations.md`).
