@@ -85,7 +85,7 @@ import (
 // without shelling out or reading the binary itself. The format is a
 // single line, project-name first, so an external parser does not need to
 // interpret it to extract the version.
-const Version = "simple-harness 0.1.0-dev (Run 012, handoff 047)"
+const Version = "simple-harness 0.1.0-dev (Run 019, handoff 063)"
 
 // globalRegistry is the tool registry the `simple-harness tools`
 // subcommand lists. Handoff 013 leaves it EMPTY; Run 014 / Run 015 will
@@ -236,6 +236,41 @@ func run(args []string) int {
 		return runContext(args[1:])
 	}
 	if len(args) > 0 && args[0] == "run" {
+		// Run 019 / handoff 063: wire MCP servers BEFORE the run
+		// subcommand dispatches. cmdMcpInit reads cfg.MCPServers,
+		// fetches each server's tools/list, and registers the
+		// resulting adapters into globalRegistry so the run-mode
+		// model loop dispatches against them via
+		// tools.Registry.Dispatch. A declared-but-unreachable
+		// server surfaces as a structured startup error mapped
+		// to exit 2 (per SCOPE §43 + GOAL §2 bound decision 4).
+		// The wiring lives at this site because run.go is FROZEN
+		// for the handoff; the per-subcommand call site is the
+		// natural seam per handoff §1 "Call site" prose. The
+		// deferred manager.Close() releases the transports
+		// (stdio children reaped per SCOPE §27 process-group
+		// discipline; http idle-connection release) at session
+		// end — run() returns an int (defers fire) and main()
+		// calls os.Exit(run()) after.
+		//
+		// TG1's "config show includes MCP" path is satisfied by
+		// the config.Render() output of the resolved
+		// configuration (which already surfaces cfg.MCPServers),
+		// not by this run-mode call site — config show does NOT
+		// wire MCP servers; the rendered JSON is the surface.
+		// The `tools` subcommand (which lists globalRegistry
+		// contents) likewise does not require wiring here; the
+		// MCP-aware `tools` listing lives in the supervisor's
+		// canonical MCP-aware R*E*A*D*M*E sync (F1 follow-up run), not
+		// in this handoff.
+		if cfg, err := config.Load(); err == nil {
+			if mgr, _, mcpErr := cmdMcpInit(context.Background(), &cfg, mode, globalRegistry, tools.Workspace{}); mcpErr != nil {
+				fmt.Fprintf(os.Stderr, "simple-harness: mcp server unreachable: %v\n", mcpErr)
+				return 2
+			} else if mgr != nil {
+				defer mgr.Close()
+			}
+		}
 		return runRun(args[1:])
 	}
 

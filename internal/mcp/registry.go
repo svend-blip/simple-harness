@@ -282,22 +282,40 @@ type adapterConfig struct {
 // as it does for builtins (because the adapter is a tools.Tool, and
 // Dispatch treats every Tool the same).
 //
-// The adapter's Execute method ALSO runs the authorize step (calling
-// the caller-supplied AuthorizeFunc). This is intentional: the
-// adapter is self-contained — it can be invoked directly (e.g. from
-// the unit test TestMCP_PermissionMapping_PassesThroughAuthorize) OR
-// via registry.Dispatch. When invoked via registry.Dispatch, the
-// registry runs auth first (idempotent pass), then calls Execute
-// (which runs auth again — same result on the same call). The
-// "no second door around perm.Policy" requirement is satisfied
-// because the MCP integration uses the same AuthorizeFunc the
-// builtins use, with no parallel permission pipeline.
+// The adapter's Execute method does NOT run the authorize step.
+// The authorizer is the SINGLE source of truth: tools.Registry.Dispatch
+// runs auth at its step 2 (registry.go:95) before invoking Execute
+// at step 3 (registry.go:102); the adapter's Execute then calls
+// transport.Call directly. Reaching the adapter through Dispatch
+// yields exactly one Authorize invocation per MCP tool call. This
+// is the canonical "no second door around perm.Policy" invariant —
+// the MCP integration uses the same AuthorizeFunc the builtins use,
+// with no parallel permission pipeline at the adapter layer.
+//
+// The a.auth / a.policy / a.ws fields are still stored on the
+// adapter (the NewManager signature takes them and the adapter
+// reads them at construction) so the Manager's wiring surface stays
+// uniform across tools, but the adapter itself does NOT invoke
+// a.auth. Direct adapter.Execute (bypassing Dispatch) is therefore
+// a "no-auth-call short path" — it exists for test isolation but is
+// NOT a recommended entry point in production code. Production
+// callers reach MCP tools through tools.Registry.Dispatch (the
+// dispatcher used by internal/loop/.../tool_dispatch.go), which
+// enforces the SCOPE §13 authorize pipeline once and only once.
 //
 // Transport-call errors are returned as Result{Status:"error",
 // Error:&ToolError{Kind:"execution_failed", ...}} — same shape as a
 // builtin execution failure. Per GOAL §2 bound decision 4: "Transport
 // failures during a tool call are structured tool failures (the model
 // sees them), never harness crashes."
+//
+// Handoff 063 design decision (Work 4 slot): the prior implementation
+// invoked a.auth inside Execute, producing a "double auth call" when
+// reached via Dispatch (one at registry.Dispatch step 2, one at
+// mcpAdapter.Execute). The current implementation removes the
+// adapter's internal auth call: registry.Dispatch is the single
+// source of truth. The new test TestMCP_SingleAuthPass pins exactly
+// one Authorize call per Dispatch for MCP tools.
 type mcpAdapter struct {
 	server    Server
 	origName  string
@@ -337,39 +355,28 @@ func (a *mcpAdapter) Meta() tools.ToolMeta { return a.meta }
 // shape (the MCP server's verbatim schema, converted via schemaFromMap).
 func (a *mcpAdapter) Schema() tools.Schema { return a.schema }
 
-// Execute implements tools.Tool. The dispatch order:
+// Execute implements tools.Tool. The adapter's role at execute time
+// is narrowly scoped:
 //
-//  1. Call the caller-supplied AuthorizeFunc. The function runs schema
-//     → path → policy and returns nil on pass or a *tools.DecisionError
-//     on the first failure.
-//  2. On *tools.DecisionError, return Result{Status:"error", Error:
-//     &tools.ToolError{Kind:<mapped>, Message:de.Error(), Call:
-//     de.Call}}. The mapping (stage → kind) is identical to
-//     tools.mapStageToKind so the model's view of an MCP-tool failure
-//     is indistinguishable from a builtin-tool failure.
-//  3. On authorize-pass, call transport.Call. A transport error
-//     becomes Result{Status:"error", Error:&tools.ToolError{Kind:
-//     "execution_failed", ...}} — same shape as a builtin execution
-//     failure. The model sees this structured error; the harness does
-//     NOT crash (per GOAL §2 bound decision 4).
-//  4. On transport success, return Result{Status:"ok", Content: <map>}
+//  1. Call transport.Call verbatim with the original tool name (the
+//     MCP server sees the name it advertised in its listing; the
+//     collision-resolved FinalName is the registry-facing name only).
+//  2. A transport error becomes Result{Status:"error", Error:
+//     &tools.ToolError{Kind:"execution_failed", ...}} — same shape
+//     as a builtin execution failure. The model sees this structured
+//     error; the harness does NOT crash (per GOAL §2 bound decision
+//     4).
+//  3. On transport success, return Result{Status:"ok", Content: <map>}
 //     where <map> is the transport.Call result verbatim. MCP server
 //     results are arbitrary JSON-shaped maps; the tools layer treats
 //     them as opaque content (the downstream consumer parses the map).
 //
-// The adapter passes a.ws and a.policy to the AuthorizeFunc — these
-// are the values the Manager was constructed with (typically
-// perm.NewPolicy(mode) and the active Workspace). The Policy and
-// Workspace are stable across all calls (they're set at Manager
-// construction); per-call variation lives in the call itself.
+// The adapter does NOT call a.auth — the authorizer is invoked once
+// by tools.Registry.Dispatch before Execute is reached (see the
+// mcpAdapter doc comment). The a.auth / a.policy / a.ws fields are
+// carried on the adapter for symmetry with other Tool
+// implementations but are not consumed by Execute directly.
 func (a *mcpAdapter) Execute(ctx context.Context, call tools.Call) (tools.Result, error) {
-	if de := a.auth(ctx, call, a.schema, a.ws, a.policy); de != nil {
-		return tools.Result{Status: "error", Error: &tools.ToolError{
-			Kind:    stageToKind(de.Stage, de.Reason),
-			Message: de.Error(),
-			Call:    de.Call,
-		}}, nil
-	}
 	out, err := a.transport.Call(ctx, a.origName, call.Arguments)
 	if err != nil {
 		return tools.Result{Status: "error", Error: &tools.ToolError{

@@ -69,6 +69,118 @@ document references it but does not redeclare it.
 is published, changes to the public surface are compatibility
 breaks and must follow the §"Compatibility Policy" rule below.
 
+### MCP server declarations (V1.x additive — SCOPE §43)
+
+The V1 harness accepts **configuration-pinned MCP server
+declarations** under the `mcp_servers` configuration key. This is
+the SCOPE §43 amendment published in Run 019 as an additive change
+to the V1.x public surface — NO `protocol_version` bump. The
+existing `tool_call` / `tool_result` event wire shape is unchanged;
+MCP-provided tools reuse it additively (SCOPE §42 binding).
+
+This subsection is authoritative for the V1 MCP surface. Any future
+V1.x change to these claims must follow the `§"Compatibility
+Policy"` discipline (additive changes preserve the wire shape;
+intentional breaking changes bump `protocol_version`).
+
+#### Configuration schema
+
+The `mcp_servers` key accepts an array of declarations. Each
+declaration has this shape:
+
+```text
+{
+  "name":       "<stable identifier>",          // required
+  "transport":  "http" | "stdio",                // required
+  "endpoint":   "<http URL>",                    // transport=http only
+  "command":    ["<argv0>", "<argv1>", ...],     // transport=stdio only
+  "permission": "read_only" | "workspace_write"  // optional
+                | "full_access",                 // (empty inherits harness default)
+  "allowlist":  ["<tool-name>", ...],            // optional
+  "api_key":    "<credential>",                  // optional, REDACTED in config show
+  "headers":    {"<name>": "<value>", ...}       // optional, VALUES REDACTED in config show
+}
+```
+
+The field set mirrors SCOPE §43 verbatim. Validation rules
+(non-empty `name`; `transport` ∈ `{"http", "stdio"}`; transport-
+exclusive `endpoint` vs `command`; allowlist entries non-empty;
+permission triplet or empty for default inheritance) are enforced
+by `internal/config/config.go`'s `validateMCPServers` and surface as
+`config error: mcp_servers[%d] %q: ...` on stderr with exit 2.
+
+#### Session-start wiring
+
+At session start, the harness fetches every declared MCP server's
+`tools/list` and registers the resolved tools against the shared
+registry. The listing is fetched **once per session** and is
+immutable for the session (per SCOPE §43 + Out-§11 replacement; no
+dynamic MCP discovery).
+
+A server **declared but unreachable** at session start returns a
+structured startup error to stderr in the form:
+
+```text
+simple-harness: mcp server "<name>" unreachable: <reason>
+```
+
+and exits with code 2 (SCOPE §28 configuration error — never a
+silent omission). This binding is the canonical "declared but
+unreachable" path. The internal MCP wire form
+`mcp: server %q listing failed: ...` is the layer below the
+cmd-side exit-2 mapping and is documented in
+`internal/mcp/registry.go`'s `Manager.AddServer`.
+
+#### Collision naming (SCOPE §43 + GOAL §2 bound decision 5)
+
+When an MCP tool's name collides with a built-in tool name already
+registered in the harness's tool registry, the built-in wins. The
+MCP tool is **surfaced under** the deterministic prefix form:
+
+```text
+<server-sanitized>__<tool-name>
+```
+
+The server name is sanitized (any `__` becomes `_`) to keep the
+first `__` in the registration name unambiguous as the
+server/tool separator. No silent shadowing in either direction
+— the built-in stays under its bare name, the MCP tool is
+reachable only under the prefixed name. The `simple-harness
+tools` subcommand lists the resolved names; collision-bearing
+MCP tools appear under the prefixed form.
+
+#### Transport failure semantics
+
+A transport failure during a tool call surfaces as a structured
+`tool_result` event with `tool_result_status: "error"` and
+`error.kind: "execution_failed"` (the model's view of an MCP
+failure is indistinguishable from a built-in tool failure). The
+harness does **NOT** crash on transport disconnect, malformed
+response, oversized payload, or any other transport-level failure
+(per GOAL §2 bound decision 4). The schema-violation,
+permission-denied, and path-escape paths flow through the
+unchanged `internal/perm.Authorize` pipeline at
+`tools.Registry.Dispatch` step 2 — the MCP adapter does not
+introduce a parallel permission pipeline (no second door around
+`perm.Policy`).
+
+#### Secret handling
+
+Credentials supplied via `api_key` or `headers` are REDACTED in
+`config show` output per SCOPE §30. The redaction is at the
+config layer (`internal/config/config.go`'s `Render`); the wire
+format replace values with `<redacted>` while keeping the keys
+visible (so operators see WHICH headers are configured).
+
+#### `protocol_version` invariant
+
+MCP server declaration does NOT change `protocol_version`. The
+value stays at `"1"`. MCP calls reuse the existing `tool_call` /
+`tool_result` events (additive content; no schema change; no new
+event types). A future V2 that adds an MCP `error_kind` member to
+`tool_result` or a new event type would bump `protocol_version`
+to `"2"` per SCOPE §42 + this `§"Compatibility Policy"` clause.
+
 ---
 
 ## CLI Invocation Grammar
@@ -551,6 +663,11 @@ bump:
   ignore unknown fields).
 * Adding a new subcommand or verb to the CLI.
 * Adding a new SCOPE §23 status name.
+* Adding a new `mcp_servers` config-key entry under the `mcp_servers`
+  configuration field (per SCOPE §43 + amendment §43). Additive MCP
+  content carries NO `protocol_version` bump. The MCP wire shape
+  reuses the unchanged `tool_call` / `tool_result` events with
+  additive content; no event-type changes, no event-field changes.
 * Adding a new SCOPE §28 exit code is **NOT** an additive change —
   controllers may not be prepared for an unknown exit code, so a new
   exit code is a breaking change.
