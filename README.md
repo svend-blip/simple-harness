@@ -16,12 +16,9 @@ one task → one role → one workspace → one session
 ## Quick start
 
 ```bash
-# interactive
-bin/simple-harness \
-  --base-url http://127.0.0.1:8080/v1 \
-  --model qwen \
-  --workspace ~/project \
-  --permission workspace_write
+# interactive (endpoint/model/permission come from the config hierarchy:
+# ~/.simple-harness/config.yaml, .simple-harness/config.yaml, env)
+bin/simple-harness --workspace ~/project
 
 # headless (machine-readable events on stdout, deterministic exit codes)
 bin/simple-harness run \
@@ -37,6 +34,21 @@ bin/simple-harness run \
 `bin/simple-harness` is a POSIX wrapper that `exec`s the committed
 runtime binary (`bin/simple-harness-runtime`), so signals reach the
 harness process directly.
+
+On start, interactive mode prints its identity card and drops you at the
+prompt:
+
+```text
+session_id: 01a04f7a-2c0e-7a27-99f4-0d07a06ef30d
+model:      qwen
+endpoint:   http://127.0.0.1:8080
+workspace:  ~/project
+permission: READ_ONLY
+events:     ~/.simple-harness/sessions/01a04f7a-2c0e-7a27-99f4-0d07a06ef30d/events.jsonl
+(type /help for built-in commands, /exit to quit, Ctrl+D to exit, Ctrl+C cancels the active request — second Ctrl+C terminates)
+
+simple-harness>
+```
 
 ## What it provides
 
