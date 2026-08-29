@@ -596,7 +596,7 @@ func (r *Run) RunAgent(ctx context.Context, prompt string) (string, error) {
 			return accumulatedText.String(), &MaxTurnsError{Limit: maxTurns}
 		}
 
-		var perIndexAccum map[int]*tools.Call
+		var perIndexAccum map[int]*model.ToolCall
 		var firstNonEmpty bool
 
 		onDelta := func(ev model.StreamEvent) error {
@@ -619,9 +619,9 @@ func (r *Run) RunAgent(ctx context.Context, prompt string) (string, error) {
 			}
 			if ev.ToolCallDelta != nil {
 				if perIndexAccum == nil {
-					perIndexAccum = make(map[int]*tools.Call)
+					perIndexAccum = make(map[int]*model.ToolCall)
 				}
-				if err := accumulateToolCallFragment(perIndexAccum, ev.ToolCallDelta); err != nil {
+				if err := model.AccumulateToolCallFragment(perIndexAccum, ev.ToolCallDelta); err != nil {
 					return err
 				}
 			}
@@ -685,15 +685,58 @@ func (r *Run) RunAgent(ctx context.Context, prompt string) (string, error) {
 			if !ok || call == nil {
 				continue
 			}
-			result := r.cfg.Tools.Dispatch(ctx, *call, ws, pol, perm.Authorize)
+			// EMIT tool_call BEFORE the dispatch (the dispatch
+			// pipeline runs the permission check, which may
+			// reject the call — the tool_call event captures
+			// the attempt regardless).
+			if err := r.em.ToolCall(call.ID, call.Name); err != nil {
+				_ = r.em.Status("FAILED")
+				_ = r.em.Completed(1)
+				return accumulatedText.String(), err
+			}
+			// Convert the assembled model.ToolCall into the
+			// FROZEN tools.Call dispatch contract (no ID
+			// field — the loop carries the ID for event
+			// emission; the dispatch pipeline uses Name +
+			// Arguments only).
+			toolsCall := tools.Call{
+				Name:      call.Name,
+				Arguments: call.Arguments,
+			}
+			result := r.cfg.Tools.Dispatch(ctx, toolsCall, ws, pol, perm.Authorize)
 			if result.Status == "error" && result.Error != nil && result.Error.Kind == "permission_denied" {
+				// Permission-denied: NO tool_result event
+				// fires — the permission denial IS the
+				// terminal event for the call (per
+				// handoff 042 / step (1)(b)(6); the
+				// tool_call + status:FAILED +
+				// completed(exit_code: 4) sequence is
+				// the documented observable).
 				anyPermissionViolation = true
 				permUnderlying = fmt.Errorf("%s: %s", result.Error.Kind, result.Error.Message)
 				break
 			}
+			// EMIT tool_result AFTER the dispatch returns
+			// (for non-permission-denied calls). Content is
+			// the JSON-encoded result body — the success
+			// content (tools.Result.Content) for "ok", the
+			// structured ToolError for "error". An empty
+			// string elides the Content field via the
+			// Emitter.ToolResult omitempty guard.
+			evContent, encErr := encodeToolResultContent(result)
+			if encErr != nil {
+				_ = r.em.Status("FAILED")
+				_ = r.em.Completed(1)
+				return accumulatedText.String(), fmt.Errorf("loop: encode tool result for %s: %w", call.Name, encErr)
+			}
+			if err := r.em.ToolResult(call.ID, result.Status, evContent); err != nil {
+				_ = r.em.Status("FAILED")
+				_ = r.em.Completed(1)
+				return accumulatedText.String(), err
+			}
 			// Encode the result as a tool message so the model
 			// sees the outcome on the next turn.
-			encoded, encErr := encodeToolResult(call, result)
+			encoded, encErr := encodeToolResult(&toolsCall, result)
 			if encErr != nil {
 				_ = r.em.Status("FAILED")
 				_ = r.em.Completed(1)
@@ -742,78 +785,49 @@ func encodeToolResult(call *tools.Call, result tools.Result) (string, error) {
 	return string(b), nil
 }
 
-// accumulateToolCallFragment merges a ToolCallFragment into the
-// per-index accumulator. The first fragment for a given Index
-// initializes the tools.Call with Name + a fresh Arguments map;
-// subsequent fragments for the same Index merge ArgsDelta into
-// the Arguments map by json.Unmarshal of the accumulated buffer
-// (this is the "model client assembles complete tool calls from
-// stream deltas" behavior the GOAL §2 deliverable 3 names; THIS
-// handoff places the assembly in the loop — handoff 041 may
-// refactor it into the model client).
-//
-// Returns an error if the accumulated JSON is malformed (the
-// SCOPE §31 "untrusted input" discipline says structured
-// rejection is the harness's contract with the model, not a hard
-// failure; the caller continues the loop and the model gets to
-// retry on the next turn).
-func accumulateToolCallFragment(accum map[int]*tools.Call, frag *model.ToolCallFragment) error {
-	if frag == nil {
-		return nil
-	}
-	existing, ok := accum[frag.Index]
-	if !ok || existing == nil {
-		existing = &tools.Call{
-			Name:      frag.Name,
-			Arguments: map[string]any{},
-		}
-		accum[frag.Index] = existing
-	}
-	if frag.Name != "" {
-		existing.Name = frag.Name
-	}
-	if frag.ArgsDelta == "" {
-		return nil
-	}
-	// Merge the ArgsDelta into the Arguments map by re-parsing
-	// the running buffer. The model emits ArgsDelta as a partial
-	// JSON object that becomes a complete object once the
-	// upstream emits the closing brace; we re-parse the buffer
-	// each step so partial state survives across fragments.
-	var merged map[string]any
-	if err := json.Unmarshal([]byte(frag.ArgsDelta), &merged); err != nil {
-		return fmt.Errorf("loop: parse tool-call args delta: %w", err)
-	}
-	for k, v := range merged {
-		existing.Arguments[k] = v
-	}
-	return nil
-}
+// accumulateToolCallFragment + parseToolCallArgs: REMOVED in
+// handoff 042. The loop's per-fragment merge + JSON-parsing
+// helpers are folded away in favor of the model-side counterparts
+// model.AccumulateToolCallFragment + model.ParseToolCallArgs
+// shipped in handoff 041 (per the verdict-040 carry-forward note
+// in the handoff 041 ledger entry: "handoff 042 either migrates
+// the loop's caller to this exported helper or folds the private
+// duplicate away"). The loop's caller now uses
+// model.AccumulateToolCallFragment directly; the loop-side parse
+// is unnecessary because the per-fragment merge already performs
+// per-delta unmarshalling for the streaming path.
 
-// parseToolCallArgs parses the accumulated JSON ArgsDelta into a
-// map[string]any. It is the parseToolCallArgs helper named in
-// the GOAL §2 deliverable 6 partial: the helper handles the
-// common case where the model emits a single {"path": "file",
-// "patch": "..."} JSON object. If the JSON is malformed (not an
-// object, or unparseable), returns a *json.SyntaxError — the
-// loop's caller appends the parse error to the message history
-// as a tool-result message with status="error" and the model
-// gets to retry (SCOPE §31 "untrusted input" discipline).
-//
-// NOTE: this helper is exposed for the binding pin's contract;
-// the per-fragment merge in accumulateToolCallFragment already
-// performs per-delta unmarshalling for the streaming path. The
-// helper exists for callers that have an accumulated JSON string
-// (e.g. a non-streaming tool-call) and need to parse it.
-func parseToolCallArgs(argsJSON string) (map[string]any, error) {
-	if argsJSON == "" {
-		return map[string]any{}, nil
+// encodeToolResultContent produces the content string for the
+// tool_result event emitted after each non-permission-denied
+// dispatch. For "ok" results it JSON-encodes result.Content
+// (the success body the tool returned — e.g. ApplyPatchResult
+// for apply_patch); for "error" results it JSON-encodes the
+// structured ToolError so an external controller sees the
+// parseable kind/message/call shape. A nil Content (rare; the
+// V1 tools always populate one) returns "" so the
+// Emitter.ToolResult helper's `if content != ""` guard elides
+// the Content field on the wire (matches the SCOPE §42
+// additive-evolution discipline: absent fields are absent).
+func encodeToolResultContent(result tools.Result) (string, error) {
+	switch result.Status {
+	case "ok":
+		if result.Content == nil {
+			return "", nil
+		}
+		b, err := json.Marshal(result.Content)
+		if err != nil {
+			return "", err
+		}
+		return string(b), nil
 	}
-	var out map[string]any
-	if err := json.Unmarshal([]byte(argsJSON), &out); err != nil {
-		return nil, err
+	if result.Error == nil {
+		return "", nil
 	}
-	return out, nil
+	b, err := json.Marshal(result.Error)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }
 
 // workspaceFromPath constructs a tools.Workspace (= path.Workspace)

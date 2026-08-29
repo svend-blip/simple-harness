@@ -1046,7 +1046,7 @@ func TestRun_Version(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 017, handoff 041)"
+	want := "simple-harness 0.1.0-dev (Run 017, handoff 042)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}
@@ -1364,7 +1364,7 @@ func TestRun_Version_AdvancesToHandoff024(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 017, handoff 041)"
+	want := "simple-harness 0.1.0-dev (Run 017, handoff 042)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}
@@ -2073,7 +2073,7 @@ func TestRun_Version_AdvancesToHandoff030(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 017, handoff 041)"
+	want := "simple-harness 0.1.0-dev (Run 017, handoff 042)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}
@@ -2511,5 +2511,442 @@ func TestE2E_AcceptanceRunner_RequiresArgs_Exits1(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "usage") {
 		t.Fatalf("expected stderr to contain 'usage' substring, got: %q", stderr.String())
+	}
+}
+
+// --- handoff 042: Run 017 / BINDING-PIN cross-package end-to-end pins ---
+
+// TestToolDispatch_SingleTurn_EmitsToolCallAndToolResult is the
+// cross-package end-to-end binding pin for the multi-turn
+// agent loop's happy path through the RUN MODE surface. The
+// test exercises the full stack — model client (mock) →
+// loop (RunAgent) → events (Emitter) → run mode (runRun →
+// driveRun → stdout JSONL) — with the new tool_call +
+// tool_result events added by handoff 041's
+// internal/event/event.go changes (the Emitter.ToolCall +
+// Emitter.ToolResult helpers) + handoff 042's
+// internal/loop/loop.go changes (RunAgent emits the events
+// per dispatch).
+//
+// The test:
+//  1. Spins up a t.TempDir() workspace + writes a fixture
+//     file fixture.txt with content "line1\nline2\nline3\n".
+//  2. Spins up a t.TempDir() state dir for the sidecar.
+//  3. Spins up an httptest.NewServer that serves an SSE
+//     payload with one choices[0].delta.tool_calls entry
+//     for apply_patch with the JSON arguments {"path":
+//     "<absolute fixture path>", "patch": <unified diff
+//     replacing "line2" with "LINE2_MODIFIED">} on the
+//     FIRST request, and a non-empty assistant-text delta
+//     + [DONE] on the SECOND request (so the loop reaches
+//     the single-turn happy path: model_request fires +
+//     tool dispatched + tool_result fires + loop re-asks
+//     model + model returns text + status: COMPLETED +
+//     completed(exit_code: 0)).
+//  4. Calls driveRun(t, "--base-url", srv.URL,
+//     "--model", "test-model", "--workspace", workspaceDir,
+//     "--state-dir", stateDir, "--prompt-file", promptFile,
+//     "--output", "jsonl", "--permission", "workspace_write",
+//     "--max-turns", "8").
+//  5. Asserts:
+//     (i) the returned exit code is 0.
+//     (ii) the stdout JSONL stream carries BOTH a
+//     "tool_call" event with non-empty call_id + tool +
+//     the V1 six (started + status + assistant_stream +
+//     model_request + completed), AND a "tool_result"
+//     event with non-empty call_id + tool_result_status:
+//     "ok" + the SAME call_id as the tool_call event (the
+//     call_id correlation is the binding evidence that the
+//     model-targeted call ID round-trips through the
+//     dispatcher to the result event).
+//     (iii) the on-disk fixture.txt now contains
+//     "line1\nLINE2_MODIFIED\nline3\n" (content-based
+//     assertion, NOT exit-code-based, per GOAL §5
+//     reviewer duty 5 "The mock-model pins prove
+//     workspace change by content, not by exit code
+//     alone.").
+func TestToolDispatch_SingleTurn_EmitsToolCallAndToolResult(t *testing.T) {
+	// Snapshot+restore globalRegistry (the loop.RunAgent dispatch
+	// pipeline requires loop.Config.Tools to be non-nil; the test
+	// registers the builtins on a fresh registry so apply_patch is
+	// reachable from the cross-package dispatch). Mirrors the
+	// pattern at TestToolsSubcommand_ListsRegisteredTools.
+	savedReg := globalRegistry
+	t.Cleanup(func() { globalRegistry = savedReg })
+	freshReg := tools.NewRegistry()
+	builtins.RegisterBuiltins(freshReg)
+	globalRegistry = freshReg
+
+	workspaceDir := t.TempDir()
+	stateDir := t.TempDir()
+	fixturePath := filepath.Join(workspaceDir, "fixture.txt")
+	if err := os.WriteFile(fixturePath, []byte("line1\nline2\nline3\n"), 0o644); err != nil {
+		t.Fatalf("seed write fixture.txt: %v", err)
+	}
+	promptFile := filepath.Join(t.TempDir(), "prompt.md")
+	if err := os.WriteFile(promptFile, []byte("patch line2"), 0o644); err != nil {
+		t.Fatalf("seed write prompt.md: %v", err)
+	}
+
+	patch := "--- a/fixture.txt\n+++ b/fixture.txt\n@@ -2 +2 @@\n-line2\n+LINE2_MODIFIED\n"
+	argsJSON, err := json.Marshal(map[string]any{
+		"path":  fixturePath,
+		"patch": patch,
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal args: %v", err)
+	}
+
+	nRequests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		nRequests++
+		if nRequests == 1 {
+			payload := fmt.Sprintf(
+				`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_e2e_1","function":{"name":"apply_patch","arguments":%q}}]}}]}`+"\n\n",
+				string(argsJSON),
+			)
+			fmt.Fprint(w, payload)
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"Patch applied."}}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	code, out, errOut := driveRun(t,
+		"--base-url", srv.URL,
+		"--model", "test-model",
+		"--workspace", workspaceDir,
+		"--state-dir", stateDir,
+		"--prompt-file", promptFile,
+		"--output", "jsonl",
+		"--permission", "workspace_write",
+		"--max-turns", "8",
+	)
+	if code != 0 {
+		t.Fatalf("driveRun returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
+	}
+
+	// (ii) Parse the JSONL stream and assert the tool_call +
+	// tool_result events with matching call_ids are present.
+	var toolCallEvent, toolResultEvent *event.Event
+	for i, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		var ev event.Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("line %d does not parse as JSON: %v (line=%q)", i, err, line)
+		}
+		switch ev.Event {
+		case "tool_call":
+			if toolCallEvent == nil {
+				cp := ev
+				toolCallEvent = &cp
+			}
+		case "tool_result":
+			if toolResultEvent == nil {
+				cp := ev
+				toolResultEvent = &cp
+			}
+		}
+	}
+	if toolCallEvent == nil {
+		t.Fatalf("stdout missing tool_call event (stdout=%q)", out)
+	}
+	if toolResultEvent == nil {
+		t.Fatalf("stdout missing tool_result event (stdout=%q)", out)
+	}
+	if toolCallEvent.CallID == "" {
+		t.Errorf("tool_call event missing call_id (event=%+v)", toolCallEvent)
+	}
+	if toolCallEvent.Tool != "apply_patch" {
+		t.Errorf("tool_call event tool = %q, want apply_patch", toolCallEvent.Tool)
+	}
+	if toolResultEvent.CallID == "" {
+		t.Errorf("tool_result event missing call_id (event=%+v)", toolResultEvent)
+	}
+	if toolResultEvent.ResultStatus != "ok" {
+		t.Errorf("tool_result event tool_result_status = %q, want ok", toolResultEvent.ResultStatus)
+	}
+	if toolResultEvent.CallID != toolCallEvent.CallID {
+		t.Errorf("tool_result call_id = %q, tool_call call_id = %q — must match for correlation",
+			toolResultEvent.CallID, toolCallEvent.CallID)
+	}
+
+	// (iii) Workspace content assertion: the apply_patch must
+	// have landed, replacing "line2" with "LINE2_MODIFIED".
+	onDisk, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Fatalf("ReadFile fixture.txt: %v", err)
+	}
+	wantContent := "line1\nLINE2_MODIFIED\nline3\n"
+	if string(onDisk) != wantContent {
+		t.Errorf("on-disk fixture.txt = %q, want %q", string(onDisk), wantContent)
+	}
+}
+
+// TestToolDispatch_MaxTurns_StopsOverflowingModel_EmitsToolCallEvents
+// is the cross-package end-to-end binding pin for the
+// multi-turn agent loop's max-turns overflow behavior through
+// the RUN MODE surface. The test exercises the full stack —
+// model client (mock that always emits a tool-call) → loop
+// (RunAgent + MaxTurns overflow) → events (Emitter) → run
+// mode (runRun → driveRun → stdout JSONL) — with the new
+// tool_call events on every turn + the SCOPE §3 overflow
+// signal + completed(exit_code: 1).
+//
+// The test:
+//  1. Spins up a t.TempDir() workspace + state dir.
+//  2. Spins up an httptest.NewServer that emits a
+//     tool-call on EVERY response — the mock always
+//     returns a tool-call for apply_patch against a
+//     NON-EXISTENT file ("does_not_exist.txt") so the
+//     dispatch returns Status="error" + Kind
+//     "target_not_found" → wrapped as "execution_failed"
+//     by the dispatch pipeline; the loop appends the
+//     error to the message history and re-calls the
+//     model — so the loop never reaches the "no tool
+//     calls" final response and the max-turns overflow
+//     fires after MaxTurns=2 iterations.
+//  3. Calls driveRun with --max-turns 2.
+//  4. Asserts:
+//     (i) the returned exit code is 1 (the cmd-side
+//     *loop.MaxTurnsError → exit 1 mapping at handoff 041).
+//     (ii) the stdout JSONL stream carries AT LEAST 2
+//     tool_call events (one per turn within the bound;
+//     the implementer's chosen overflow semantic — turn
+//     3 fires model_request + overflow status + no
+//     ChatStream + no tool_call — produces 2 tool_call
+//     events for MaxTurns=2; the binding pin asserts
+//     >= 2 to be lenient on the implementer's chosen
+//     exact semantic, matching the handoff 040 LoopCore
+//     pin's "3 model_request events for MaxTurns=2"
+//     pattern).
+//     (iii) the stdout JSONL stream carries the overflow
+//     status event (status: "TOOL_DISPATCH_OVERFLOW:
+//     max-turns 2 exceeded") + a "completed" event with
+//     exit_code 1.
+func TestToolDispatch_MaxTurns_StopsOverflowingModel_EmitsToolCallEvents(t *testing.T) {
+	// Snapshot+restore globalRegistry (apply_patch must be
+	// registered for the loop's dispatch pipeline to return a
+	// structured error — the loop appends the error to message
+	// history and the model is re-called, repeating until
+	// MaxTurns overflows). Mirrors TestToolsSubcommand_ListsRegisteredTools.
+	savedReg := globalRegistry
+	t.Cleanup(func() { globalRegistry = savedReg })
+	freshReg := tools.NewRegistry()
+	builtins.RegisterBuiltins(freshReg)
+	globalRegistry = freshReg
+
+	workspaceDir := t.TempDir()
+	stateDir := t.TempDir()
+	promptFile := filepath.Join(t.TempDir(), "prompt.md")
+	if err := os.WriteFile(promptFile, []byte("infinite loop"), 0o644); err != nil {
+		t.Fatalf("seed write prompt.md: %v", err)
+	}
+
+	argsJSON, err := json.Marshal(map[string]any{
+		"path":  "does_not_exist.txt",
+		"patch": "--- a/does_not_exist.txt\n+++ b/does_not_exist.txt\n@@ -1 +1 @@\n-x\n+X\n",
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal args: %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		payload := fmt.Sprintf(
+			`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_e2e_overflow","function":{"name":"apply_patch","arguments":%q}}]}}]}`+"\n\n",
+			string(argsJSON),
+		)
+		fmt.Fprint(w, payload)
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	code, out, errOut := driveRun(t,
+		"--base-url", srv.URL,
+		"--model", "test-model",
+		"--workspace", workspaceDir,
+		"--state-dir", stateDir,
+		"--prompt-file", promptFile,
+		"--output", "jsonl",
+		"--permission", "workspace_write",
+		"--max-turns", "2",
+	)
+	if code != 1 {
+		t.Fatalf("driveRun returned %d, want 1 (MaxTurns overflow) (stdout=%q stderr=%q)", code, out, errOut)
+	}
+
+	var toolCallCount int
+	var foundOverflow, foundCompleted bool
+	var completedExitCode int
+	for i, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		var ev event.Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("line %d does not parse as JSON: %v (line=%q)", i, err, line)
+		}
+		switch ev.Event {
+		case "tool_call":
+			toolCallCount++
+		case "status":
+			if strings.HasPrefix(ev.Status, "TOOL_DISPATCH_OVERFLOW:") {
+				foundOverflow = true
+			}
+		case "completed":
+			foundCompleted = true
+			completedExitCode = ev.ExitCode
+		}
+	}
+	if toolCallCount < 2 {
+		t.Errorf("tool_call event count = %d, want >= 2 (one per turn within MaxTurns=2)", toolCallCount)
+	}
+	if !foundOverflow {
+		t.Errorf("stdout missing TOOL_DISPATCH_OVERFLOW status event (stdout=%q)", out)
+	}
+	if !foundCompleted {
+		t.Errorf("stdout missing completed event (stdout=%q)", out)
+	}
+	if completedExitCode != 1 {
+		t.Errorf("completed exit_code = %d, want 1", completedExitCode)
+	}
+}
+
+// TestToolDispatch_PermissionViolation_Exits4_EmitsToolResultError
+// is the cross-package end-to-end binding pin for the
+// multi-turn agent loop's permission-violation path through
+// the RUN MODE surface. The test exercises the full stack
+// — model client (mock that emits a tool-call for
+// apply_patch) → loop (RunAgent dispatches the call) →
+// events (Emitter — tool_call fires, permission check
+// rejects, completed(exit_code: 4) fires) → run mode
+// (runRun → driveRun → stdout JSONL) — with the cmd-side
+// *loop.PermissionError → exit 4 mapping at handoff 041.
+//
+// The test:
+//  1. Spins up a t.TempDir() workspace + state dir.
+//  2. Spins up an httptest.NewServer that emits ONE
+//     tool-call on the first request for apply_patch
+//     against the workspace file (the call itself would
+//     succeed if executed — the apply_patch tool is
+//     registered; the permission check rejects because
+//     the run uses --permission read_only which forbids
+//     workspace writes).
+//  3. Calls driveRun with --permission read_only.
+//  4. Asserts:
+//     (i) the returned exit code is 4 (the cmd-side
+//     *loop.PermissionError → exit 4 mapping at handoff
+//     041).
+//     (ii) the stdout JSONL stream carries a "tool_call"
+//     event (the attempted call IS observed even though
+//     the permission check rejects it — the dispatch
+//     pipeline's permission stage runs AFTER the
+//     tool_call event fires per the loop's
+//     `r.em.ToolCall(call.ID, call.Name)` BEFORE the
+//     dispatch call).
+//     (iii) the stdout JSONL stream does NOT carry a
+//     "tool_result" event for the rejected call (per
+//     the implementer's recommended choice in step
+//     (1)(b)(6) above — the permission denial IS the
+//     terminal event for the call; no tool_result fires
+//     because the call was never executed).
+//     (iv) the stdout JSONL stream carries a "completed"
+//     event with exit_code 4.
+func TestToolDispatch_PermissionViolation_Exits4_EmitsToolResultError(t *testing.T) {
+	// Snapshot+restore globalRegistry (apply_patch must be
+	// registered for the dispatch pipeline to reach the permission
+	// stage that produces the permission_denied result; without
+	// registration the dispatch returns unknown_tool BEFORE the
+	// permission check, so the test would miss the path it's
+	// pinning). Mirrors TestToolsSubcommand_ListsRegisteredTools.
+	savedReg := globalRegistry
+	t.Cleanup(func() { globalRegistry = savedReg })
+	freshReg := tools.NewRegistry()
+	builtins.RegisterBuiltins(freshReg)
+	globalRegistry = freshReg
+
+	workspaceDir := t.TempDir()
+	stateDir := t.TempDir()
+	fixturePath := filepath.Join(workspaceDir, "fixture.txt")
+	if err := os.WriteFile(fixturePath, []byte("line1\nline2\nline3\n"), 0o644); err != nil {
+		t.Fatalf("seed write fixture.txt: %v", err)
+	}
+	promptFile := filepath.Join(t.TempDir(), "prompt.md")
+	if err := os.WriteFile(promptFile, []byte("patch line2"), 0o644); err != nil {
+		t.Fatalf("seed write prompt.md: %v", err)
+	}
+
+	patch := "--- a/fixture.txt\n+++ b/fixture.txt\n@@ -2 +2 @@\n-line2\n+LINE2_MODIFIED\n"
+	argsJSON, err := json.Marshal(map[string]any{
+		"path":  fixturePath,
+		"patch": patch,
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal args: %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		payload := fmt.Sprintf(
+			`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_e2e_perm","function":{"name":"apply_patch","arguments":%q}}]}}]}`+"\n\n",
+			string(argsJSON),
+		)
+		fmt.Fprint(w, payload)
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	code, out, errOut := driveRun(t,
+		"--base-url", srv.URL,
+		"--model", "test-model",
+		"--workspace", workspaceDir,
+		"--state-dir", stateDir,
+		"--prompt-file", promptFile,
+		"--output", "jsonl",
+		"--permission", "read_only",
+		"--max-turns", "8",
+	)
+	if code != 4 {
+		t.Fatalf("driveRun returned %d, want 4 (PermissionError) (stdout=%q stderr=%q)", code, out, errOut)
+	}
+
+	var foundToolCall, foundCompleted bool
+	var foundToolResult bool
+	var completedExitCode int
+	for i, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		var ev event.Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("line %d does not parse as JSON: %v (line=%q)", i, err, line)
+		}
+		switch ev.Event {
+		case "tool_call":
+			foundToolCall = true
+		case "tool_result":
+			foundToolResult = true
+		case "completed":
+			foundCompleted = true
+			completedExitCode = ev.ExitCode
+		}
+	}
+	if !foundToolCall {
+		t.Errorf("stdout missing tool_call event for the attempted call (stdout=%q)", out)
+	}
+	if foundToolResult {
+		t.Errorf("stdout has tool_result event for the rejected call — implementer's recommended choice is NOT to emit tool_result on permission denial (stdout=%q)", out)
+	}
+	if !foundCompleted {
+		t.Errorf("stdout missing completed event (stdout=%q)", out)
+	}
+	if completedExitCode != 4 {
+		t.Errorf("completed exit_code = %d, want 4 (PermissionError mapping)", completedExitCode)
 	}
 }
