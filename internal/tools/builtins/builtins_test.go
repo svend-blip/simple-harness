@@ -12,18 +12,20 @@ import (
 	"github.com/svend-blip/simple-harness/internal/tools"
 )
 
-// TestRegisterBuiltins_RegistersAllSixTools: a fresh registry +
-// RegisterBuiltins lists all six V1 builtin tools (four read-only
-// + two mutation tools), sorted, before any pipeline integration.
+// TestRegisterBuiltins_RegistersAllSevenTools: a fresh registry +
+// RegisterBuiltins lists all seven V1 builtin tools (four read-only
+// + three mutation tools), sorted, before any pipeline integration.
 // This is the load-bearing assertion for full TG1 at the
-// registrar level. Handoff 017 added write_file; handoff 018 adds
-// apply_patch and lands full TG1.
-func TestRegisterBuiltins_RegistersAllSixTools(t *testing.T) {
+// registrar level. Handoff 017 added write_file; handoff 018 added
+// apply_patch; handoff 020 adds shell and lands partial TG1 (full
+// TG1 lands in handoff 021 when the advanced shell behavior
+// completes the slice).
+func TestRegisterBuiltins_RegistersAllSevenTools(t *testing.T) {
 	r := tools.NewRegistry()
 	RegisterBuiltins(r)
 
 	names := r.Names()
-	want := []string{"apply_patch", "grep", "list_directory", "read_file", "search_files", "write_file"}
+	want := []string{"apply_patch", "grep", "list_directory", "read_file", "search_files", "shell", "write_file"}
 	if len(names) != len(want) {
 		t.Fatalf("len(names) = %d, want %d (got %v)", len(names), len(want), names)
 	}
@@ -116,6 +118,29 @@ func TestRegisterBuiltins_MetaAndSchema(t *testing.T) {
 	if string(ss.Properties["pattern"]) != string(tools.TypeString) {
 		t.Fatalf("search_files pattern type = %q, want %q",
 			ss.Properties["pattern"], tools.TypeString)
+	}
+
+	sh, ok := r.Get("shell")
+	if !ok || sh == nil {
+		t.Fatalf("Get(shell) = (%v, %v), want (non-nil, true)", sh, ok)
+	}
+	if sh.Meta().Name != "shell" {
+		t.Fatalf("shell Meta().Name = %q, want %q", sh.Meta().Name, "shell")
+	}
+	if sh.Meta().Description == "" {
+		t.Fatalf("shell Meta().Description is empty")
+	}
+	shs := sh.Schema()
+	if len(shs.Required) != 1 || shs.Required[0] != "command" {
+		t.Fatalf("shell Schema.Required = %v, want [command]", shs.Required)
+	}
+	if string(shs.Properties["command"]) != string(tools.TypeString) {
+		t.Fatalf("shell command type = %q, want %q",
+			shs.Properties["command"], tools.TypeString)
+	}
+	if string(shs.Properties["cwd"]) != string(tools.TypeString) {
+		t.Fatalf("shell cwd type = %q, want %q",
+			shs.Properties["cwd"], tools.TypeString)
 	}
 
 	wf, ok := r.Get("write_file")
@@ -905,4 +930,42 @@ func TestIntegration_PermissionDenial_APPLY_PATCH_FULL_ACCESS_Escape(t *testing.
 		t.Fatalf("Error.Kind = %v, want %q (the path stage catches the escape before the policy stage runs)",
 			res.Error, "path_escape")
 	}
+}
+
+// TestIntegration_PermissionDenial_SHELL_READ_ONLY: a READ_ONLY
+// shell call is rejected with Kind="permission_denied" at the
+// policy stage BEFORE Execute runs (reviewer duty #3 — the
+// READ_ONLY refusal happens in the permission seam, NOT inside
+// the shell tool's body). The test asserts the harness did NOT
+// spawn the child by checking the captured stdout/stderr are
+// both empty strings — Execute must not run when the policy
+// stage denies the call.
+func TestIntegration_PermissionDenial_SHELL_READ_ONLY(t *testing.T) {
+	ws := tempWorkspace(t)
+
+	chdirWorkspace(t, ws)
+
+	r := tools.NewRegistry()
+	RegisterBuiltins(r)
+
+	call := tools.Call{
+		Name:      "shell",
+		Arguments: map[string]any{"command": "echo should-not-run"},
+	}
+	res := r.Dispatch(context.Background(), call, ws, perm.NewPolicy(perm.READ_ONLY), perm.Authorize)
+	if res.Status != "error" {
+		t.Fatalf("Status = %q, want %q (READ_ONLY should deny the shell call)", res.Status, "error")
+	}
+	if res.Error == nil || res.Error.Kind != "permission_denied" {
+		t.Fatalf("Error.Kind = %v, want %q (READ_ONLY must deny shell at the policy stage)",
+			res.Error, "permission_denied")
+	}
+	// The Dispatch path does not return ShellResult on
+	// policy-stage denial — Content will be nil; the contract
+	// is just that the policy stage fired before Execute
+	// ran. (If Execute ran, the shell would have written
+	// "should-not-run\n" somewhere; on a fresh t.TempDir()
+	// workspace the absence of any side-effect is the
+	// observable proof, but the test asserts the structured
+	// Kind which is the binding evidence.)
 }

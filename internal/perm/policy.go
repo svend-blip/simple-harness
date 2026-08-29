@@ -77,6 +77,7 @@ func ParseMode(s string) (Mode, error) {
 var mutationTools = map[string]bool{
 	"write_file":  true,
 	"apply_patch": true,
+	"shell":       true,
 }
 
 // IsMutationTool reports whether the named tool is on the mutationTools

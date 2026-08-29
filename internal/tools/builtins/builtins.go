@@ -4,7 +4,9 @@
 // V1 read-only tools (read_file and list_directory); handoff 015
 // registers the remaining two (search_files and grep); handoff 017
 // adds the first mutation tool (write_file) via the same
-// RegisterBuiltins registrar.
+// RegisterBuiltins registrar; handoff 018 adds the second mutation
+// tool (apply_patch); handoff 020 adds the third mutation tool
+// (shell) with process-group ownership per SCOPE §27.
 //
 // The package is a thin layer over internal/tools: each builtin
 // implements the tools.Tool interface (Meta, Schema, Execute) and is
@@ -36,7 +38,9 @@ import "github.com/svend-blip/simple-harness/internal/tools"
 // handoff 017 adds the first mutation tool: write_file (SCOPE §10
 // "Support direct file writing where appropriate"). Run 004 handoff
 // 018 adds the second mutation tool: apply_patch (SCOPE §10
-// "deterministic patching for source modifications").
+// "deterministic patching for source modifications"). Run 005
+// handoff 020 adds the third mutation tool: shell (SCOPE §§11, 27
+// "controlled execution in its own process group").
 //
 // RegisterBuiltins is idempotent only in the sense that calling it
 // twice on the same registry PANICS — Registry.Register panics on
@@ -51,5 +55,6 @@ func RegisterBuiltins(r *tools.Registry) {
 	r.Register(ListDirectory{})
 	r.Register(ReadFile{})
 	r.Register(SearchFiles{})
+	r.Register(Shell{})
 	r.Register(WriteFile{})
 }
