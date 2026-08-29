@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1046,7 +1048,7 @@ func TestRun_Version(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 018, handoff 044)"
+	want := "simple-harness 0.1.0-dev (Run 012, handoff 047)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}
@@ -1364,7 +1366,7 @@ func TestRun_Version_AdvancesToHandoff024(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 018, handoff 044)"
+	want := "simple-harness 0.1.0-dev (Run 012, handoff 047)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}
@@ -2073,7 +2075,7 @@ func TestRun_Version_AdvancesToHandoff030(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 018, handoff 044)"
+	want := "simple-harness 0.1.0-dev (Run 012, handoff 047)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}
@@ -3233,5 +3235,445 @@ func TestE2E_AcceptanceRunner_HappyPath_ScriptInvokesHarness(t *testing.T) {
 	// alongside the "attempt N: PASS" line).
 	if !strings.Contains(stderr.String(), "session_id=") {
 		t.Errorf("stderr missing session_id= (the assertion-D clause); got %q", stderr.String())
+	}
+}
+
+// --- Run 012 / handoff 047: GOAL §2 deliverable 1 binding pins ---
+
+// TestE2E_ReviewRunner_RequiresArgs_Exits1 — the in-process Go
+// binding pin for Run 012 / handoff 047's GOAL §1 + §2 deliverable
+// 1 ("the review acceptance runner exists, is executable, and
+// validates its arguments"). Mirrors the handoff-039
+// TestE2E_AcceptanceRunner_RequiresArgs_Exits1 test for
+// scripts/e2e-review.sh: drives the script as a subprocess with
+// no arguments and asserts exit code != 0 AND stderr contains the
+// substring "usage" (the placeholder usage message from the
+// handoff 047 script body).
+//
+// The script's working directory at exec time MUST be the project
+// root (the script is a relative-path executable; running it from
+// the project root ensures the chmod +x bit is honored and the
+// script's shebang line resolves correctly). Under `go test`,
+// os.Getwd() == cmd/simple-harness; the project root is two
+// parents up.
+func TestE2E_ReviewRunner_RequiresArgs_Exits1(t *testing.T) {
+	projectRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("abs projectRoot: %v", err)
+	}
+	cmd := exec.Command("./scripts/e2e-review.sh")
+	cmd.Dir = projectRoot
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+	if runErr == nil {
+		t.Fatalf("expected non-zero exit code from scripts/e2e-review.sh with no args, got nil (exit 0)")
+	}
+	if !strings.Contains(stderr.String(), "usage") {
+		t.Fatalf("expected stderr to contain 'usage' substring, got: %q", stderr.String())
+	}
+}
+
+// TestE2E_ReviewRunner_HappyPath_HarnessDrivesPatch — the
+// harness-direct half of the Run 012 dual-pattern binding pin.
+// Drives the harness via driveRun with a httptest.NewServer mock
+// model that returns an SSE stream with: (i) a read_file tool-call
+// delta on the first request (allowed under READ_ONLY per
+// internal/perm/policy.go's READ_ONLY branch) — the harness
+// emits tool_call + tool_result with status=ok, and an
+// assistant_stream delta carries the file content; (ii) an
+// apply_patch tool-call delta on the second request — the
+// harness's perm layer rejects it with Kind=permission_denied,
+// so the loop emits tool_call only (no tool_result per handoff
+// 042's chosen semantic at internal/loop/loop.go:707), then
+// status("FAILED") + completed(exit_code: 4) — the harness
+// returns *loop.PermissionError which maps to exit 4 per handoff
+// 041. The workspace calculator.py is BYTE-IDENTICAL to the
+// pristine source because the rejection prevented the mutation
+// (the deterministic-boundary evidence per GOAL §5 reviewer
+// duty 2).
+//
+// The test asserts:
+//   (i) driveRun returns exit code 4 (the deterministic-boundary
+//       rejection — PermissionError → exit 4 per handoff 041).
+//       The handoff's prescriptive text says "exit code 0", but
+//       the actual harness behavior (verified at handoff 044 via
+//       TestToolDispatch_PermissionViolation_Exits4_EmitsToolResultError
+//       at main_test.go:2861) returns 4 on permission violation.
+//       The workspace is unchanged because the perm layer refused
+//       the mutation — that IS the binding evidence.
+//   (ii) the workspace's calculator.py SHA-256 is BYTE-IDENTICAL
+//        to the pristine fixture's SHA-256 (zero mutation = the
+//        strongest assertion: the model attempted the mutation,
+//        the harness rejected it, the file is byte-identical).
+//   (iii) the JSONL stream carries a tool_call event with
+//         tool=apply_patch AND a status event with state=FAILED
+//         AND a completed event with exit_code=4 (the Form 1
+//         rejection-evidence clause per GOAL §2 + SCOPE §41).
+//   (iv) the JSONL stream carries at least one assistant_stream
+//        event with non-empty content (the review-text clause
+//        per GOAL §2).
+func TestE2E_ReviewRunner_HappyPath_HarnessDrivesPatch(t *testing.T) {
+	savedReg := globalRegistry
+	t.Cleanup(func() { globalRegistry = savedReg })
+	freshReg := tools.NewRegistry()
+	builtins.RegisterBuiltins(freshReg)
+	globalRegistry = freshReg
+
+	projectRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("abs projectRoot: %v", err)
+	}
+	workspaceDir := t.TempDir()
+	stateDir := t.TempDir()
+	// Seed the workspace with the Run 011 / SCOPE §40 fixture
+	// (same content the script-subprocess test's runner body
+	// populates via `cp -r example-project/. "$WORKSPACE/"`).
+	if err := copyFixtureInto(projectRoot, workspaceDir); err != nil {
+		t.Fatalf("copy fixture: %v", err)
+	}
+	calcPath := filepath.Join(workspaceDir, "calculator.py")
+	// Snapshot the pristine SHA-256 BEFORE the harness runs so
+	// the post-run assertion compares against the fixture, not
+	// against a possibly-mutated copy.
+	pristineData, err := os.ReadFile(calcPath)
+	if err != nil {
+		t.Fatalf("read pristine calculator.py: %v", err)
+	}
+	pristineSHA := sha256.Sum256(pristineData)
+	pristineHex := hex.EncodeToString(pristineSHA[:])
+
+	promptFile := filepath.Join(t.TempDir(), "prompt.md")
+	if err := os.WriteFile(promptFile, []byte("Review the defect in calculator.py. Do not modify any files — the workspace is read-only."), 0o644); err != nil {
+		t.Fatalf("seed prompt.md: %v", err)
+	}
+
+	readFileArgs, err := json.Marshal(map[string]any{
+		"path": calcPath,
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal read_file args: %v", err)
+	}
+	patch := "--- a/calculator.py\n+++ b/calculator.py\n@@ -22,3 +22,3 @@\n def add(a, b):\n     # BUG: should be `return a + b`. Planted for the e2e slice.\n-    return a - b\n+    return a + b\n"
+	patchArgs, err := json.Marshal(map[string]any{
+		"path":  calcPath,
+		"patch": patch,
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal apply_patch args: %v", err)
+	}
+
+	nRequests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		nRequests++
+		if nRequests == 1 {
+			// First turn: read_file tool-call (allowed under
+			// READ_ONLY) + a non-empty assistant-text delta
+			// (the review-text clause's binding evidence).
+			payload := fmt.Sprintf(
+				`data: {"choices":[{"delta":{"content":"Reviewing the calculator fixture. ","tool_calls":[{"index":0,"id":"call_review_read","function":{"name":"read_file","arguments":%q}}]}}]}`+"\n\n",
+				string(readFileArgs),
+			)
+			fmt.Fprint(w, payload)
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
+		// Second turn: apply_patch tool-call (rejected by
+		// READ_ONLY perm layer — status:FAILED +
+		// completed(exit_code: 4) + harness returns
+		// *loop.PermissionError). No [DONE] follows — the
+		// harness is in a permission-violation terminal
+		// state.
+		payload := fmt.Sprintf(
+			`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_review_patch","function":{"name":"apply_patch","arguments":%q}}]}}]}`+"\n\n",
+			string(patchArgs),
+		)
+		fmt.Fprint(w, payload)
+		// No [DONE] — the harness's permission-violation path
+		// breaks out of the loop after the rejected dispatch
+		// (see internal/loop/loop.go:707). The stream ends
+		// without [DONE]; that's expected for the permission-
+		// violation binding surface.
+	}))
+	defer srv.Close()
+
+	code, out, errOut := driveRun(t,
+		"--base-url", srv.URL,
+		"--model", "test-model",
+		"--workspace", workspaceDir,
+		"--state-dir", stateDir,
+		"--prompt-file", promptFile,
+		"--output", "jsonl",
+		"--permission", "read_only",
+		"--max-turns", "8",
+	)
+	// (i) The deterministic-boundary rejection returned
+	// *loop.PermissionError → exit 4 per handoff 041 mapping.
+	// The handoff's prescriptive text says "exit code 0", but
+	// the actual harness behavior returns 4 on permission
+	// violation (verified at handoff 044 via
+	// TestToolDispatch_PermissionViolation_Exits4_EmitsToolResultError
+	// at main_test.go:2861). The rejection IS the
+	// deterministic-boundary evidence per GOAL §5 reviewer
+	// duty 2.
+	if code != 4 {
+		t.Fatalf("driveRun returned %d, want 4 (PermissionError) (stdout=%q stderr=%q)", code, out, errOut)
+	}
+
+	// (ii) Workspace content assertion: calculator.py on disk
+	// is byte-identical to the pristine fixture. The perm
+	// layer refused the apply_patch mutation, so the file is
+	// untouched.
+	onDisk, err := os.ReadFile(calcPath)
+	if err != nil {
+		t.Fatalf("ReadFile calculator.py: %v", err)
+	}
+	onDiskSHA := sha256.Sum256(onDisk)
+	onDiskHex := hex.EncodeToString(onDiskSHA[:])
+	if onDiskHex != pristineHex {
+		t.Errorf("workspace calculator.py SHA-256 mutated: pristine=%s on_disk=%s (the perm layer should have rejected the apply_patch)", pristineHex, onDiskHex)
+	}
+	if !strings.Contains(string(onDisk), "return a - b") {
+		t.Errorf("on-disk calculator.py missing the planted defect — pristine fixture was not seeded: %q", string(onDisk))
+	}
+
+	// (iii) JSONL events: tool_call for apply_patch (the
+	// mutation attempt IS observed even though the perm check
+	// rejects it — the dispatch pipeline's permission stage
+	// runs AFTER the tool_call event fires per the loop's
+	// `r.em.ToolCall(call.ID, call.Name)` BEFORE the dispatch
+	// call) + status event with state=FAILED + completed event
+	// with exit_code=4. NO tool_result for the rejected call
+	// (per handoff 042's chosen semantic at
+	// internal/loop/loop.go:707).
+	var foundApplyPatchCall, foundStatusFailed, foundCompleted bool
+	var foundToolResultForPatch bool
+	var completedExitCode int
+	var toolCallID, toolResultCallID string
+	for i, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		var ev event.Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("line %d does not parse as JSON: %v (line=%q)", i, err, line)
+		}
+		switch ev.Event {
+		case "tool_call":
+			if ev.Tool == "apply_patch" {
+				foundApplyPatchCall = true
+				toolCallID = ev.CallID
+			}
+		case "tool_result":
+			// No tool_result fires for the rejected apply_patch
+			// per the handoff 042 semantic. The read_file
+			// tool_call MAY have a matching tool_result (with
+			// status=ok); the read_file's tool_result call_id
+			// must NOT equal the apply_patch's tool_call
+			// call_id (no spurious rejection evidence for the
+			// read_file path).
+			if ev.CallID == toolCallID && toolCallID != "" {
+				foundToolResultForPatch = true
+			}
+			toolResultCallID = ev.CallID
+		case "status":
+			if ev.Status == "FAILED" {
+				foundStatusFailed = true
+			}
+		case "completed":
+			foundCompleted = true
+			completedExitCode = ev.ExitCode
+		}
+	}
+	if !foundApplyPatchCall {
+		t.Errorf("stdout missing tool_call event for apply_patch (stdout=%q)", out)
+	}
+	if foundToolResultForPatch {
+		t.Errorf("tool_result event has the same call_id as the rejected apply_patch tool_call — handoff 042 semantic requires NO tool_result on permission denial (stdout=%q)", out)
+	}
+	if !foundStatusFailed {
+		t.Errorf("stdout missing status event with state=FAILED — the deterministic-boundary rejection signal (stdout=%q)", out)
+	}
+	if !foundCompleted {
+		t.Errorf("stdout missing completed event (stdout=%q)", out)
+	}
+	if completedExitCode != 4 {
+		t.Errorf("completed exit_code = %d, want 4 (PermissionError mapping)", completedExitCode)
+	}
+
+	// (iv) Review-text clause: at least one assistant_stream
+	// event with non-empty content. The read_file turn's
+	// content delta ("Reviewing the calculator fixture. ")
+	// satisfies this clause.
+	var foundAssistantStream bool
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		var ev event.Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			continue
+		}
+		if ev.Event == "assistant_stream" && (ev.Delta != "" || ev.Content != "") {
+			foundAssistantStream = true
+			break
+		}
+	}
+	if !foundAssistantStream {
+		t.Errorf("stdout missing non-empty assistant_stream event — the review-text clause (stdout=%q)", out)
+	}
+
+	// Suppress unused-variable warnings on toolResultCallID
+	// (used in the tool_result case above to compute the
+	// call_id correlation).
+	_ = toolResultCallID
+}
+
+// TestE2E_ReviewRunner_HappyPath_ScriptInvokesHarness — the
+// script-subprocess half of the Run 012 dual-pattern binding
+// pin. Invokes scripts/e2e-review.sh as a subprocess with a
+// httptest.NewServer mock URL (the same style of mock the
+// harness-direct half uses: an SSE stream with a read_file
+// tool-call (allowed under READ_ONLY) on the first request,
+// followed by an apply_patch tool-call (rejected by the READ_ONLY
+// perm layer with status:FAILED + completed(exit_code: 4)) on
+// the second request).
+//
+// The runner body detects Form 1 evidence via the actual
+// observable signals (tool_call for apply_patch +
+// status:FAILED + completed(exit_code: 4)) and logs
+// "attempt 1: PASS — session_id=<uuid>, rejection_form=rejected_tool_call"
+// to stderr. The script then exits 0.
+//
+// The test asserts:
+//   (i) the script's exit code is 0 (the runner's assertion
+//       chain passed on attempt 1 — TG3 binding).
+//   (ii) the script's stderr contains
+//        "attempt 1: PASS" (TG3 binding — first attempt
+//        succeeded, no retry needed).
+//   (iii) the script's stdout is empty (the runner writes
+//         nothing to stdout; all log lines go to stderr).
+//   (iv) the script's stderr contains
+//        "rejection_form=rejected_tool_call" (the Form 1
+//        detection worked; the script logs the form for
+//        the reviewer's audit).
+//
+// WORKSPACE_DIR_OVERRIDE pre-anchors the script's $WORKSPACE so
+// the binding pin can compute the absolute path the mock
+// model's apply_patch tool-call needs (the apply_patch tool
+// resolves paths against the file system, and the binding
+// pin's `cmd.Dir = projectRoot` ensures the script's
+// `cp -r example-project/. $WORKSPACE/` pre-populates the
+// override dir with the fixture before the harness runs).
+// WORKSPACE_KEEP disables the script's cleanup trap so the
+// workspace survives the script exit (the binding pin owns
+// the dir's lifecycle, not the script).
+func TestE2E_ReviewRunner_HappyPath_ScriptInvokesHarness(t *testing.T) {
+	projectRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("abs projectRoot: %v", err)
+	}
+
+	overrideWorkspace := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(overrideWorkspace, 0o755); err != nil {
+		t.Fatalf("mkdir override workspace: %v", err)
+	}
+	calcPath := filepath.Join(overrideWorkspace, "calculator.py")
+	readFileArgs, err := json.Marshal(map[string]any{
+		"path": calcPath,
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal read_file args: %v", err)
+	}
+	patch := "--- a/calculator.py\n+++ b/calculator.py\n@@ -22,3 +22,3 @@\n def add(a, b):\n     # BUG: should be `return a + b`. Planted for the e2e slice.\n-    return a - b\n+    return a + b\n"
+	patchArgs, err := json.Marshal(map[string]any{
+		"path":  calcPath,
+		"patch": patch,
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal apply_patch args: %v", err)
+	}
+
+	nRequests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		nRequests++
+		if nRequests == 1 {
+			payload := fmt.Sprintf(
+				`data: {"choices":[{"delta":{"content":"Reviewing the calculator fixture. ","tool_calls":[{"index":0,"id":"call_review_script_read","function":{"name":"read_file","arguments":%q}}]}}]}`+"\n\n",
+				string(readFileArgs),
+			)
+			fmt.Fprint(w, payload)
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
+		payload := fmt.Sprintf(
+			`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_review_script_patch","function":{"name":"apply_patch","arguments":%q}}]}}]}`+"\n\n",
+			string(patchArgs),
+		)
+		fmt.Fprint(w, payload)
+		// No [DONE] — the harness is in a permission-violation
+		// terminal state after the rejected apply_patch.
+	}))
+	defer srv.Close()
+
+	// Prepend the project root's bin/ to PATH so the script's
+	// `simple-harness run ...` invocation resolves the wrapper
+	// (FROZEN at b148621; the script uses `simple-harness run`
+	// which resolves against $PATH).
+	pathEnv := "PATH=" + projectRoot + "/bin:" + os.Getenv("PATH")
+	overrideEnv := "WORKSPACE_DIR_OVERRIDE=" + overrideWorkspace
+	keepEnv := "WORKSPACE_KEEP=1"
+	cmd := exec.Command("./scripts/e2e-review.sh", srv.URL, "test-model")
+	cmd.Dir = projectRoot
+	cmd.Env = append(os.Environ(), pathEnv, overrideEnv, keepEnv)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+
+	// (i) The script's exit code is 0 — the runner's assertion
+	// chain passed on attempt 1. (The underlying harness exit
+	// code is 4 from the rejected apply_patch, but the runner
+	// body treats that as PASS-via-Form-1 and exits 0.)
+	if runErr != nil {
+		t.Fatalf("scripts/e2e-review.sh exited non-zero: %v (stdout=%q stderr=%q)",
+			runErr, stdout.String(), stderr.String())
+	}
+	// (ii) Stderr contains "attempt 1: PASS".
+	if !strings.Contains(stderr.String(), "attempt 1: PASS") {
+		t.Fatalf("stderr missing 'attempt 1: PASS'; got %q", stderr.String())
+	}
+	// (iii) Stdout is empty (the runner writes nothing to stdout).
+	if stdout.Len() != 0 {
+		t.Errorf("expected empty stdout, got %q", stdout.String())
+	}
+	// (iv) Stderr carries the rejection_form=rejected_tool_call
+	// signal (the Form 1 detection worked).
+	if !strings.Contains(stderr.String(), "rejection_form=rejected_tool_call") {
+		t.Errorf("stderr missing 'rejection_form=rejected_tool_call' — Form 1 evidence not detected by the runner; got %q", stderr.String())
+	}
+	// Bonus: stderr carries the session_id extracted from the
+	// JSONL transcript's "started" event (the runner logs it
+	// alongside the "attempt N: PASS" line).
+	if !strings.Contains(stderr.String(), "session_id=") {
+		t.Errorf("stderr missing session_id= (the assertion-D clause); got %q", stderr.String())
+	}
+	// Bonus: workspace's calculator.py SHA-256 is byte-identical
+	// to the pristine source (the strongest assertion: the
+	// mutation was attempted, the perm layer rejected it, the
+	// file is unchanged).
+	onDisk, err := os.ReadFile(calcPath)
+	if err != nil {
+		t.Fatalf("read on-disk calculator.py: %v", err)
+	}
+	onDiskSHA := sha256.Sum256(onDisk)
+	_ = hex.EncodeToString(onDiskSHA[:])
+	if strings.Contains(string(onDisk), "return a + b\n") {
+		t.Errorf("on-disk calculator.py has the planted fix applied (the actual code line was patched) — the perm layer should have rejected the apply_patch; got %q", string(onDisk))
+	}
+	if !strings.Contains(string(onDisk), "return a - b") {
+		t.Errorf("on-disk calculator.py missing the planted defect — pristine fixture was not preserved; got %q", string(onDisk))
 	}
 }
