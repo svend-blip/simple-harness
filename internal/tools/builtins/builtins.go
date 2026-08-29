@@ -6,7 +6,13 @@
 // adds the first mutation tool (write_file) via the same
 // RegisterBuiltins registrar; handoff 018 adds the second mutation
 // tool (apply_patch); handoff 020 adds the third mutation tool
-// (shell) with process-group ownership per SCOPE §27.
+// (shell) with process-group ownership per SCOPE §27; handoff 021
+// extends shell with the SCOPE §11 advanced-behavior contract:
+// timeout (timeout_ms argument, SIGTERM to process group),
+// cancellation (ctx.Done), bounded SIGKILL escalation after a 2s
+// grace if the child ignores SIGTERM, per-stream output-size cap
+// (max_output_bytes argument) with explicit in-stream truncation
+// marker, and the SCOPE §27 orphan-survival proof.
 //
 // The package is a thin layer over internal/tools: each builtin
 // implements the tools.Tool interface (Meta, Schema, Execute) and is

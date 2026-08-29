@@ -969,3 +969,81 @@ func TestIntegration_PermissionDenial_SHELL_READ_ONLY(t *testing.T) {
 	// observable proof, but the test asserts the structured
 	// Kind which is the binding evidence.)
 }
+// TestIntegration_PermissionDenial_SHELL_WORKSPACE_WRITE_Allowed:
+// a WORKSPACE_WRITE shell call reaches Execute (the policy stage
+// permits shell under WORKSPACE_WRITE because the call does not
+// trigger the looksLikePathish escape heuristic — `echo` is not a
+// path-shaped argument). Result.Status is "ok" with
+// ShellResult.ExitCode=0, Stdout="hello-workspace\n",
+// TerminationReason="".
+//
+// This pins SCOPE §12's WORKSPACE_WRITE "permits running normal
+// development/test commands" contract for shell — the positive
+// control for the handoff-020
+// TestIntegration_PermissionDenial_SHELL_READ_ONLY negative.
+func TestIntegration_PermissionDenial_SHELL_WORKSPACE_WRITE_Allowed(t *testing.T) {
+	ws := tempWorkspace(t)
+	chdirWorkspace(t, ws)
+
+	r := tools.NewRegistry()
+	RegisterBuiltins(r)
+
+	call := tools.Call{
+		Name:      "shell",
+		Arguments: map[string]any{"command": "echo hello-workspace"},
+	}
+	res := r.Dispatch(context.Background(), call, ws, perm.NewPolicy(perm.WORKSPACE_WRITE), perm.Authorize)
+	if res.Status != "ok" {
+		t.Fatalf("Status = %q, want %q (error=%+v)", res.Status, "ok", res.Error)
+	}
+	sr, ok := res.Content.(ShellResult)
+	if !ok {
+		t.Fatalf("Content type = %T, want ShellResult", res.Content)
+	}
+	if sr.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0", sr.ExitCode)
+	}
+	if sr.Stdout != "hello-workspace\n" {
+		t.Fatalf("Stdout = %q, want %q", sr.Stdout, "hello-workspace\n")
+	}
+	if sr.TerminationReason != "" {
+		t.Fatalf("TerminationReason = %q, want empty (the command completed normally)",
+			sr.TerminationReason)
+	}
+}
+
+// TestIntegration_PermissionDenial_SHELL_FULL_ACCESS_Allowed: the
+// FULL_ACCESS positive control for shell. Same shape as the
+// WORKSPACE_WRITE variant, with FULL_ACCESS — the policy stage
+// permits shell under FULL_ACCESS regardless of the in-workspace
+// restriction (FULL_ACCESS is the explicit opt-in per SCOPE §12).
+func TestIntegration_PermissionDenial_SHELL_FULL_ACCESS_Allowed(t *testing.T) {
+	ws := tempWorkspace(t)
+	chdirWorkspace(t, ws)
+
+	r := tools.NewRegistry()
+	RegisterBuiltins(r)
+
+	call := tools.Call{
+		Name:      "shell",
+		Arguments: map[string]any{"command": "echo hello-full-access"},
+	}
+	res := r.Dispatch(context.Background(), call, ws, perm.NewPolicy(perm.FULL_ACCESS), perm.Authorize)
+	if res.Status != "ok" {
+		t.Fatalf("Status = %q, want %q (error=%+v)", res.Status, "ok", res.Error)
+	}
+	sr, ok := res.Content.(ShellResult)
+	if !ok {
+		t.Fatalf("Content type = %T, want ShellResult", res.Content)
+	}
+	if sr.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0", sr.ExitCode)
+	}
+	if sr.Stdout != "hello-full-access\n" {
+		t.Fatalf("Stdout = %q, want %q", sr.Stdout, "hello-full-access\n")
+	}
+	if sr.TerminationReason != "" {
+		t.Fatalf("TerminationReason = %q, want empty (the command completed normally)",
+			sr.TerminationReason)
+	}
+}
