@@ -1046,7 +1046,7 @@ func TestRun_Version(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 017, handoff 043)"
+	want := "simple-harness 0.1.0-dev (Run 018, handoff 044)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}
@@ -1364,7 +1364,7 @@ func TestRun_Version_AdvancesToHandoff024(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 017, handoff 043)"
+	want := "simple-harness 0.1.0-dev (Run 018, handoff 044)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}
@@ -2073,7 +2073,7 @@ func TestRun_Version_AdvancesToHandoff030(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 017, handoff 043)"
+	want := "simple-harness 0.1.0-dev (Run 018, handoff 044)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}
@@ -2948,5 +2948,290 @@ func TestToolDispatch_PermissionViolation_Exits4_EmitsToolResultError(t *testing
 	}
 	if completedExitCode != 4 {
 		t.Errorf("completed exit_code = %d, want 4 (PermissionError mapping)", completedExitCode)
+	}
+}
+
+// --- Run 018 / handoff 044: GOAL §2 deliverable 2 binding pins ---
+
+// copyFixtureInto copies example-project/ from projectRoot into
+// targetDir using the stdlib only (no subprocess, no shell — keeps
+// the binding pin hermetic against the project's stdlib-only fence
+// per the GOAL §3 frozen-files list). Used by the
+// TestE2E_AcceptanceRunner_HappyPath_* binding pins to seed the
+// harness's workspace with the Run 011 / SCOPE §40 fixture so
+// the patch payload targets a known line-offset against the same
+// content the script-subprocess test's runner body populates.
+func copyFixtureInto(projectRoot, targetDir string) error {
+	src := filepath.Join(projectRoot, "example-project")
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return fmt.Errorf("read fixture dir: %w", err)
+	}
+	for _, e := range entries {
+		srcPath := filepath.Join(src, e.Name())
+		dstPath := filepath.Join(targetDir, e.Name())
+		data, err := os.ReadFile(srcPath)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", srcPath, err)
+		}
+		if err := os.WriteFile(dstPath, data, 0o644); err != nil {
+			return fmt.Errorf("write %s: %w", dstPath, err)
+		}
+	}
+	return nil
+}
+
+// TestE2E_AcceptanceRunner_HappyPath_HarnessDrivesPatch — the
+// harness-direct half of the dual-pattern. Drives the harness
+// via driveRun with a httptest.NewServer mock model that
+// returns an SSE stream with a tool-call delta for apply_patch
+// whose arguments fix the Run 011 calculator fixture's defect
+// (replace "return a - b" with "return a + b"), then a final
+// non-empty assistant-text delta on the second request. The
+// test asserts:
+//   (i) the workspace's calculator.py was patched on disk
+//       (content-based assertion — "return a + b" present).
+//   (ii) python3 -m pytest against the workspace exits 0
+//        (the planted defect is fixed).
+//   (iii) the JSONL stream carries tool_call + tool_result
+//         events with matching call_ids (Run 017 / handoff
+//         041's additive event types).
+//   (iv) the JSONL stream carries a completed event with
+//        exit_code 0.
+func TestE2E_AcceptanceRunner_HappyPath_HarnessDrivesPatch(t *testing.T) {
+	savedReg := globalRegistry
+	t.Cleanup(func() { globalRegistry = savedReg })
+	freshReg := tools.NewRegistry()
+	builtins.RegisterBuiltins(freshReg)
+	globalRegistry = freshReg
+
+	projectRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("abs projectRoot: %v", err)
+	}
+	workspaceDir := t.TempDir()
+	stateDir := t.TempDir()
+	// Seed the workspace with the Run 011 / SCOPE §40 fixture
+	// (same content the script-subprocess test's runner body
+	// populates via `cp -r example-project/. "$WORKSPACE/"`).
+	// The patch below targets the exact line numbers in this
+	// fixture (calculator.py is 24 logical lines; the hunk header
+	// @@ -22,3 +22,3 @@ anchors at the def-line).
+	if err := copyFixtureInto(projectRoot, workspaceDir); err != nil {
+		t.Fatalf("copy fixture: %v", err)
+	}
+	calcPath := filepath.Join(workspaceDir, "calculator.py")
+	promptFile := filepath.Join(t.TempDir(), "prompt.md")
+	if err := os.WriteFile(promptFile, []byte("Find and fix the defect. Run the tests afterward."), 0o644); err != nil {
+		t.Fatalf("seed prompt.md: %v", err)
+	}
+
+	patch := "--- a/calculator.py\n+++ b/calculator.py\n@@ -22,3 +22,3 @@\n def add(a, b):\n     # BUG: should be `return a + b`. Planted for the e2e slice.\n-    return a - b\n+    return a + b\n"
+	argsJSON, err := json.Marshal(map[string]any{
+		"path":  calcPath,
+		"patch": patch,
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal args: %v", err)
+	}
+
+	nRequests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		nRequests++
+		if nRequests == 1 {
+			payload := fmt.Sprintf(
+				`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_happy_1","function":{"name":"apply_patch","arguments":%q}}]}}]}`+"\n\n",
+				string(argsJSON),
+			)
+			fmt.Fprint(w, payload)
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"Defect fixed."}}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	code, out, errOut := driveRun(t,
+		"--base-url", srv.URL,
+		"--model", "test-model",
+		"--workspace", workspaceDir,
+		"--state-dir", stateDir,
+		"--prompt-file", promptFile,
+		"--output", "jsonl",
+		"--permission", "workspace_write",
+		"--max-turns", "8",
+	)
+	if code != 0 {
+		t.Fatalf("driveRun returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
+	}
+
+	// (i) Workspace content assertion: calculator.py on disk
+	// now contains "return a + b" (the planted defect is fixed).
+	onDisk, err := os.ReadFile(calcPath)
+	if err != nil {
+		t.Fatalf("ReadFile calculator.py: %v", err)
+	}
+	if !strings.Contains(string(onDisk), "return a + b") {
+		t.Errorf("on-disk calculator.py missing fix: %q", string(onDisk))
+	}
+	if strings.Contains(string(onDisk), "return a - b") {
+		t.Errorf("on-disk calculator.py still has the planted defect: %q", string(onDisk))
+	}
+
+	// (ii) Pytest post-patch assertion: the test_calculator.py
+	// that ships with the fixture passes against the patched
+	// calculator.py.
+	pytestCmd := exec.Command("python3", "-m", "pytest", workspaceDir, "-q")
+	pytestOut, pytestErr := pytestCmd.CombinedOutput()
+	if pytestCmd.ProcessState.ExitCode() != 0 {
+		t.Fatalf("pytest on workspace failed: exit=%d stdout=%s stderr=%s",
+			pytestCmd.ProcessState.ExitCode(), string(pytestOut), pytestErr)
+	}
+
+	// (iii) JSONL events: tool_call + tool_result with matching
+	// call_ids, and (iv) completed(exit_code: 0).
+	var toolCallEvent, toolResultEvent *event.Event
+	var foundCompleted bool
+	var completedExitCode int
+	for i, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		var ev event.Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("line %d does not parse as JSON: %v (line=%q)", i, err, line)
+		}
+		switch ev.Event {
+		case "tool_call":
+			if toolCallEvent == nil {
+				cp := ev
+				toolCallEvent = &cp
+			}
+		case "tool_result":
+			if toolResultEvent == nil {
+				cp := ev
+				toolResultEvent = &cp
+			}
+		case "completed":
+			foundCompleted = true
+			completedExitCode = ev.ExitCode
+		}
+	}
+	if toolCallEvent == nil {
+		t.Fatalf("stdout missing tool_call event (stdout=%q)", out)
+	}
+	if toolResultEvent == nil {
+		t.Fatalf("stdout missing tool_result event (stdout=%q)", out)
+	}
+	if toolResultEvent.CallID != toolCallEvent.CallID {
+		t.Errorf("tool_result call_id = %q, tool_call call_id = %q — must match for correlation",
+			toolResultEvent.CallID, toolCallEvent.CallID)
+	}
+	if !foundCompleted {
+		t.Errorf("stdout missing completed event (stdout=%q)", out)
+	}
+	if completedExitCode != 0 {
+		t.Errorf("completed exit_code = %d, want 0", completedExitCode)
+	}
+}
+
+// TestE2E_AcceptanceRunner_HappyPath_ScriptInvokesHarness — the
+// script-subprocess half of the dual-pattern. Invokes
+// scripts/e2e-coding.sh as a subprocess with a httptest.NewServer
+// mock URL (the same mock model that the harness-direct half uses:
+// a streaming SSE response with a tool-call applying the calculator
+// defect fix on the first request, then a final assistant-text
+// delta on the second request). The test asserts:
+//   (i) the script's exit code is 0 (TG3 binding — the
+//       runner's assertion chain succeeded against the mock
+//       model on the first attempt).
+//   (ii) the script's stderr contains "attempt 1: PASS" (TG3
+//        binding — first attempt succeeded, no retry needed).
+//   (iii) the script's stdout is empty (the runner writes
+//         nothing to stdout; all log lines go to stderr).
+//   (iv) the script's stderr carries the session_id extracted
+//        from the JSONL transcript's "started" event.
+//
+// The test pre-anchors the script's $WORKSPACE via the
+// WORKSPACE_DIR_OVERRIDE env var (the binding-pin seam exposed
+// by the runner body at scripts/e2e-coding.sh:42) so the binding
+// pin can compute the absolute path the mock model's tool-call
+// needs to patch (the apply_patch tool resolves paths against
+// the OS CWD, not against the harness's --workspace flag, so
+// the binding pin must hand the mock an absolute path that
+// exists when the script's `cp -r example-project/. $WORKSPACE/`
+// pre-populates it).
+func TestE2E_AcceptanceRunner_HappyPath_ScriptInvokesHarness(t *testing.T) {
+	projectRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("abs projectRoot: %v", err)
+	}
+
+	overrideWorkspace := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(overrideWorkspace, 0o755); err != nil {
+		t.Fatalf("mkdir override workspace: %v", err)
+	}
+	calcPath := filepath.Join(overrideWorkspace, "calculator.py")
+	argsJSON, err := json.Marshal(map[string]any{
+		"path": calcPath,
+		"patch": "--- a/calculator.py\n+++ b/calculator.py\n@@ -22,3 +22,3 @@\n def add(a, b):\n     # BUG: should be `return a + b`. Planted for the e2e slice.\n-    return a - b\n+    return a + b\n",
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal args: %v", err)
+	}
+
+	nRequests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		nRequests++
+		if nRequests == 1 {
+			payload := fmt.Sprintf(
+				`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_script_1","function":{"name":"apply_patch","arguments":%q}}]}}]}`+"\n\n",
+				string(argsJSON),
+			)
+			fmt.Fprint(w, payload)
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"Defect fixed."}}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	// Prepend the project root's bin/ to PATH so the script's
+	// `simple-harness run ...` invocation resolves the wrapper.
+	// The wrapper is FROZEN at b148621; the script uses
+	// `simple-harness run` which resolves against $PATH.
+	pathEnv := "PATH=" + projectRoot + "/bin:" + os.Getenv("PATH")
+	overrideEnv := "WORKSPACE_DIR_OVERRIDE=" + overrideWorkspace
+	cmd := exec.Command("./scripts/e2e-coding.sh", srv.URL, "test-model")
+	cmd.Dir = projectRoot
+	cmd.Env = append(os.Environ(), pathEnv, overrideEnv)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+
+	// (i) Exit code is 0 — the runner's assertion chain passed
+	// on attempt 1.
+	if runErr != nil {
+		t.Fatalf("scripts/e2e-coding.sh exited non-zero: %v (stdout=%q stderr=%q)",
+			runErr, stdout.String(), stderr.String())
+	}
+	// (ii) Stderr contains "attempt 1: PASS".
+	if !strings.Contains(stderr.String(), "attempt 1: PASS") {
+		t.Fatalf("stderr missing 'attempt 1: PASS'; got %q", stderr.String())
+	}
+	// (iii) Stdout is empty (the runner writes nothing to stdout).
+	if stdout.Len() != 0 {
+		t.Errorf("expected empty stdout, got %q", stdout.String())
+	}
+	// (iv) Stderr carries the session_id extracted from the
+	// JSONL transcript's "started" event (the runner logs it
+	// alongside the "attempt N: PASS" line).
+	if !strings.Contains(stderr.String(), "session_id=") {
+		t.Errorf("stderr missing session_id= (the assertion-D clause); got %q", stderr.String())
 	}
 }
