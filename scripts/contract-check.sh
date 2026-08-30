@@ -30,7 +30,7 @@
 set -euo pipefail
 
 # --- Configuration (overridable via env vars for CI) ----------------
-: "${SIMPLE_HARNESS_BIN:=/home/svend/simple-harness/bin/simple-harness}"
+: "${SIMPLE_HARNESS_BIN:=$(cd "$(dirname "$0")/.." && pwd)/bin/simple-harness}"
 : "${CONTRACT_CHECK_STATE_DIR:=/tmp/simple-harness-contract-check-$$-$(date +%s)}"
 : "${CONTRACT_CHECK_ENDPOINT:=http://127.0.0.1:1/v1}"   # TCP-refused synthetic URL
 : "${CONTRACT_CHECK_MODEL:=kimi-k3:cloud}"               # config-valid; never contacted under TCP-refused
