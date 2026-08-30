@@ -274,11 +274,14 @@ func run(args []string) int {
 		return runRun(args[1:])
 	}
 
-	// No args: enter interactive mode (deliverable 4). The REPL
-	// prints the banner, reads from stdin, exits 0 on EOF.
-	if len(args) == 0 {
-		return runInteractive(os.Stdin, os.Stdout, os.Stderr)
-	}
+	// No args: enter interactive mode (deliverable 4) — by falling through
+	// to the flag path below with an empty argument list. An early
+	// `runInteractive(os.Stdin, os.Stdout, os.Stderr)` return used to live
+	// here, which skipped every default the flag path resolves: a bare
+	// `simple-harness` died with "state-dir must not be empty" while the
+	// --help text promised ~/.simple-harness/sessions (measured 2026-08-30
+	// launching the 9000 test-flow roles). One entry path, one default
+	// resolution.
 
 	fs := flag.NewFlagSet("simple-harness", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
