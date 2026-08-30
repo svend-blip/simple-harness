@@ -12,20 +12,22 @@ import (
 	"github.com/svend-blip/simple-harness/internal/tools"
 )
 
-// TestRegisterBuiltins_RegistersAllSevenTools: a fresh registry +
-// RegisterBuiltins lists all seven V1 builtin tools (four read-only
-// + three mutation tools), sorted, before any pipeline integration.
-// This is the load-bearing assertion for full TG1 at the
-// registrar level. Handoff 017 added write_file; handoff 018 added
-// apply_patch; handoff 020 adds shell and lands partial TG1 (full
-// TG1 lands in handoff 021 when the advanced shell behavior
-// completes the slice).
-func TestRegisterBuiltins_RegistersAllSevenTools(t *testing.T) {
+// TestRegisterBuiltins_RegistersAllNineTools: a fresh registry +
+// RegisterBuiltins lists all nine V1 builtin tools (four read-only
+// + three mutation tools + two SCOPE §45 model-invoked skill tools),
+// sorted, before any pipeline integration. This is the load-bearing
+// assertion for full TG1 at the registrar level. Handoff 017 added
+// write_file; handoff 018 added apply_patch; handoff 020 adds
+// shell and lands partial TG1 (full TG1 lands in handoff 021 when
+// the advanced shell behavior completes the slice). Run 021 /
+// handoff 068 adds list_skills + load_skill (the SCOPE §45
+// model-invoked skill tools).
+func TestRegisterBuiltins_RegistersAllNineTools(t *testing.T) {
 	r := tools.NewRegistry()
 	RegisterBuiltins(r)
 
 	names := r.Names()
-	want := []string{"apply_patch", "grep", "list_directory", "read_file", "search_files", "shell", "write_file"}
+	want := []string{"apply_patch", "grep", "list_directory", "list_skills", "load_skill", "read_file", "search_files", "shell", "write_file"}
 	if len(names) != len(want) {
 		t.Fatalf("len(names) = %d, want %d (got %v)", len(names), len(want), names)
 	}

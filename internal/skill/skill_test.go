@@ -287,3 +287,134 @@ func TestLoad_SourceFieldReportsOrigin(t *testing.T) {
 		})
 	}
 }
+
+// --- Run 021 / handoff 068: Available accessor seam ---
+
+// TestAvailable_ReturnsAllSkills pins the SCOPE §45 binding: a
+// skill under each search root (workspace + global + SkillsDir
+// override) is enumerated with the correct Name + Source +
+// Description. Workspace + global + override each contribute at
+// least one skill with distinguishable content; all three appear
+// in the result.
+func TestAvailable_ReturnsAllSkills(t *testing.T) {
+	ws := t.TempDir()
+	home := t.TempDir()
+	overrideDir := t.TempDir()
+
+	writeSkillFixture(t, ws, "alpha", "# Alpha\n\nWS-ALPHA-CONTENT\n")
+	writeSkillFixture(t, home, "beta", "# Beta heading\nHOME-BETA-CONTENT\n")
+
+	// override: no .simple-harness prefix
+	overrideDirSkill := filepath.Join(overrideDir, "gamma")
+	if err := os.MkdirAll(overrideDirSkill, 0o755); err != nil {
+		t.Fatalf("mkdir override: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(overrideDirSkill, "SKILL.md"),
+		[]byte("# Gamma heading\n\nOVERRIDE-GAMMA-CONTENT\n"), 0o644); err != nil {
+		t.Fatalf("write override: %v", err)
+	}
+
+	// First: ws + home (no override).
+	got, err := Available(LoadOptions{WorkspaceDir: ws, HomeDir: home})
+	if err != nil {
+		t.Fatalf("Available returned error: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("Available returned %d skills, want 2 (got %+v)", len(got), got)
+	}
+
+	byName := make(map[string]Skill)
+	for _, s := range got {
+		byName[s.Name] = s
+	}
+	if s, ok := byName["alpha"]; !ok {
+		t.Errorf("Available missing alpha (got %+v)", byName)
+	} else {
+		if s.Source != "workspace" {
+			t.Errorf("alpha.Source = %q, want %q", s.Source, "workspace")
+		}
+		if !strings.Contains(s.Description, "Alpha") {
+			t.Errorf("alpha.Description = %q, want to contain %q", s.Description, "Alpha")
+		}
+	}
+	if s, ok := byName["beta"]; !ok {
+		t.Errorf("Available missing beta (got %+v)", byName)
+	} else {
+		if s.Source != "global" {
+			t.Errorf("beta.Source = %q, want %q", s.Source, "global")
+		}
+		if !strings.Contains(s.Description, "Beta") {
+			t.Errorf("beta.Description = %q, want to contain %q", s.Description, "Beta")
+		}
+	}
+
+	// Second: with override (REPLACES both roots).
+	got2, err := Available(LoadOptions{SkillsDir: overrideDir})
+	if err != nil {
+		t.Fatalf("Available (override) returned error: %v", err)
+	}
+	if len(got2) != 1 {
+		t.Fatalf("Available (override) returned %d skills, want 1 (got %+v)", len(got2), got2)
+	}
+	if got2[0].Name != "gamma" {
+		t.Errorf("override[0].Name = %q, want %q", got2[0].Name, "gamma")
+	}
+	if got2[0].Source != "override" {
+		t.Errorf("override[0].Source = %q, want %q", got2[0].Source, "override")
+	}
+}
+
+// TestAvailable_WorkspaceWinsCollision pins the SCOPE §15
+// workspace-wins-on-collision rule AT THE ENUMERATION LEVEL (not
+// just the Load level): when the same skill name exists under both
+// workspace and global, Available returns the workspace's entry
+// only — the global's entry is shadowed (no duplication).
+func TestAvailable_WorkspaceWinsCollision(t *testing.T) {
+	ws := t.TempDir()
+	home := t.TempDir()
+	wsHeading := "WS-WINS-AVAILABLE-PIN-aaaa"
+	homeHeading := "HOME-LOSES-AVAILABLE-PIN-bbbb"
+	writeSkillFixture(t, ws, "cold-start", "# "+wsHeading+"\nWS-content\n")
+	writeSkillFixture(t, home, "cold-start", "# "+homeHeading+"\nHOME-content\n")
+
+	got, err := Available(LoadOptions{WorkspaceDir: ws, HomeDir: home})
+	if err != nil {
+		t.Fatalf("Available returned error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("Available returned %d skills, want 1 (collision must drop the global copy; got %+v)", len(got), got)
+	}
+	if got[0].Name != "cold-start" {
+		t.Errorf("Name = %q, want %q", got[0].Name, "cold-start")
+	}
+	if got[0].Source != "workspace" {
+		t.Errorf("Source = %q, want %q (workspace wins on collision per SCOPE §15)", got[0].Source, "workspace")
+	}
+	if !strings.Contains(got[0].Description, wsHeading) {
+		t.Errorf("Description missing workspace heading %q; got %q", wsHeading, got[0].Description)
+	}
+	if strings.Contains(got[0].Description, homeHeading) {
+		t.Errorf("Description contains global heading %q (workspace should win); got %q", homeHeading, got[0].Description)
+	}
+}
+
+// TestAvailable_EmptyWorkspace_ReturnsEmptyList pins the "no
+// skills is a valid state" semantics: a workspace + home that
+// contain no skills directory returns an empty (non-nil) slice
+// with a nil error. The Available call must not panic on missing
+// root directories.
+func TestAvailable_EmptyWorkspace_ReturnsEmptyList(t *testing.T) {
+	ws := t.TempDir()
+	home := t.TempDir()
+
+	got, err := Available(LoadOptions{WorkspaceDir: ws, HomeDir: home})
+	if err != nil {
+		t.Fatalf("Available returned error: %v", err)
+	}
+	if got == nil {
+		t.Errorf("Available returned nil slice, want empty non-nil slice")
+	}
+	if len(got) != 0 {
+		t.Errorf("Available returned %d skills, want 0 (got %+v)", len(got), got)
+	}
+}

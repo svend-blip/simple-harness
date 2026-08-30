@@ -778,8 +778,10 @@ func TestToolsSubcommand_ListsRegisteredTools(t *testing.T) {
 	}
 
 	// Expected output: one tool name per line, sorted.
-	// Handoff 018 added apply_patch (full TG1 lands).
-	expected := "apply_patch\ngrep\nlist_directory\nread_file\nsearch_files\nshell\nwrite_file\n"
+	// Handoff 018 added apply_patch; handoff 020 added shell;
+	// Run 021 / handoff 068 adds list_skills + load_skill
+	// (SCOPE §45 model-invoked skill tools).
+	expected := "apply_patch\ngrep\nlist_directory\nlist_skills\nload_skill\nread_file\nsearch_files\nshell\nwrite_file\n"
 	if got := string(out); got != expected {
 		t.Fatalf("simple-harness tools output = %q, want %q",
 			got, expected)
@@ -1049,7 +1051,7 @@ func TestRun_Version(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 020, handoff 067)"
+	want := "simple-harness 0.1.0-dev (Run 021, handoff 069)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}
@@ -1367,7 +1369,7 @@ func TestRun_Version_AdvancesToHandoff024(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 020, handoff 067)"
+	want := "simple-harness 0.1.0-dev (Run 021, handoff 069)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}
@@ -2076,7 +2078,7 @@ func TestRun_Version_AdvancesToHandoff030(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 020, handoff 067)"
+	want := "simple-harness 0.1.0-dev (Run 021, handoff 069)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}
@@ -4024,4 +4026,382 @@ func TestMCPLight_GetGovernanceIndex(t *testing.T) {
 	// "get_governance_index" (the bare form), which is the
 	// registry's collision-naming contract surface per
 	// HARNESS-CONTRACT.md §"Collision naming".
+}
+
+// --- handoff 068: Run 021 / V2-wave WORK 1 / SCOPE §45 in-process binding pins ---
+
+// TestSkillTool_LoadSkill_ColdStart_LoadsAndIsVisibleInContext
+// is the binding TG2 + TG3 reviewer-duty-§3 pin: the cold-start
+// reference skill demonstrably loads through the new
+// load_skill builtin AND is visible in the context ledger under
+// the `skill` category.
+//
+// The pin covers two surfaces:
+//
+//  1. The load_skill tool's full pipeline binding surface:
+//     a mock model emits `load_skill(name=cold-start)` as a
+//     tool_call; the harness's dispatcher routes it to the
+//     internal/tools/builtins LoadSkill implementation; the
+//     JSONL event stream carries a matching tool_call +
+//     tool_result pair (call_id correlation per SCOPE §21);
+//     the tool_result's tool_result_status is "ok" and the
+//     content carries the cold-start marker.
+//
+//  2. The visibility-in-context surface: the run-mode-startup
+//     `--skill cold-start` flag (cmd/simple-harness/run.go:349)
+//     reads the cold-start skill from the resolved search
+//     roots; the `simple-harness context show` headless
+//     surface (cmd/simple-harness/context.go) populates the
+//     per-Run ledger and renders the cold-start entry under
+//     the `skill` category. The wire-payload exercise is the
+//     `run(["context", "show", "--skill", "cold-start", ...])`
+//     invocation — the surface's contract is "inspect a
+//     composition without executing it" (GOAL §2 bound
+//     decision 1).
+//
+// Together the two assertions prove reviewer-duty §3: "The
+// cold-start skill demonstrably loads through the new tool."
+func TestSkillTool_LoadSkill_ColdStart_LoadsAndIsVisibleInContext(t *testing.T) {
+	savedReg := globalRegistry
+	t.Cleanup(func() { globalRegistry = savedReg })
+	freshReg := tools.NewRegistry()
+	builtins.RegisterBuiltins(freshReg)
+	globalRegistry = freshReg
+
+	workspaceDir := t.TempDir()
+	stateDir := t.TempDir()
+
+	// The load_skill tool's Execute resolves its workspace +
+	// HOME roots from os.Getwd + os.UserHomeDir at call time
+	// (the binding surface for this handoff; the cmd-side
+	// --workspace flag does NOT chdir the process). Chdir to
+	// the workspace so the tool's os.Getwd() returns
+	// workspaceDir.
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(workspaceDir); err != nil {
+		t.Fatalf("chdir ws: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+	t.Setenv("HOME", t.TempDir())
+
+	// Surface 1: full pipeline (mock model → loop → events →
+	// run mode). Place cold-start fixture at the workspace
+	// skills root.
+	coldStartMarker := "COLD-START-LOADSKILL-PIN-cc11"
+	coldStartDir := filepath.Join(workspaceDir, ".simple-harness", "skills", "cold-start")
+	if err := os.MkdirAll(coldStartDir, 0o755); err != nil {
+		t.Fatalf("mkdir cold-start: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(coldStartDir, "SKILL.md"),
+		[]byte(coldStartMarker+"\n"), 0o644); err != nil {
+		t.Fatalf("write cold-start SKILL.md: %v", err)
+	}
+
+	promptFile := filepath.Join(t.TempDir(), "prompt.md")
+	if err := os.WriteFile(promptFile, []byte("load the cold-start skill"), 0o644); err != nil {
+		t.Fatalf("write prompt.md: %v", err)
+	}
+
+	argsJSON, err := json.Marshal(map[string]any{"name": "cold-start"})
+	if err != nil {
+		t.Fatalf("marshal args: %v", err)
+	}
+
+	nRequests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		nRequests++
+		if nRequests == 1 {
+			payload := fmt.Sprintf(
+				`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_loadskill_1","function":{"name":"load_skill","arguments":%q}}]}}]}`+"\n\n",
+				string(argsJSON),
+			)
+			fmt.Fprint(w, payload)
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"Cold-start loaded."}}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	code, out, errOut := driveRun(t,
+		"--base-url", srv.URL,
+		"--model", "test-model",
+		"--workspace", workspaceDir,
+		"--state-dir", stateDir,
+		"--prompt-file", promptFile,
+		"--output", "jsonl",
+		"--permission", "read_only",
+		"--max-turns", "8",
+	)
+	if code != 0 {
+		t.Fatalf("driveRun returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
+	}
+
+	var toolCallEvent, toolResultEvent *event.Event
+	for i, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		var ev event.Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("line %d does not parse as JSON: %v (line=%q)", i, err, line)
+		}
+		switch ev.Event {
+		case "tool_call":
+			if toolCallEvent == nil {
+				cp := ev
+				toolCallEvent = &cp
+			}
+		case "tool_result":
+			if toolResultEvent == nil {
+				cp := ev
+				toolResultEvent = &cp
+			}
+		}
+	}
+	if toolCallEvent == nil {
+		t.Fatalf("stdout missing tool_call event (stdout=%q)", out)
+	}
+	if toolCallEvent.Tool != "load_skill" {
+		t.Errorf("tool_call.Tool = %q, want %q", toolCallEvent.Tool, "load_skill")
+	}
+	if toolResultEvent == nil {
+		t.Fatalf("stdout missing tool_result event (stdout=%q)", out)
+	}
+	if toolResultEvent.ResultStatus != "ok" {
+		t.Errorf("tool_result.tool_result_status = %q, want %q",
+			toolResultEvent.ResultStatus, "ok")
+	}
+	if toolResultEvent.CallID != toolCallEvent.CallID {
+		t.Errorf("tool_result.call_id = %q, tool_call.call_id = %q — must match",
+			toolResultEvent.CallID, toolCallEvent.CallID)
+	}
+
+	// Surface 2: visibility-in-context. The run-mode-startup
+	// --skill cold-start flag (FROZEN-out-of-fence for this
+	// handoff) reads the cold-start skill from the resolved
+	// search roots and populates the per-Run ledger. The
+	// `context show` surface renders the ledger; the cold-start
+	// entry must appear under the `skill` category. We use an
+	// unreachable endpoint per the existing context-show test
+	// pattern so the surface proves it does NOT actually call
+	// the model client.
+	promptFile2 := filepath.Join(t.TempDir(), "prompt2.md")
+	if err := os.WriteFile(promptFile2, []byte("hi"), 0o644); err != nil {
+		t.Fatalf("write prompt2.md: %v", err)
+	}
+
+	origStdout := os.Stdout
+	origStderr := os.Stderr
+	t.Cleanup(func() {
+		os.Stdout = origStdout
+		os.Stderr = origStderr
+	})
+
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stderr pipe: %v", err)
+	}
+	os.Stdout = outW
+	os.Stderr = errW
+
+	contextCode := run([]string{
+		"context", "show",
+		"--base-url", "http://127.0.0.1:9",
+		"--model", "test-model",
+		"--workspace", workspaceDir,
+		"--prompt-file", promptFile2,
+		"--skill", "cold-start",
+	})
+
+	_ = outW.Close()
+	_ = errW.Close()
+	var outBuf, errBuf bytes.Buffer
+	_, _ = io.Copy(&outBuf, outR)
+	_, _ = io.Copy(&errBuf, errR)
+	contextOut := outBuf.String()
+
+	if contextCode != 0 {
+		t.Fatalf("context show returned %d, want 0 (stdout=%q stderr=%q)",
+			contextCode, contextOut, errBuf.String())
+	}
+
+	// The cold-start entry must appear under the `skill:`
+	// category line. The Report format is "skill: cold-start
+	// %6d tokens" (see internal/context/context.go).
+	wantSkillLine := "skill: cold-start"
+	if !strings.Contains(contextOut, wantSkillLine) {
+		t.Errorf("context show output missing %q (the cold-start entry under the skill category); got %q",
+			wantSkillLine, contextOut)
+	}
+}
+
+// TestSkillTool_ListSkills_BothRootsEnumerated is the binding
+// TG2 pin for the list_skills builtin. The pin drives the full
+// harness pipeline (mock model → loop → events → run mode)
+// with a mock model that emits `list_skills` as a tool_call and
+// asserts (i) the JSONL event stream carries a tool_call event
+// with tool: "list_skills" + a matching tool_result event with
+// tool_result_status: "ok" + content carrying the Skills array
+// with both workspace-source + global-source entries + the
+// workspace-wins collision order preserved.
+//
+// The list_skills tool's `Execute` resolves its workspace +
+// HOME roots from os.Getwd + os.UserHomeDir at call time; the
+// pin uses t.Setenv("HOME", ...) and a chdir pattern to point
+// those roots at the fixture directories so the content
+// surface is stable.
+func TestSkillTool_ListSkills_BothRootsEnumerated(t *testing.T) {
+	savedReg := globalRegistry
+	t.Cleanup(func() { globalRegistry = savedReg })
+	freshReg := tools.NewRegistry()
+	builtins.RegisterBuiltins(freshReg)
+	globalRegistry = freshReg
+
+	workspaceDir := t.TempDir()
+	stateDir := t.TempDir()
+	homeDir := t.TempDir()
+
+	// Two skills: alpha under workspace + beta under HOME.
+	writeListSkillFixtureInline(t, workspaceDir, "alpha", "WS-ALPHA-LISTSKILLS-PIN-aaaa")
+	writeListSkillFixtureInline(t, homeDir, "beta", "HOME-BETA-LISTSKILLS-PIN-bbbb")
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(workspaceDir); err != nil {
+		t.Fatalf("chdir ws: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+	t.Setenv("HOME", homeDir)
+
+	promptFile := filepath.Join(t.TempDir(), "prompt.md")
+	if err := os.WriteFile(promptFile, []byte("list the skills"), 0o644); err != nil {
+		t.Fatalf("write prompt.md: %v", err)
+	}
+
+	argsJSON, err := json.Marshal(map[string]any{})
+	if err != nil {
+		t.Fatalf("marshal args: %v", err)
+	}
+
+	nRequests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		nRequests++
+		if nRequests == 1 {
+			payload := fmt.Sprintf(
+				`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_listskills_1","function":{"name":"list_skills","arguments":%q}}]}}]}`+"\n\n",
+				string(argsJSON),
+			)
+			fmt.Fprint(w, payload)
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"Listed."}}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	code, out, errOut := driveRun(t,
+		"--base-url", srv.URL,
+		"--model", "test-model",
+		"--workspace", workspaceDir,
+		"--state-dir", stateDir,
+		"--prompt-file", promptFile,
+		"--output", "jsonl",
+		"--permission", "read_only",
+		"--max-turns", "8",
+	)
+	if code != 0 {
+		t.Fatalf("driveRun returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
+	}
+
+	var toolCallEvent, toolResultEvent *event.Event
+	for i, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		var ev event.Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("line %d does not parse as JSON: %v (line=%q)", i, err, line)
+		}
+		switch ev.Event {
+		case "tool_call":
+			if toolCallEvent == nil {
+				cp := ev
+				toolCallEvent = &cp
+			}
+		case "tool_result":
+			if toolResultEvent == nil {
+				cp := ev
+				toolResultEvent = &cp
+			}
+		}
+	}
+	if toolCallEvent == nil {
+		t.Fatalf("stdout missing tool_call event (stdout=%q)", out)
+	}
+	if toolCallEvent.Tool != "list_skills" {
+		t.Errorf("tool_call.Tool = %q, want %q", toolCallEvent.Tool, "list_skills")
+	}
+	if toolResultEvent == nil {
+		t.Fatalf("stdout missing tool_result event (stdout=%q)", out)
+	}
+	if toolResultEvent.ResultStatus != "ok" {
+		t.Errorf("tool_result.tool_result_status = %q, want %q",
+			toolResultEvent.ResultStatus, "ok")
+	}
+	if toolResultEvent.CallID != toolCallEvent.CallID {
+		t.Errorf("tool_result.call_id = %q, tool_call.call_id = %q — must match",
+			toolResultEvent.CallID, toolCallEvent.CallID)
+	}
+
+	// The wire-shape assertion: both workspace-source (alpha)
+	// and global-source (beta) appear in the tool_result's
+	// content payload (rendered as JSON; we look for the
+	// substring markers that prove both are present).
+	if !strings.Contains(toolResultEvent.Content, "alpha") {
+		t.Errorf("tool_result.Content missing workspace-source skill %q; got %q",
+			"alpha", toolResultEvent.Content)
+	}
+	if !strings.Contains(toolResultEvent.Content, "beta") {
+		t.Errorf("tool_result.Content missing global-source skill %q; got %q",
+			"beta", toolResultEvent.Content)
+	}
+	if !strings.Contains(toolResultEvent.Content, "workspace") {
+		t.Errorf("tool_result.Content missing source %q (alpha's source); got %q",
+			"workspace", toolResultEvent.Content)
+	}
+	if !strings.Contains(toolResultEvent.Content, "global") {
+		t.Errorf("tool_result.Content missing source %q (beta's source); got %q",
+			"global", toolResultEvent.Content)
+	}
+}
+
+// writeListSkillFixtureInline is the inline helper for the
+// TestSkillTool_ListSkills_BothRootsEnumerated pin: writes a
+// SKILL.md at <root>/.simple-harness/skills/<name>/SKILL.md
+// with the given marker content. Mirrors the cmd/simple-harness/
+// skill_test.go pattern.
+func writeListSkillFixtureInline(t *testing.T, root, name, marker string) {
+	t.Helper()
+	dir := filepath.Join(root, ".simple-harness", "skills", name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"),
+		[]byte("# "+name+"\n"+marker+"\n"), 0o644); err != nil {
+		t.Fatalf("write %s: %v", filepath.Join(dir, "SKILL.md"), err)
+	}
 }

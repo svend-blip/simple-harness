@@ -12,7 +12,13 @@
 // cancellation (ctx.Done), bounded SIGKILL escalation after a 2s
 // grace if the child ignores SIGTERM, per-stream output-size cap
 // (max_output_bytes argument) with explicit in-stream truncation
-// marker, and the SCOPE §27 orphan-survival proof.
+// marker, and the SCOPE §27 orphan-survival proof. Run 021 /
+// handoff 068 adds the two SCOPE §45 builtin tools — list_skills
+// (enumerates skills under §15's locations with workspace-wins
+// collision order) and load_skill (loads a named skill's
+// instruction material into the next model request's context) —
+// both READ-ONLY per reviewer duty §1; the model-invoked surface
+// for skill discovery + composition per GOAL §2 bound decisions.
 //
 // The package is a thin layer over internal/tools: each builtin
 // implements the tools.Tool interface (Meta, Schema, Execute) and is
@@ -46,7 +52,9 @@ import "github.com/svend-blip/simple-harness/internal/tools"
 // 018 adds the second mutation tool: apply_patch (SCOPE §10
 // "deterministic patching for source modifications"). Run 005
 // handoff 020 adds the third mutation tool: shell (SCOPE §§11, 27
-// "controlled execution in its own process group").
+// "controlled execution in its own process group"). Run 021
+// handoff 068 adds the two SCOPE §45 model-invoked skill tools:
+// list_skills + load_skill.
 //
 // RegisterBuiltins is idempotent only in the sense that calling it
 // twice on the same registry PANICS — Registry.Register panics on
@@ -59,6 +67,8 @@ func RegisterBuiltins(r *tools.Registry) {
 	r.Register(ApplyPatch{})
 	r.Register(Grep{})
 	r.Register(ListDirectory{})
+	r.Register(ListSkills{})   // Run 021 / handoff 068 — SCOPE §45
+	r.Register(LoadSkill{})    // Run 021 / handoff 068 — SCOPE §45
 	r.Register(ReadFile{})
 	r.Register(SearchFiles{})
 	r.Register(Shell{})
