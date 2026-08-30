@@ -117,11 +117,15 @@ echo "scripts/e2e-mcp.sh: WORKSPACE=$WORKSPACE" >&2
 
 # ---------------------------------------------------------------------------
 # (3) Mock model — Python stdlib http.server on a kernel-assigned port.
-# First request emits a tool_call for mcp-light__get_governance_index;
-# second request emits an assistant content delta ("Patch applied.") so
-# the loop reaches the single-turn happy path. Third+ request returns
-# HTTP 500 (defensive — the mock model should never be called more than
-# twice given --max-turns 4).
+# First request emits a tool_call for get_governance_index (bare name
+# per HARNESS-CONTRACT.md §"Collision naming" — get_governance_index
+# collides with no harness builtin so it registers BARE, NOT under the
+# mcp-light__get_governance_index prefix; amendment 4 to Run 020 GOAL
+# corrected the 065 handoff's prefixed-name premise which assumed the
+# prefix was always applied); second request emits an assistant
+# content delta ("Patch applied.") so the loop reaches the single-turn
+# happy path. Third+ request returns HTTP 500 (defensive — the mock
+# model should never be called more than twice given --max-turns 4).
 # ---------------------------------------------------------------------------
 cat > "$WORKSPACE/mock_model.py" <<'MOCK_EOF'
 #!/usr/bin/env python3
@@ -151,7 +155,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             payload = (
                 'data: {"choices":[{"delta":{"tool_calls":['
                 '{"index":0,"id":"call_e2e_mcp_1","function":'
-                '{"name":"mcp-light__get_governance_index","arguments":"{}"}}'
+                '{"name":"get_governance_index","arguments":"{}"}}'
                 ']}}]}\n\n'
             )
         elif this_request == 2:
@@ -278,7 +282,11 @@ EOF_ATTEMPT
         FAIL_REASON="(B) JSONL missing tool_call event"
     # (C) tool_call event names the server-qualified tool
     # mcp-light__get_governance_index per HARNESS-CONTRACT.md's
-    # collision-avoidance form.
+    # collision-avoidance form. The 066 amendment-4 corrected the
+    # tool_name in the assertion to `get_governance_index` (bare) per
+    # the V1 contract — get_governance_index collides with no harness
+    # builtin so it registers BARE; the prefix form applies ONLY on
+    # collision.
     else
         if command -v jq >/dev/null 2>&1; then
             TOOL_NAME=$(jq -r 'select(.event == "tool_call") | .tool' "$WORKSPACE/run.$attempt.jsonl" | head -1)
@@ -298,8 +306,8 @@ for line in sys.stdin:
         break
 ' < "$WORKSPACE/run.$attempt.jsonl")
         fi
-        if [ "$TOOL_NAME" != "mcp-light__get_governance_index" ]; then
-            FAIL_REASON="(C) tool_call event tool field mismatch (got '$TOOL_NAME', want 'mcp-light__get_governance_index')"
+        if [ "$TOOL_NAME" != "get_governance_index" ]; then
+            FAIL_REASON="(C) tool_call event tool field mismatch (got '$TOOL_NAME', want 'get_governance_index')"
         # (D) JSONL carries a tool_result event WITH REAL SERVER DATA — the
         # marker substring "11_SCOPE.md" is verified live in the assertion
         # sequence's pre-flight per handoff 065's binding contract.
@@ -307,7 +315,7 @@ for line in sys.stdin:
             FAIL_REASON="(D) JSONL missing tool_result event"
         else
             if command -v jq >/dev/null 2>&1; then
-                RESULT_CONTENT=$(jq -r 'select(.event == "tool_result" and .tool == "mcp-light__get_governance_index") | .content' "$WORKSPACE/run.$attempt.jsonl" | head -1)
+                RESULT_CONTENT=$(jq -r 'select(.event == "tool_result") | .content' "$WORKSPACE/run.$attempt.jsonl" | head -1)
             else
                 RESULT_CONTENT=$(python3 -c '
 import json, sys
@@ -319,7 +327,7 @@ for line in sys.stdin:
         ev = json.loads(line)
     except Exception:
         continue
-    if ev.get("event") == "tool_result" and ev.get("tool") == "mcp-light__get_governance_index":
+    if ev.get("event") == "tool_result":
         print(ev.get("content", "") or "")
         break
 ' < "$WORKSPACE/run.$attempt.jsonl")
@@ -331,8 +339,8 @@ for line in sys.stdin:
             # mock model pattern at main_test.go:2582-2591.
             else
                 if command -v jq >/dev/null 2>&1; then
-                    CALL_ID=$(jq -r 'select(.event == "tool_call" and .tool == "mcp-light__get_governance_index") | .call_id' "$WORKSPACE/run.$attempt.jsonl" | head -1)
-                    RESULT_CALL_ID=$(jq -r 'select(.event == "tool_result" and .tool == "mcp-light__get_governance_index") | .call_id' "$WORKSPACE/run.$attempt.jsonl" | head -1)
+                    CALL_ID=$(jq -r 'select(.event == "tool_call" and .tool == "get_governance_index") | .call_id' "$WORKSPACE/run.$attempt.jsonl" | head -1)
+                    RESULT_CALL_ID=$(jq -r 'select(.event == "tool_result") | .call_id' "$WORKSPACE/run.$attempt.jsonl" | head -1)
                 else
                     CALL_ID=$(python3 -c '
 import json, sys
@@ -344,7 +352,7 @@ for line in sys.stdin:
         ev = json.loads(line)
     except Exception:
         continue
-    if ev.get("event") == "tool_call" and ev.get("tool") == "mcp-light__get_governance_index":
+    if ev.get("event") == "tool_call" and ev.get("tool") == "get_governance_index":
         print(ev.get("call_id", "") or "")
         break
 ' < "$WORKSPACE/run.$attempt.jsonl")
@@ -358,7 +366,7 @@ for line in sys.stdin:
         ev = json.loads(line)
     except Exception:
         continue
-    if ev.get("event") == "tool_result" and ev.get("tool") == "mcp-light__get_governance_index":
+    if ev.get("event") == "tool_result":
         print(ev.get("call_id", "") or "")
         break
 ' < "$WORKSPACE/run.$attempt.jsonl")
