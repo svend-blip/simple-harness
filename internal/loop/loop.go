@@ -772,16 +772,33 @@ func (r *Run) RunAgent(ctx context.Context, prompt string) (string, error) {
 		// message history so the model sees its own tool-call on
 		// the next turn, then dispatch each call in order.
 		//
-		// The assistant message's Content is empty for tool-call
-		// turns (the OpenAI wire shape: the assistant message
-		// emits content + tool_calls; we carry the parsed
-		// tool_calls in the message history but do not re-emit
-		// them on the wire). Future handoff 041 may extend
-		// model.Message with a ToolCalls field; for THIS handoff
-		// the message history carries the assistant's textual
-		// content as an empty string and the subsequent tool-
-		// result messages carry the dispatch outcomes.
-		history = append(history, model.Message{Role: "assistant", Content: ""})
+		// Wire-shape discipline (Run 023 amendment 4): the
+		// OpenAI chat-completions spec requires the assistant
+		// tool_calls message BEFORE the per-call tool messages so
+		// the server can correlate the tool_call_id fields on
+		// the follow-up. We assemble one model.ToolCall per
+		// per-index accumulator entry in index order; the
+		// Type:"function" tag matches the OpenAI function-
+		// calling wire shape. The message's Content is left
+		// empty (omitempty elides it on the wire).
+		toolCalls := make([]model.ToolCall, 0, len(perIndexAccum))
+		for idx := 0; idx < len(perIndexAccum); idx++ {
+			call, ok := perIndexAccum[idx]
+			if !ok || call == nil {
+				continue
+			}
+			toolCalls = append(toolCalls, model.ToolCall{
+				Index:     call.Index,
+				ID:        call.ID,
+				Type:      "function",
+				Name:      call.Name,
+				Arguments: call.Arguments,
+			})
+		}
+		history = append(history, model.Message{
+			Role:      "assistant",
+			ToolCalls: toolCalls,
+		})
 
 		anyPermissionViolation := false
 		var permUnderlying error
@@ -847,7 +864,11 @@ func (r *Run) RunAgent(ctx context.Context, prompt string) (string, error) {
 				_ = r.em.Completed(1)
 				return accumulatedText.String(), fmt.Errorf("loop: encode tool result for %s: %w", call.Name, encErr)
 			}
-			history = append(history, model.Message{Role: "tool", Content: encoded})
+			history = append(history, model.Message{
+				Role:       "tool",
+				Content:    encoded,
+				ToolCallID: call.ID,
+			})
 		}
 
 		if anyPermissionViolation {

@@ -1,6 +1,7 @@
 package model
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -575,6 +576,30 @@ func renderStubSchema(schema tools.Schema) json.RawMessage {
 		AdditionalProperties: schema.AdditionalProperties,
 	})
 	return body
+}
+
+// TestMessage_PlainOmitsToolFields pins the omitempty
+// byte-compat contract at the model layer: when a
+// model.Message{Role:"user", Content:"x"} is json.Marshal-ed,
+// the resulting bytes do NOT contain "tool_calls" or
+// "tool_call_id" substrings. The pin is the belt-and-suspenders
+// model-layer check that catches a regression that drops the
+// omitempty tags or adds a non-omitempty field. This pin is
+// NOT counted toward the amendment-4 ≥2-pin quota (the binding
+// quota is the 2 TestToolLoop_Messages_* pins in
+// internal/loop/loop_test.go); it's a defense-in-depth check at
+// the model layer.
+func TestMessage_PlainOmitsToolFields(t *testing.T) {
+	body, err := json.Marshal(Message{Role: "user", Content: "x"})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if bytes.Contains(body, []byte("tool_calls")) {
+		t.Errorf("plain Message serialized with tool_calls field: %s", body)
+	}
+	if bytes.Contains(body, []byte("tool_call_id")) {
+		t.Errorf("plain Message serialized with tool_call_id field: %s", body)
+	}
 }
 
 func ptrString(s string) *string { return &s }

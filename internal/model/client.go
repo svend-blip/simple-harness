@@ -46,9 +46,20 @@ type Options struct {
 // Message is one chat-completions message. Role is one of "system",
 // "user", "assistant", "tool" per SCOPE §6; Content is a plain
 // string for V1 — no multimodal, no content array.
+//
+// ToolCalls carries the per-call entries when the assistant emits
+// tool calls in a turn; the OpenAI chat-completions spec requires
+// the assistant tool_calls message BEFORE the per-call tool
+// messages so the server can correlate the tool_call_id fields on
+// the follow-up. ToolCallID carries the correlation id on tool
+// messages back to the originating assistant tool_call. Both
+// fields use `omitempty` so plain {Role, Content} messages
+// serialize byte-identically against the pre-amendment-4 wire.
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
 }
 
 // ToolDefinition is the OpenAI function-calling wire shape for a
@@ -122,6 +133,7 @@ type ToolCallFragment struct {
 type ToolCall struct {
 	Index     int            `json:"index"`
 	ID        string         `json:"id,omitempty"`
+	Type      string         `json:"type,omitempty"`
 	Name      string         `json:"name"`
 	Arguments map[string]any `json:"arguments"`
 }
@@ -340,7 +352,7 @@ func NewClient(opts Options) *Client {
 func (c *Client) ChatStream(ctx context.Context, req ChatRequest, onDelta func(StreamEvent) error) error {
 	body, err := json.Marshal(struct {
 		Model       string           `json:"model"`
-		Messages    []Message        `json:"messages"`
+		Messages    []wireMessage    `json:"messages"`
 		Temperature float64          `json:"temperature"`
 		MaxTokens   int              `json:"max_tokens"`
 		Stream      bool             `json:"stream"`
@@ -348,7 +360,7 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, onDelta func(S
 		ToolChoice  any              `json:"tool_choice,omitempty"`
 	}{
 		Model:       c.opts.Model,
-		Messages:    req.Messages,
+		Messages:    toWireMessages(req.Messages),
 		Temperature: c.opts.Temperature,
 		MaxTokens:   c.opts.MaxOutputTokens,
 		Stream:      true,
@@ -491,4 +503,77 @@ type toolCallRaw struct {
 		Name      string `json:"name,omitempty"`
 		Arguments string `json:"arguments,omitempty"`
 	} `json:"function"`
+}
+
+// toolCallWireEntry captures the OpenAI chat-completions wire
+// shape for a single tool_calls[] entry that the harness EMITS on
+// the assistant message: {id, type:"function", function:{name,
+// arguments}}. The Arguments field is the JSON-encoded STRING form
+// (the OpenAI spec serializes the JSON-decoded arguments map as a
+// string on the wire), so we re-encode at conversion time. This
+// shape is private — the public surface keeps model.ToolCall as
+// the domain type with the JSON-decoded Arguments map; the wire
+// shape is the model-internal marshal concern.
+type toolCallWireEntry struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+// wireMessage is the OpenAI wire shape for one chat-completions
+// message. It mirrors model.Message but uses toolCallWireEntry for
+// the per-message tool_calls[] (nested function:{name, arguments})
+// instead of the public flat ToolCall shape. Used internally by
+// ChatStream's marshal path; the public ChatRequest type continues
+// to carry []model.Message so callers (the loop) populate the
+// domain ToolCall type and conversion happens at the wire edge.
+type wireMessage struct {
+	Role       string               `json:"role"`
+	Content    string               `json:"content"`
+	ToolCalls  []toolCallWireEntry  `json:"tool_calls,omitempty"`
+	ToolCallID string               `json:"tool_call_id,omitempty"`
+}
+
+// toWireMessage converts a domain model.Message into its wire
+// representation. Empty ToolCalls slice is elided on the wire
+// (omitempty); the Arguments map is re-encoded as a JSON string
+// per the OpenAI spec; a nil Arguments map marshals as the literal
+// string "null" which the spec accepts for parameterless calls.
+func toWireMessage(m Message) wireMessage {
+	w := wireMessage{
+		Role:       m.Role,
+		Content:    m.Content,
+		ToolCallID: m.ToolCallID,
+	}
+	if len(m.ToolCalls) > 0 {
+		w.ToolCalls = make([]toolCallWireEntry, 0, len(m.ToolCalls))
+		for _, tc := range m.ToolCalls {
+			entry := toolCallWireEntry{
+				ID:   tc.ID,
+				Type: tc.Type,
+			}
+			entry.Function.Name = tc.Name
+			if tc.Arguments != nil {
+				b, err := json.Marshal(tc.Arguments)
+				if err == nil {
+					entry.Function.Arguments = string(b)
+				}
+			}
+			w.ToolCalls = append(w.ToolCalls, entry)
+		}
+	}
+	return w
+}
+
+// toWireMessages converts a slice of domain messages to the wire
+// representation. A convenience for the ChatStream marshal path.
+func toWireMessages(msgs []Message) []wireMessage {
+	out := make([]wireMessage, 0, len(msgs))
+	for _, m := range msgs {
+		out = append(out, toWireMessage(m))
+	}
+	return out
 }

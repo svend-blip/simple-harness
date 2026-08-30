@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1147,4 +1149,194 @@ func (s *stubLoopTool) Schema() tools.Schema {
 
 func (s *stubLoopTool) Execute(ctx context.Context, call tools.Call) (tools.Result, error) {
 	return tools.Result{Status: "ok", Content: "stub"}, nil
+}
+
+// --- handoff 075: TestToolLoop_Messages_* pins (Run 023 amendment 4) ---
+
+// TestToolLoop_Messages_FollowupBodyCarriesToolCallsAndToolCallID is
+// binding pin (a) from Run 023 amendment 4: drives RunAgent against
+// an httptest server that answers the FIRST request with a
+// synthesized tool_call SSE payload (one delta with
+// tool_calls=[{id:"call_test1", function:{name:"apply_patch",
+// arguments:"{\"path\":\"x\",\"patch\":\"+y\\n\"}"}}]) and answers
+// the SECOND request (the follow-up) with `data: [DONE]\n\n`. The
+// test stubs tools.Registry with one apply_patch builtin (a
+// stubLoopTool that returns tools.Result{Status:"ok", Content:"ok"}
+// so the loop's dispatch path produces a tool-result message
+// without requiring a real workspace). The test captures BOTH
+// request bodies and asserts on the SECOND body: the follow-up
+// has the 4 SCOPE §14 originals + 1 assistant-with-tool_calls + 1
+// tool-message; the assistant entry carries tool_calls[0] with
+// id=="call_test1", function.name=="apply_patch", and a parseable
+// function.arguments object; the tool entry carries
+// tool_call_id=="call_test1" and non-empty content.
+func TestToolLoop_Messages_FollowupBodyCarriesToolCallsAndToolCallID(t *testing.T) {
+	type capturedToolCall struct {
+		ID       string `json:"id"`
+		Type     string `json:"type"`
+		Function struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		} `json:"function"`
+	}
+	type capturedMessage struct {
+		Role       string             `json:"role"`
+		Content    string             `json:"content"`
+		ToolCalls  []capturedToolCall `json:"tool_calls,omitempty"`
+		ToolCallID string             `json:"tool_call_id,omitempty"`
+	}
+	type capturedRequest struct {
+		Messages []capturedMessage `json:"messages"`
+	}
+	var captured []capturedRequest
+	var reqCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var cr capturedRequest
+		if err := json.NewDecoder(r.Body).Decode(&cr); err != nil {
+			t.Errorf("decode request body: %v", err)
+			http.Error(w, "decode fail", 500)
+			return
+		}
+		captured = append(captured, cr)
+		n := atomic.AddInt32(&reqCount, 1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		if n == 1 {
+			// First request: emit one tool_call delta, then [DONE].
+			fmt.Fprint(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_test1","function":{"name":"apply_patch","arguments":"{\"path\":\"x\",\"patch\":\"+y\\n\"}"}}]}}]}`+"\n\n")
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
+		// Second request (follow-up): clean [DONE].
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	reg := tools.NewRegistry()
+	reg.Register(&stubLoopTool{name: "apply_patch", desc: "applies a patch"})
+
+	workspaceDir := t.TempDir()
+	var sidecar bytes.Buffer
+	em := event.NewEmitter(&sidecar, "sess-tool-loop-msgs")
+	var stdout bytes.Buffer
+	client := model.NewClient(model.Options{
+		BaseURL:        srv.URL,
+		Model:          "qwen",
+		RequestTimeout: 2 * time.Second,
+	})
+	r := New(Config{
+		Model:          model.Options{BaseURL: srv.URL, Model: "qwen"},
+		Workspace:      workspaceDir,
+		Permission:     "READ_ONLY",
+		System:         HarnessSystem,
+		SystemExternal: "EXT",
+		Skills:         []skill.Skill{{Name: "s", Content: "SKILL"}},
+		Tools:          reg,
+	}, client, em, &stdout)
+
+	if _, err := r.RunAgent(context.Background(), "fix the bug"); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+
+	if len(captured) < 2 {
+		t.Fatalf("captured len = %d, want >= 2 (got=%+v)", len(captured), captured)
+	}
+	followup := captured[1]
+	if got := len(followup.Messages); got != 6 {
+		t.Fatalf("followup len(messages) = %d, want 6 (4 initial + 1 assistant-with-tool_calls + 1 tool-message) (got=%+v)", got, followup.Messages)
+	}
+	assistant := followup.Messages[4]
+	if assistant.Role != "assistant" {
+		t.Errorf("followup.messages[4].role = %q, want assistant", assistant.Role)
+	}
+	if len(assistant.ToolCalls) != 1 {
+		t.Fatalf("followup.messages[4].tool_calls len = %d, want 1 (got=%+v)", len(assistant.ToolCalls), assistant.ToolCalls)
+	}
+	if assistant.ToolCalls[0].ID != "call_test1" {
+		t.Errorf("followup.messages[4].tool_calls[0].id = %q, want call_test1", assistant.ToolCalls[0].ID)
+	}
+	if assistant.ToolCalls[0].Function.Name != "apply_patch" {
+		t.Errorf("followup.messages[4].tool_calls[0].function.name = %q, want apply_patch", assistant.ToolCalls[0].Function.Name)
+	}
+	var args map[string]any
+	if err := json.Unmarshal([]byte(assistant.ToolCalls[0].Function.Arguments), &args); err != nil {
+		t.Errorf("followup.messages[4].tool_calls[0].function.arguments not parseable JSON: %v (raw=%s)", err, assistant.ToolCalls[0].Function.Arguments)
+	}
+	if _, ok := args["path"]; !ok {
+		t.Errorf("followup.messages[4].tool_calls[0].function.arguments missing 'path' key (got=%+v)", args)
+	}
+	last := followup.Messages[len(followup.Messages)-1]
+	if last.Role != "tool" {
+		t.Errorf("followup.messages[last].role = %q, want tool", last.Role)
+	}
+	if last.ToolCallID != "call_test1" {
+		t.Errorf("followup.messages[last].tool_call_id = %q, want call_test1", last.ToolCallID)
+	}
+	if last.Content == "" {
+		t.Errorf("followup.messages[last].content is empty, want non-empty")
+	}
+}
+
+// TestToolLoop_Messages_PlainMessageByteCompat is binding pin (b)
+// from Run 023 amendment 4: drives RunOne (single-turn happy path,
+// NO tool calls) with the exact same fixture used by
+// TestRunOne_PassesComposedMessagesToClient (the canonical SCOPE
+// §14 composition: HarnessSystem + ExternalSystem + 1 Skill +
+// Task), captures the request body BYTES, and asserts that no
+// tool_calls or tool_call_id substrings appear on the wire. The
+// pin also asserts the belt-and-suspenders model-layer byte-compat
+// check (plain Message marshals without tool_calls/tool_call_id
+// substrings). The pin's purpose is to FAIL a regression that
+// drops the omitempty tags or adds a non-omitempty field that would
+// leak into the wire for plain-message cases.
+func TestToolLoop_Messages_PlainMessageByteCompat(t *testing.T) {
+	var bodyBytes []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		bodyBytes, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	var sidecar bytes.Buffer
+	em := event.NewEmitter(&sidecar, "sess-plain-byte-compat")
+	var stdout bytes.Buffer
+	client := model.NewClient(model.Options{
+		BaseURL:        srv.URL,
+		Model:          "qwen",
+		RequestTimeout: 2 * time.Second,
+	})
+	r := New(Config{
+		Model:          model.Options{BaseURL: srv.URL, Model: "qwen"},
+		Workspace:      "/tmp/ws",
+		Permission:     "READ_ONLY",
+		System:         HarnessSystem,
+		SystemExternal: "EXT",
+		Skills:         []skill.Skill{{Name: "s", Content: "SKILL"}},
+	}, client, em, &stdout)
+
+	if _, err := r.RunOne(context.Background(), "hello"); err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+
+	if bytes.Contains(bodyBytes, []byte("tool_calls")) {
+		t.Errorf("plain RunOne body contains tool_calls substring: %s", bodyBytes)
+	}
+	if bytes.Contains(bodyBytes, []byte("tool_call_id")) {
+		t.Errorf("plain RunOne body contains tool_call_id substring: %s", bodyBytes)
+	}
+	// Belt-and-suspenders model-layer byte-compat check.
+	plainBody, err := json.Marshal(model.Message{Role: "user", Content: "x"})
+	if err != nil {
+		t.Fatalf("Marshal plain Message: %v", err)
+	}
+	if bytes.Contains(plainBody, []byte("tool_calls")) {
+		t.Errorf("plain Message JSON contains tool_calls substring: %s", plainBody)
+	}
+	if bytes.Contains(plainBody, []byte("tool_call_id")) {
+		t.Errorf("plain Message JSON contains tool_call_id substring: %s", plainBody)
+	}
 }
