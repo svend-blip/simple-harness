@@ -122,20 +122,34 @@ type ToolCallFragment struct {
 // numbers as float64, booleans as bool, arrays as
 // []any, objects as map[string]any).
 //
+// ArgumentsRaw carries the concatenated ArgsDelta
+// raw string from accumulation, populated by
+// AccumulateToolCallFragment as each fragment arrives
+// and parsed once at finish by FinalizeToolCalls.
+// The field is exposed for inspection (tests +
+// debugging) but elided from the wire via `json:"-"`
+// — the assistant-with-tool_calls message marshals
+// Arguments as a JSON object, not as a raw string,
+// per the OpenAI chat-completions spec. The field
+// is empty after FinalizeToolCalls has populated
+// Arguments; callers that need the original raw
+// string should capture it before finalization.
+//
 // The GOAL §2 deliverable 3 delta-assembly seam lives
 // in this file: the helpers ParseToolCallArgs +
-// AccumulateToolCallFragment below let callers
-// assemble complete ToolCall values from stream
-// deltas. The loop's existing private
+// AccumulateToolCallFragment + FinalizeToolCalls
+// below let callers assemble complete ToolCall values
+// from stream deltas. The loop's existing private
 // accumulateToolCallFragment + parseToolCallArgs
 // helpers stay in place until handoff 042 either
 // migrates them or folds them away.
 type ToolCall struct {
-	Index     int            `json:"index"`
-	ID        string         `json:"id,omitempty"`
-	Type      string         `json:"type,omitempty"`
-	Name      string         `json:"name"`
-	Arguments map[string]any `json:"arguments"`
+	Index        int            `json:"index"`
+	ID           string         `json:"id,omitempty"`
+	Type         string         `json:"type,omitempty"`
+	Name         string         `json:"name"`
+	Arguments    map[string]any `json:"arguments"`
+	ArgumentsRaw string         `json:"-"`
 }
 
 // ParseToolCallArgs parses the accumulated JSON
@@ -172,22 +186,35 @@ func ParseToolCallArgs(argsJSON string) (map[string]any, error) {
 // AccumulateToolCallFragment merges a ToolCallFragment
 // into the per-index accumulator. The first fragment
 // for a given Index initializes the ToolCall with
-// Name + a fresh Arguments map; subsequent fragments
-// for the same Index merge ArgsDelta into the
-// Arguments map by re-parsing the accumulated buffer
-// (the model emits ArgsDelta as a partial JSON object
-// that becomes a complete object once the upstream
-// emits the closing brace; we re-parse the buffer
-// each step so partial state survives across
-// fragments).
+// Name + a fresh Arguments map + a fresh empty
+// ArgumentsRaw buffer; subsequent fragments for the
+// same Index append ArgsDelta to ArgumentsRaw (raw
+// string concatenation, NO per-delta parse).
 //
-// Returns an error if the accumulated JSON is
-// malformed. The caller (the loop's onDelta handler)
-// treats the error as a per-delta parse failure: the
-// SCOPE §31 "untrusted input" discipline says
-// structured rejection is the harness's contract with
-// the model, not a hard failure; the loop continues
-// and the model gets to retry on the next turn.
+// The OpenAI chat-completions streaming spec emits
+// tool_calls[].function.arguments as RAW STRING
+// FRAGMENTS — each fragment is a partial slice of
+// the final arguments string, not a partial JSON
+// object. Only the concatenation is valid JSON.
+// The pre-amendment-6 code did json.Unmarshal on
+// each fragment and treated each fragment as a
+// complete JSON object; for a long argument that
+// splits across many fragments (supervisor-measured:
+// 21 chunks on a single apply_patch call against
+// live MiniMax-M3), the first partial fragment
+// returned *json.SyntaxError and the accumulator
+// surfaced the error → status:FAILED → exit_code:1.
+// The fix (Run 023 amendment 6 / handoff 077)
+// concatenates the raw strings here and defers the
+// single ParseToolCallArgs call to FinalizeToolCalls
+// at finish_reason.
+//
+// The function returns nil on every non-empty
+// ArgsDelta — partial-fragment parsing is no longer
+// attempted. Empty ArgsDelta is a no-op (returns nil
+// via the early return below). Genuinely-malformed
+// assembled arguments are surfaced by
+// FinalizeToolCallArgs at finish, not here.
 //
 // The helper is the model-side counterpart to the
 // loop's private accumulateToolCallFragment
@@ -217,12 +244,53 @@ func AccumulateToolCallFragment(accum map[int]*ToolCall, frag *ToolCallFragment)
 	if frag.ArgsDelta == "" {
 		return nil
 	}
-	var merged map[string]any
-	if err := json.Unmarshal([]byte(frag.ArgsDelta), &merged); err != nil {
-		return fmt.Errorf("model: parse tool-call args delta: %w", err)
+	existing.ArgumentsRaw += frag.ArgsDelta
+	return nil
+}
+
+// FinalizeToolCalls parses each accumulated ToolCall's
+// ArgumentsRaw into its Arguments map[string]any via
+// ParseToolCallArgs. The loop calls this exactly
+// ONCE — after the SSE stream reports a non-empty
+// finish_reason and BEFORE the assistant-with-tool_calls
+// message append at internal/loop/loop.go:784-801 —
+// so the per-call parse happens once on the assembled
+// string, not per fragment. Pre-amendment-6, the parse
+// happened per fragment inside AccumulateToolCallFragment;
+// amendment 6 moves the parse to here.
+//
+// Returns the first error encountered (joined via
+// errors.Join for multi-call failures). The loop's
+// existing error-propagation pattern surfaces any
+// error as status:FAILED + completed(exit_code:1)
+// (see internal/loop/loop.go:727 — the same pattern
+// applies to any per-call parse failure). Per-call
+// inline parsing at the loop's assistant-with-tool_calls
+// iteration block is an alternative sanctioned by
+// amendment 6; the helper is the cleaner factoring for
+// callers that want a single all-or-nothing parse pass.
+//
+// A nil ToolCall in the accumulator is skipped (the
+// accumulator's per-index invariant permits gaps).
+// A ToolCall with empty ArgumentsRaw populates
+// Arguments with the empty-map sentinel (matches
+// ParseToolCallArgs("")'s contract — a parameterless
+// tool call).
+func FinalizeToolCalls(accum map[int]*ToolCall) error {
+	var errs []error
+	for _, call := range accum {
+		if call == nil {
+			continue
+		}
+		parsed, err := ParseToolCallArgs(call.ArgumentsRaw)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("model: finalize tool call index %d: %w", call.Index, err))
+			continue
+		}
+		call.Arguments = parsed
 	}
-	for k, v := range merged {
-		existing.Arguments[k] = v
+	if len(errs) > 0 {
+		return errors.Join(errs...)
 	}
 	return nil
 }

@@ -781,6 +781,21 @@ func (r *Run) RunAgent(ctx context.Context, prompt string) (string, error) {
 		// Type:"function" tag matches the OpenAI function-
 		// calling wire shape. The message's Content is left
 		// empty (omitempty elides it on the wire).
+		//
+		// Finish-time parse (Run 023 amendment 6 / handoff 077):
+		// the accumulator concatenates ArgsDelta raw strings
+		// without per-fragment parsing; the assembled string is
+		// parsed ONCE here via model.FinalizeToolCalls so the
+		// assistant-with-tool_calls message below carries a
+		// fully-decoded Arguments map[string]any. A genuine
+		// parse failure on the assembled string surfaces as
+		// status:FAILED + completed(exit_code:1) per the
+		// existing error-propagation pattern.
+		if err := model.FinalizeToolCalls(perIndexAccum); err != nil {
+			_ = r.em.Status("FAILED")
+			_ = r.em.Completed(1)
+			return accumulatedText.String(), err
+		}
 		toolCalls := make([]model.ToolCall, 0, len(perIndexAccum))
 		for idx := 0; idx < len(perIndexAccum); idx++ {
 			call, ok := perIndexAccum[idx]

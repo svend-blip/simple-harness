@@ -284,26 +284,37 @@ func TestParseToolCallArgs_MalformedJSON_ReturnsSyntaxError(t *testing.T) {
 	}
 }
 
-// TestAccumulateToolCallFragment_MergesArgs exercises the
-// per-fragment merge end-to-end: the first fragment
-// initializes the ToolCall with Name + partial args; the
-// second fragment merges additional args into the same
-// ToolCall. The resulting Arguments map has both keys.
-func TestAccumulateToolCallFragment_MergesArgs(t *testing.T) {
+// TestAccumulateToolCallFragment_ConcatenatesArgsRaw is the
+// post-amendment-6 replacement for the pre-fix
+// TestAccumulateToolCallFragment_MergesArgs pin. The
+// pre-fix pin fed two fragments each containing a complete
+// JSON object ({path:...} + {patch:...}) and asserted the
+// Arguments map had both keys — that per-delta parse-and-
+// merge behavior is precisely the defect this handoff
+// cures (the OpenAI chat-completions spec streams
+// arguments as RAW STRING FRAGMENTS, not partial JSON
+// objects). This replacement pin feeds two raw-string
+// fragments and asserts (a) AccumulateToolCallFragment
+// returns nil per fragment (no per-delta parse attempt);
+// (b) the per-index ToolCall's ArgumentsRaw field holds
+// the byte-for-byte concatenation; (c) Arguments is still
+// the empty-map sentinel until FinalizeToolCalls runs at
+// finish.
+func TestAccumulateToolCallFragment_ConcatenatesArgsRaw(t *testing.T) {
 	accum := map[int]*ToolCall{}
-	// Fragment 1: first half — name + partial path.
+	// Fragment 1: first raw-string fragment.
 	if err := AccumulateToolCallFragment(accum, &ToolCallFragment{
 		Index:     0,
 		ID:        "call_1",
 		Name:      "apply_patch",
-		ArgsDelta: `{"path":"/tmp/x"}`,
+		ArgsDelta: `{"path":"/tmp/x"`,
 	}); err != nil {
 		t.Fatalf("first fragment: %v", err)
 	}
-	// Fragment 2: closing half — patch only.
+	// Fragment 2: closing raw-string fragment.
 	if err := AccumulateToolCallFragment(accum, &ToolCallFragment{
 		Index:     0,
-		ArgsDelta: `{"patch":"@@ -1 +1 @@\n-old\n+new\n"}`,
+		ArgsDelta: `,"patch":"@@ -1 +1 @@\n-old\n+new\n"}`,
 	}); err != nil {
 		t.Fatalf("second fragment: %v", err)
 	}
@@ -314,11 +325,197 @@ func TestAccumulateToolCallFragment_MergesArgs(t *testing.T) {
 	if call.Name != "apply_patch" {
 		t.Errorf("Name = %q, want apply_patch", call.Name)
 	}
-	if call.Arguments["path"] != "/tmp/x" {
-		t.Errorf("Arguments[path] = %v, want /tmp/x", call.Arguments["path"])
+	wantRaw := `{"path":"/tmp/x","patch":"@@ -1 +1 @@\n-old\n+new\n"}`
+	if call.ArgumentsRaw != wantRaw {
+		t.Errorf("ArgumentsRaw = %q, want %q", call.ArgumentsRaw, wantRaw)
 	}
-	if call.Arguments["patch"] == nil {
-		t.Errorf("Arguments[patch] missing")
+	if len(call.Arguments) != 0 {
+		t.Errorf("Arguments = %v, want empty-map sentinel before FinalizeToolCalls", call.Arguments)
+	}
+}
+
+// TestToolCall_StreamedArgs_SplitMatchesSingleChunk is binding
+// pin 1 from Run 023 amendment 6 (Run 023 / handoff 077):
+// split-across-chunks assembly matches the single-chunk
+// result byte-for-byte. The pin defines a complete args
+// JSON whose string value is long enough to plausibly
+// split (~200-char patch body), splits it deterministically
+// at known points (chars 50, 100, 150), feeds the splits
+// as separate ToolCallFragments via AccumulateToolCallFragment,
+// and feeds the complete args as a single fragment in a
+// SEPARATE accumulator. After accumulation completes, both
+// accumulators are finalized via FinalizeToolCalls (which
+// internally calls ParseToolCallArgs). The two parsed
+// map[string]any results MUST be reflect.DeepEqual; the
+// assembled raw string from the split case MUST be
+// byte-for-byte identical to the single-fragment case.
+func TestToolCall_StreamedArgs_SplitMatchesSingleChunk(t *testing.T) {
+	complete := `{"path":"/tmp/x","patch":"@@ -1 +1 @@\n-old line that is moderately long for testing\n+new line that is moderately long for testing\n@@ -2 +2 @@\n-more-old\n+more-new with extra text to reach ~200 chars total\n"}`
+	if len(complete) < 200 {
+		t.Fatalf("complete-args fixture too short (%d chars); pin spec requires ~200+ chars", len(complete))
+	}
+
+	// Deterministic split points: 50, 100, 150.
+	splits := []int{50, 100, 150}
+	var fragments []string
+	prev := 0
+	for _, sp := range splits {
+		fragments = append(fragments, complete[prev:sp])
+		prev = sp
+	}
+	fragments = append(fragments, complete[prev:])
+
+	// Split-case accumulator.
+	splitAccum := map[int]*ToolCall{}
+	for i, frag := range fragments {
+		if err := AccumulateToolCallFragment(splitAccum, &ToolCallFragment{
+			Index:     0,
+			ID:        "call_split",
+			Name:      "apply_patch",
+			ArgsDelta: frag,
+		}); i == 0 && err != nil {
+			t.Fatalf("split fragment %d: %v", i, err)
+		} else if err != nil {
+			t.Fatalf("split fragment %d: %v", i, err)
+		}
+	}
+
+	// Single-chunk accumulator.
+	singleAccum := map[int]*ToolCall{}
+	if err := AccumulateToolCallFragment(singleAccum, &ToolCallFragment{
+		Index:     0,
+		ID:        "call_single",
+		Name:      "apply_patch",
+		ArgsDelta: complete,
+	}); err != nil {
+		t.Fatalf("single fragment: %v", err)
+	}
+
+	// Both accumulators must surface byte-identical ArgumentsRaw.
+	splitCall := splitAccum[0]
+	singleCall := singleAccum[0]
+	if splitCall == nil || singleCall == nil {
+		t.Fatal("split or single accumulator missing index 0")
+	}
+	if splitCall.ArgumentsRaw != singleCall.ArgumentsRaw {
+		t.Errorf("ArgumentsRaw mismatch:\n split:  %q\n single: %q",
+			splitCall.ArgumentsRaw, singleCall.ArgumentsRaw)
+	}
+	if splitCall.ArgumentsRaw != complete {
+		t.Errorf("assembled ArgumentsRaw = %q, want %q", splitCall.ArgumentsRaw, complete)
+	}
+
+	// Finalize both and assert the parsed maps are reflect.DeepEqual.
+	if err := FinalizeToolCalls(splitAccum); err != nil {
+		t.Fatalf("FinalizeToolCalls(split): %v", err)
+	}
+	if err := FinalizeToolCalls(singleAccum); err != nil {
+		t.Fatalf("FinalizeToolCalls(single): %v", err)
+	}
+	if !reflect.DeepEqual(splitCall.Arguments, singleCall.Arguments) {
+		t.Errorf("parsed Arguments mismatch:\n split:  %#v\n single: %#v",
+			splitCall.Arguments, singleCall.Arguments)
+	}
+
+	// Spot-check key fields.
+	if got := splitCall.Arguments["path"]; got != "/tmp/x" {
+		t.Errorf("split Arguments[path] = %v, want /tmp/x", got)
+	}
+	if got := splitCall.Arguments["patch"]; got == nil {
+		t.Errorf("split Arguments[patch] missing")
+	} else if s, ok := got.(string); !ok || len(s) < 100 {
+		t.Errorf("split Arguments[patch] = %v (type %T), want string of ≥100 chars", got, got)
+	}
+}
+
+// TestToolCall_StreamedArgs_PartialFragmentDoesNotError pins the
+// core amendment-6 fix: AccumulateToolCallFragment MUST NOT
+// return *json.SyntaxError on a partial-fragment ArgsDelta
+// (the pre-fix behavior that surfaced 5 layers of failure on
+// live MiniMax-M3 — measured at 21 fragment chunks per
+// apply_patch call). The pin feeds a clearly truncated
+// partial-fragment ArgsDelta and asserts (a) no error; (b)
+// the fragment was concatenated into ArgumentsRaw verbatim;
+// (c) Arguments remains the empty-map sentinel.
+func TestToolCall_StreamedArgs_PartialFragmentDoesNotError(t *testing.T) {
+	accum := map[int]*ToolCall{}
+	// A partial fragment that is clearly NOT valid JSON on its
+	// own (the pre-fix code would *json.Unmarshal this and fail).
+	partial := `{"path":"/tmp/x","patch":"@@ -1 +1`
+	if err := AccumulateToolCallFragment(accum, &ToolCallFragment{
+		Index:     0,
+		ID:        "call_partial",
+		Name:      "apply_patch",
+		ArgsDelta: partial,
+	}); err != nil {
+		t.Fatalf("AccumulateToolCallFragment on partial fragment: %v (per-fragment parse is the defect — amendment 6 fix must return nil)", err)
+	}
+	call := accum[0]
+	if call == nil {
+		t.Fatal("accumulator missing index 0")
+	}
+	if call.ArgumentsRaw != partial {
+		t.Errorf("ArgumentsRaw = %q, want %q (raw concatenation, no parse)", call.ArgumentsRaw, partial)
+	}
+	if len(call.Arguments) != 0 {
+		t.Errorf("Arguments = %v, want empty-map sentinel (parse happens at finish)", call.Arguments)
+	}
+}
+
+// TestToolCall_StreamedArgs_MalformedAtFinish_Errors is binding
+// pin 2 from Run 023 amendment 6: a genuinely malformed
+// ASSEMBLED argument still errors at finish via
+// ParseToolCallArgs (the seam at client.go:161-170 is
+// unchanged). The pin concatenates a truncated JSON object
+// + an empty fragment, asserts AccumulateToolCallFragment
+// returns nil per fragment (no per-delta parse), then calls
+// FinalizeToolCalls and asserts (a) the result is a
+// *json.SyntaxError via errors.As(err, &se) where se is
+// *json.SyntaxError; (b) the assembled raw string matches
+// the expected concatenation byte-for-byte.
+func TestToolCall_StreamedArgs_MalformedAtFinish_Errors(t *testing.T) {
+	accum := map[int]*ToolCall{}
+	frag1 := `{"path":"/tmp/x"`
+	frag2 := ``
+	wantRaw := frag1 + frag2
+
+	if err := AccumulateToolCallFragment(accum, &ToolCallFragment{
+		Index:     0,
+		ID:        "call_malformed",
+		Name:      "apply_patch",
+		ArgsDelta: frag1,
+	}); err != nil {
+		t.Fatalf("fragment 1 (per-delta parse is the defect — must return nil): %v", err)
+	}
+	if err := AccumulateToolCallFragment(accum, &ToolCallFragment{
+		Index:     0,
+		ArgsDelta: frag2,
+	}); err != nil {
+		t.Fatalf("fragment 2 (per-delta parse is the defect — must return nil): %v", err)
+	}
+
+	call := accum[0]
+	if call == nil {
+		t.Fatal("accumulator missing index 0")
+	}
+	if call.ArgumentsRaw != wantRaw {
+		t.Errorf("ArgumentsRaw = %q, want %q (byte-for-byte concatenation)", call.ArgumentsRaw, wantRaw)
+	}
+	if len(call.Arguments) != 0 {
+		t.Errorf("Arguments = %v, want empty-map sentinel before FinalizeToolCalls", call.Arguments)
+	}
+
+	err := FinalizeToolCalls(accum)
+	if err == nil {
+		t.Fatal("FinalizeToolCalls on malformed assembled args: expected error, got nil")
+	}
+	var se *json.SyntaxError
+	if !errors.As(err, &se) {
+		t.Errorf("FinalizeToolCalls err is not *json.SyntaxError: %T %v", err, err)
+	}
+	if call.ArgumentsRaw != wantRaw {
+		t.Errorf("post-finalize ArgumentsRaw = %q, want %q (assembled raw string is preserved through the failing parse)",
+			call.ArgumentsRaw, wantRaw)
 	}
 }
 
