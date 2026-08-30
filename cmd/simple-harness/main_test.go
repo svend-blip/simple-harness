@@ -1051,7 +1051,7 @@ func TestRun_Version(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 021, handoff 069)"
+	want := "simple-harness 0.1.0-dev (Run 021, handoff 070)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}
@@ -1369,7 +1369,7 @@ func TestRun_Version_AdvancesToHandoff024(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 021, handoff 069)"
+	want := "simple-harness 0.1.0-dev (Run 021, handoff 070)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}
@@ -2078,7 +2078,7 @@ func TestRun_Version_AdvancesToHandoff030(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
 	}
-	want := "simple-harness 0.1.0-dev (Run 021, handoff 069)"
+	want := "simple-harness 0.1.0-dev (Run 021, handoff 070)"
 	if !strings.Contains(out, want) {
 		t.Fatalf("run --version stdout missing %q; got %q", want, out)
 	}
@@ -4405,3 +4405,223 @@ func writeListSkillFixtureInline(t *testing.T, root, name, marker string) {
 		t.Fatalf("write %s: %v", filepath.Join(dir, "SKILL.md"), err)
 	}
 }
+
+// TestSkillTool_LoadSkill_WorkspaceSourceInResult is the binding
+// pin for SCOPE §45's source-location deliverable, workspace root:
+// the load_skill tool's tool_result content carries
+// `"source":"workspace"` when the loaded skill is found under
+// <workspace>/.simple-harness/skills/<name>/SKILL.md. The pin fills
+// the gap left by WORK-1's
+// TestSkillTool_LoadSkill_ColdStart_LoadsAndIsVisibleInContext
+// which did NOT assert on the Source field. The pin drives the
+// full harness pipeline (mock model → loop → events → run mode)
+// using the same pattern as the WORK-1 pin.
+func TestSkillTool_LoadSkill_WorkspaceSourceInResult(t *testing.T) {
+	savedReg := globalRegistry
+	t.Cleanup(func() { globalRegistry = savedReg })
+	freshReg := tools.NewRegistry()
+	builtins.RegisterBuiltins(freshReg)
+	globalRegistry = freshReg
+
+	workspaceDir := t.TempDir()
+	stateDir := t.TempDir()
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(workspaceDir); err != nil {
+		t.Fatalf("chdir ws: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+	t.Setenv("HOME", t.TempDir())
+
+	// cold-start fixture ONLY under workspace; HOME has no fixture
+	// so the workspace root wins and Source == "workspace".
+	writeListSkillFixtureInline(t, workspaceDir, "cold-start", "WORKSPACE-SOURCE-PIN-WSRC")
+
+	promptFile := filepath.Join(t.TempDir(), "prompt.md")
+	if err := os.WriteFile(promptFile, []byte("load cold-start"), 0o644); err != nil {
+		t.Fatalf("write prompt.md: %v", err)
+	}
+
+	argsJSON, err := json.Marshal(map[string]any{"name": "cold-start"})
+	if err != nil {
+		t.Fatalf("marshal args: %v", err)
+	}
+
+	nRequests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		nRequests++
+		if nRequests == 1 {
+			payload := fmt.Sprintf(
+				`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_loadskill_workspace_1","function":{"name":"load_skill","arguments":%q}}]}}]}`+"\n\n",
+				string(argsJSON),
+			)
+			fmt.Fprint(w, payload)
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"Loaded."}}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	code, out, errOut := driveRun(t,
+		"--base-url", srv.URL,
+		"--model", "test-model",
+		"--workspace", workspaceDir,
+		"--state-dir", stateDir,
+		"--prompt-file", promptFile,
+		"--output", "jsonl",
+		"--permission", "read_only",
+		"--max-turns", "8",
+	)
+	if code != 0 {
+		t.Fatalf("driveRun returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
+	}
+
+	var toolResultEvent *event.Event
+	for i, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		var ev event.Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("line %d does not parse as JSON: %v (line=%q)", i, err, line)
+		}
+		if ev.Event == "tool_result" && toolResultEvent == nil {
+			cp := ev
+			toolResultEvent = &cp
+		}
+	}
+	if toolResultEvent == nil {
+		t.Fatalf("stdout missing tool_result event (stdout=%q)", out)
+	}
+	if toolResultEvent.ResultStatus != "ok" {
+		t.Fatalf("tool_result.tool_result_status = %q, want %q (stdout=%q)",
+			toolResultEvent.ResultStatus, "ok", out)
+	}
+	if !strings.Contains(toolResultEvent.Content, `"source":"workspace"`) {
+		t.Errorf("tool_result.Content missing %q (workspace Source binding surface); got %q",
+			`"source":"workspace"`, toolResultEvent.Content)
+	}
+}
+
+// TestSkillTool_LoadSkill_GlobalSourceInResult is the binding
+// pin for SCOPE §45's source-location deliverable, global (HOME)
+// root: the load_skill tool's tool_result content carries
+// `"source":"global"` when the loaded skill is found under
+// <HOME>/.simple-harness/skills/<name>/SKILL.md and the workspace
+// root has no such fixture. The pin complements the workspace
+// pin by exercising the HOME-root resolution branch.
+func TestSkillTool_LoadSkill_GlobalSourceInResult(t *testing.T) {
+	savedReg := globalRegistry
+	t.Cleanup(func() { globalRegistry = savedReg })
+	freshReg := tools.NewRegistry()
+	builtins.RegisterBuiltins(freshReg)
+	globalRegistry = freshReg
+
+	workspaceDir := t.TempDir()
+	stateDir := t.TempDir()
+	homeDir := t.TempDir()
+
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(workspaceDir); err != nil {
+		t.Fatalf("chdir ws: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
+	t.Setenv("HOME", homeDir)
+
+	// cold-start fixture ONLY under HOME; workspaceDir has no
+	// fixture so the global root is the producer and Source ==
+	// "global".
+	writeListSkillFixtureInline(t, homeDir, "cold-start", "GLOBAL-SOURCE-PIN-GSRC")
+
+	promptFile := filepath.Join(t.TempDir(), "prompt.md")
+	if err := os.WriteFile(promptFile, []byte("load cold-start"), 0o644); err != nil {
+		t.Fatalf("write prompt.md: %v", err)
+	}
+
+	argsJSON, err := json.Marshal(map[string]any{"name": "cold-start"})
+	if err != nil {
+		t.Fatalf("marshal args: %v", err)
+	}
+
+	nRequests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		nRequests++
+		if nRequests == 1 {
+			payload := fmt.Sprintf(
+				`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_loadskill_global_1","function":{"name":"load_skill","arguments":%q}}]}}]}`+"\n\n",
+				string(argsJSON),
+			)
+			fmt.Fprint(w, payload)
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"Loaded."}}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	code, out, errOut := driveRun(t,
+		"--base-url", srv.URL,
+		"--model", "test-model",
+		"--workspace", workspaceDir,
+		"--state-dir", stateDir,
+		"--prompt-file", promptFile,
+		"--output", "jsonl",
+		"--permission", "read_only",
+		"--max-turns", "8",
+	)
+	if code != 0 {
+		t.Fatalf("driveRun returned %d, want 0 (stdout=%q stderr=%q)", code, out, errOut)
+	}
+
+	var toolResultEvent *event.Event
+	for i, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		var ev event.Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("line %d does not parse as JSON: %v (line=%q)", i, err, line)
+		}
+		if ev.Event == "tool_result" && toolResultEvent == nil {
+			cp := ev
+			toolResultEvent = &cp
+		}
+	}
+	if toolResultEvent == nil {
+		t.Fatalf("stdout missing tool_result event (stdout=%q)", out)
+	}
+	if toolResultEvent.ResultStatus != "ok" {
+		t.Fatalf("tool_result.tool_result_status = %q, want %q (stdout=%q)",
+			toolResultEvent.ResultStatus, "ok", out)
+	}
+	if !strings.Contains(toolResultEvent.Content, `"source":"global"`) {
+		t.Errorf("tool_result.Content missing %q (global Source binding surface); got %q",
+			`"source":"global"`, toolResultEvent.Content)
+	}
+}
+
+// TestSkillTool_LoadSkill_OverrideSourceInResult is intentionally
+// NOT implemented at this handoff. The override resolution path
+// (load_skill's `skills_dir` argument) requires either (a) an
+// absolute path which perm.Authorize rejects at the path-escape
+// stage, or (b) a session-level --skills-dir wiring which the
+// internal/tools/builtins/load_skill.go's Execute function does
+// NOT consult (Execute resolves from os.Getwd + os.UserHomeDir +
+// the optional `skills_dir` argument only). The session-level
+// --skills-dir binding lives at internal/loop/ + cmd/simple-harness/
+// run.go's startup path which is FROZEN-out-of-fence at this
+// handoff and which is the F1 follow-up Run's deliverable. Two
+// pins (workspace + global) meet the TG2 bar of ≥4 TestSkillTool_
+// pins; the override pin awaits the F1 follow-up's loop-level
+// integration.

@@ -170,6 +170,66 @@ func TestLedger_AddWithTokens_OverridesEstimate(t *testing.T) {
 	}
 }
 
+// TestLedger_AddWithSource_SkillRenderedWithMarker pins the SCOPE
+// §45 binding surface: an Entry added via AddWithSource(Skill, ...)
+// renders with the "(source)" marker between Name and the padding.
+// The marker is the GOAL §2 bound decision 3 deliverable ("a loaded
+// skill appears in `context show` under the skills category with
+// its source location"). The pin uses Source="workspace" — the
+// canonical workspace-wins collision order value per SCOPE §15.
+func TestLedger_AddWithSource_SkillRenderedWithMarker(t *testing.T) {
+	var l Ledger
+	l.AddWithSource(Skill, "cold-start", "body", "workspace")
+	report := l.Report()
+	wantMarker := "skill: cold-start (workspace)"
+	if !strings.Contains(report, wantMarker) {
+		t.Errorf("Report() missing %q (the Source marker binding surface); got %q",
+			wantMarker, report)
+	}
+}
+
+// TestLedger_Add_NoSource_NoMarker pins the backward-compat
+// surface: existing callers that use Add(category, name, content)
+// (without Source) MUST NOT have the "(...)" marker rendered for
+// their Skill entries. The pin protects the cmd-side `--skill` flag
+// path at run.go:349 from regressing — that path's existing call
+// to ledger.Add(contextpkg.Skill, s.Name, s.Content) (no Source)
+// must render byte-identical against the pre-Source output.
+func TestLedger_Add_NoSource_NoMarker(t *testing.T) {
+	var l Ledger
+	l.Add(Skill, "cold-start", "body")
+	report := l.Report()
+	badMarker := "skill: cold-start ("
+	if strings.Contains(report, badMarker) {
+		t.Errorf("Report() unexpectedly contains %q for an Add()-only entry (no Source); got %q",
+			badMarker, report)
+	}
+	wantBaseline := "skill: cold-start"
+	if !strings.Contains(report, wantBaseline) {
+		t.Errorf("Report() missing baseline %q; got %q", wantBaseline, report)
+	}
+}
+
+// TestLedger_AddWithSource_EmptySource_NoMarker pins the
+// empty-Source edge case: AddWithSource with an explicit empty
+// string Source behaves identically to Add — no "(...)" marker is
+// rendered. The pin protects against an accidental "always emit
+// marker when called via AddWithSource" implementation choice.
+func TestLedger_AddWithSource_EmptySource_NoMarker(t *testing.T) {
+	var l Ledger
+	l.AddWithSource(Skill, "cold-start", "body", "")
+	report := l.Report()
+	badMarker := "skill: cold-start ("
+	if strings.Contains(report, badMarker) {
+		t.Errorf("Report() unexpectedly contains %q for an AddWithSource()-empty-Source entry; got %q",
+			badMarker, report)
+	}
+	wantBaseline := "skill: cold-start"
+	if !strings.Contains(report, wantBaseline) {
+		t.Errorf("Report() missing baseline %q; got %q", wantBaseline, report)
+	}
+}
+
 // TestLedger_AddMCPServer_AppendsByCallOrder pins the additive
 // append behavior of AddMCPServer: two servers added in order
 // appear in the slice in that order; the slice length is the number

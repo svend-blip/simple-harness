@@ -183,6 +183,105 @@ to `"2"` per SCOPE §42 + this `§"Compatibility Policy"` clause.
 
 ---
 
+### Model-invoked skill tools (V1.x additive — SCOPE §45)
+
+The V1 harness exposes two **model-invoked builtin tools** that make
+the SCOPE §15 skill mechanism reachable from the model side of the
+tool dispatch loop (the human-invoked `--skill` flag at launch and
+`/skill` at the prompt remain the canonical human-invoked surface).
+This is the SCOPE §45 deliverable published in Run 021 as an
+additive change to the V1.x public surface — NO `protocol_version`
+bump. The existing `tool_call` / `tool_result` event wire shape is
+unchanged; the two new tools reuse it additively (SCOPE §42 binding).
+
+This subsection is authoritative for the V1 model-invoked skill
+surface. Any future V1.x change to these claims must follow the
+`§"Compatibility Policy"` discipline (additive changes preserve the
+wire shape; intentional breaking changes bump `protocol_version`).
+
+#### Tool inventory
+
+The two new builtins are:
+
+| Name | Purpose | Arguments | Result shape |
+|------|---------|-----------|--------------|
+| `list_skills` | Enumerate the skills discoverable under SCOPE §15's locations (workspace + HOME + override), one-line description each, workspace-wins collision order preserved | `{}` | `ListSkillsResult{Skills: []SkillEntry{Name, Description, Source}}` where `Source ∈ {"workspace", "global", "override"}` |
+| `load_skill`  | Load a named skill's instruction material into the NEXT model request's context, deterministic §14 ordering preserved. Loading an already-loaded skill is idempotent (no duplication in context). | `{name: string, skills_dir?: string}` | `LoadSkillResult{Name, Source, Content}` where `Source ∈ {"workspace", "global", "override"}` |
+
+The `simple-harness tools` subcommand lists both names alongside the
+existing seven builtins (the V1 tool inventory is now **9 tools**:
+the original seven plus `list_skills` + `load_skill`).
+
+#### Read-only guarantee
+
+Both tools are **READ-ONLY**. The implementation never writes,
+creates, or modifies skill files or anything else under SCOPE §15's
+locations. The reviewer-duty §1 binding is structural: no
+`os.WriteFile`, `os.Create`, `os.Remove`, `os.Mkdir`, `os.Rename`,
+`os.Chmod`, `ioutil.WriteFile`, or `plugin.Open` call exists in
+`internal/tools/builtins/list_skills.go`,
+`internal/tools/builtins/load_skill.go`, or
+`internal/skill/skill.go`. Loading an already-loaded skill is
+idempotent — the harness's existing context tracking treats
+duplicate Content across the Ledger as a SCOPE §20 diagnostic
+finding, but the load_skill tool never produces such a duplicate
+because the next model request's context composition dedupes by
+Content (SCOPE §20's duplicate diagnostic stays quiet).
+
+#### Unknown-name structured failure
+
+Calling `load_skill` with a name that is not discoverable under
+SCOPE §15's locations returns a structured tool failure:
+
+```text
+tool_result.tool_result_status = "error"
+tool_result.error.kind          = "skill_not_found"
+tool_result.error.message       = "load_skill: skill \"<name>\" not found under SCOPE §15's locations; call list_skills to see what's discoverable"
+```
+
+The structured failure is bound by the SCOPE §21 event wire shape —
+the model sees the `tool_result` with the structured error and the
+next turn can retry (or call `list_skills` to discover the available
+set). The harness does **NOT** crash, does **NOT** exit 2
+mid-session, and does **NOT** silent-fail.
+
+#### Source-location field
+
+The `Source` field on the tool_result's structured content
+(`LoadSkillResult.Source` and `ListSkillsResult.Skills[*].Source`)
+names the search root that produced the skill:
+
+| Source value | Meaning |
+|--------------|---------|
+| `"workspace"` | Skill found under `<workspace>/.simple-harness/skills/<name>/SKILL.md` |
+| `"global"`    | Skill found under `<HOME>/.simple-harness/skills/<name>/SKILL.md` |
+| `"override"`  | Skill found under the `--skills-dir` override directory (the `skills_dir` argument to `load_skill`, or the resolved `--skills-dir` flag on the harness) |
+
+The workspace-wins collision order from SCOPE §15 means that a
+skill present in both workspace and global roots reports
+`Source = "workspace"`. The `Source` field binds directly to the
+`internal/context.Ledger.AddWithSource(...)` rendering seam
+(`internal/context/context.go` — WORK-2 of Run 021): the cmd-side
+`context show` output renders loaded skills as
+`<category>: <name> (<source>)` for the `skill` category when
+`Source` is non-empty, and the existing `Add(category, name,
+content)` path (without `Source`) stays byte-identical against the
+pre-Run-021 output.
+
+#### `protocol_version` invariant
+
+The model-invoked skill tools do NOT change `protocol_version`.
+The value stays at `"1"`. The two new tools reuse the existing
+`tool_call` / `tool_result` events (additive content; no schema
+change; no new event types; no new event fields — the `Source`
+field on the tool_result's structured content is an additive
+content field on the JSON payload, not on the event envelope). A
+future V2 that adds a new skill-event type or a new event-envelope
+field would bump `protocol_version` to `"2"` per SCOPE §42 + this
+`§"Compatibility Policy"` clause.
+
+---
+
 ## CLI Invocation Grammar
 
 The V1 CLI surface is `simple-harness [global flags] [subcommand]`.

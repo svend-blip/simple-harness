@@ -83,12 +83,18 @@ const (
 // "harness" for the harness system, "external" for an external
 // system file). Content is the raw text. TokenEstimate is the
 // result of Estimate(Content) UNLESS the caller supplied a non-zero
-// value via AddWithTokens.
+// value via AddWithTokens. Source is the optional provenance
+// marker (e.g. "workspace", "global", "override" for skill entries
+// per SCOPE §45); empty string means "no source attribution" — the
+// Report rendering only emits the "(source)" marker for entries
+// where Source is non-empty AND Category is Skill, keeping the
+// pre-Source rendering byte-identical for all other entries.
 type Entry struct {
 	Category      Category
 	Name          string
 	Content       string
 	TokenEstimate int
+	Source        string
 }
 
 // Finding is one doctor diagnostic. Findings surface the major
@@ -215,6 +221,29 @@ func (l *Ledger) AddWithTokens(category Category, name, content string, tokens i
 	})
 }
 
+// AddWithSource appends an Entry to the Ledger with TokenEstimate =
+// Estimate(Content) AND the Source field populated. This is the
+// canonical seam for SCOPE §45's "a loaded skill appears in context
+// diagnostics with its source location" deliverable: the
+// load_skill tool calls ledger.AddWithSource(contextpkg.Skill,
+// s.Name, s.Content, s.Source) so the cmd-side `context show`
+// rendering emits `<category>: <name> (<source>)` for the Skill
+// category. Empty Content is still skipped (same semantics as Add);
+// an empty Source is allowed and emits no `(...)` marker (mirrors
+// the no-Source rendering for backward-compat callers).
+func (l *Ledger) AddWithSource(category Category, name, content, source string) {
+	if content == "" {
+		return
+	}
+	l.Entries = append(l.Entries, Entry{
+		Category:      category,
+		Name:          name,
+		Content:       content,
+		TokenEstimate: Estimate(content),
+		Source:        source,
+	})
+}
+
 // Total returns the sum of all TokenEstimate values across the
 // Ledger's Entries. Returns 0 for an empty ledger.
 func (l *Ledger) Total() int {
@@ -308,6 +337,9 @@ func (l *Ledger) Report() string {
 		}
 		for _, e := range catEntries {
 			label := fmt.Sprintf("%s: %s", e.Category, e.Name)
+			if e.Category == Skill && e.Source != "" {
+				label = fmt.Sprintf("%s: %s (%s)", e.Category, e.Name, e.Source)
+			}
 			fmt.Fprintf(&b, "%-30s %6d tokens\n", label, e.TokenEstimate)
 		}
 	}
