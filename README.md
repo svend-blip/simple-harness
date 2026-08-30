@@ -56,9 +56,13 @@ simple-harness>
   authorize → execute → record → append → next request, bounded by
   `--max-turns`. Malformed model tool-calls are untrusted input —
   structured rejection, never a crash.
-- **Seven builtin tools:** `read_file`, `write_file`, `apply_patch`,
-  `list_directory`, `search_files`, `grep`, `shell` — each with explicit
-  schema, validation, structured results, and observable start/completion.
+- **Nine builtin tools:** `read_file`, `write_file`, `apply_patch`,
+  `list_directory`, `search_files`, `grep`, `shell`, `list_skills`,
+  `load_skill` — each with explicit schema, validation, structured
+  results, and observable start/completion. `list_skills` and
+  `load_skill` enable model-invoked skill discovery and loading at
+  runtime (the model can enumerate available skills and load one into
+  its context mid-session).
 - **Deterministic permission modes** enforced in code at the execution
   boundary: `read_only`, `workspace_write`, `full_access`. No silent
   escalation; the effective mode is externally visible (`config show`).
@@ -68,6 +72,17 @@ simple-harness>
   child-process cleanup via process groups. No terminal scraping needed —
   see `docs/HARNESS-CONTRACT.md` (the frozen V1 public contract) and
   `scripts/contract-check.sh` (model-free conformance checker).
+- **MCP client (V2):** configuration-pinned servers via the
+  `mcp_servers` config key — the harness connects to configured
+  Model Context Protocol servers at session start and exposes their
+  tools alongside the builtins. See `docs/examples/mcp-light.json`
+  for a reference config and `docs/HARNESS-CONTRACT.md` for the
+  MCP client section.
+- **Model-invoked skills:** the `list_skills` + `load_skill` builtin
+  tools let a model discover and load skills at runtime — the
+  `--skill` flag and `/skill` slash command remain for human-initiated
+  loading, but a model can now enumerate available skills and pull
+  one into its context mid-session.
 - **Sessions:** stable identity per execution, inspectable history
   (`session.json` + `messages.jsonl` + `events.jsonl` under
   `--state-dir`), `sessions list` / `sessions show`.
@@ -107,3 +122,61 @@ V1 complete: 17 governed runs, SCOPE validation green
 V2 wave in progress per the 2026-08-29 scope amendment: MCP client with
 configuration-pinned servers (§43), mcp-light reference integration
 (§44), and model-invoked skills (§45).
+
+## Requirements
+
+Go (the runtime binary at `bin/simple-harness-runtime` is pre-built and
+committed; no Go toolchain needed to run it). See
+`docs/ADR-001-implementation-language.md` for the Python-vs-Go decision
+record. Optional: `jq` + `python3` for the test suite (`./scripts/test.sh`)
+and contract checker (`./scripts/contract-check.sh`).
+
+## Installation
+
+### Install manually
+
+Download or clone the repository. The runtime binary at
+`bin/simple-harness-runtime` is committed alongside the wrapper
+`bin/simple-harness` — no build step is required to run the harness.
+Optionally rebuild from source with
+`go build -o bin/simple-harness-runtime ./cmd/simple-harness`.
+
+### Install using an Agent
+
+Point a tool-capable model at the repository and have it invoke
+`bin/simple-harness run` with the appropriate flags. The harness is
+self-contained and works out of the box.
+
+### Verify installation
+
+Run `./scripts/test.sh` (13 packages, mocked models) and
+`./scripts/contract-check.sh` (model-free V1 contract conformance).
+Both scripts are part of the committed repository.
+
+## Configuration
+
+Configuration is read from the hierarchy:
+`~/.simple-harness/config.yaml` → `.simple-harness/config.yaml` →
+environment variables. The `mcp_servers` config key (V2) lists
+configuration-pinned MCP servers the harness connects to at session
+start — see `docs/examples/mcp-light.json` for a reference config and
+`docs/HARNESS-CONTRACT.md` for the MCP client section. The `api_key`
+field is redacted in `config show` output per SCOPE §30.
+
+## Running
+
+Interactive: `bin/simple-harness --workspace ~/project`. Headless:
+`bin/simple-harness run --base-url URL --model NAME --workspace DIR
+--permission workspace_write --prompt-file task.md --max-turns 8
+--output jsonl`. The wrapper `bin/simple-harness` `exec`s the
+committed runtime binary so signals reach the harness process
+directly. See the Quick start section above for examples.
+
+## Testing
+
+Run `./scripts/test.sh` for the full test suite (13 packages, mocked
+models) and `./scripts/contract-check.sh` for the model-free V1
+contract conformance checker. Live acceptance runners
+(`./scripts/e2e-coding.sh URL MODEL` and
+`./scripts/e2e-review.sh URL MODEL`) require a reachable OpenAI-
+compatible endpoint.
