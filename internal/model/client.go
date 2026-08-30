@@ -51,12 +51,42 @@ type Message struct {
 	Content string `json:"content"`
 }
 
+// ToolDefinition is the OpenAI function-calling wire shape for a
+// single advertised tool. The harness emits {"type":"function",
+// "function":{...}} per the OpenAI chat-completions `tools` spec;
+// the Type field lets future handoffs carry other tool kinds
+// (e.g., "code_interpreter") without a breaking change.
+type ToolDefinition struct {
+	Type     string             `json:"type"`
+	Function ToolDefinitionFunc `json:"function"`
+}
+
+// ToolDefinitionFunc is one tool's name + description + JSON-schema
+// parameters. The loop builds these from tools.Tool.Meta() +
+// tools.Tool.Schema() — the Description carries the human-readable
+// purpose; the Parameters is the JSON-schema rendering of the
+// tool's tools.Schema (the JSON-schema-lite shape maps 1:1 onto
+// the OpenAI JSON-schema subset: type/required/properties/
+// additionalProperties).
+type ToolDefinitionFunc struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"`
+}
+
 // ChatRequest is the outgoing chat-completions request body, minus
 // the fields the client merges in from Options (model, temperature,
-// max_tokens, stream). The loop owns tool-call-related fields
-// (tools, tool_choice) when handoff 010+ lands them.
+// max_tokens, stream). The loop owns Tools + ToolChoice (Run 023 /
+// handoff 073) and populates them from tools.Registry at the call
+// site. Tools is the OpenAI function-calling wire shape
+// ({"type":"function","function":{"name","description","parameters"}});
+// ToolChoice is "auto" when Tools is non-empty and the field is
+// omitted on the wire otherwise. The ,omitempty tags keep existing
+// serialization tests valid for empty-registry callers.
 type ChatRequest struct {
-	Messages []Message `json:"messages"`
+	Messages   []Message        `json:"messages"`
+	Tools      []ToolDefinition `json:"tools,omitempty"`
+	ToolChoice any              `json:"tool_choice,omitempty"`
 }
 
 // ToolCallFragment is one tool-call delta as carried in
@@ -309,17 +339,21 @@ func NewClient(opts Options) *Client {
 // model, messages, temperature, max_tokens, and stream: true.
 func (c *Client) ChatStream(ctx context.Context, req ChatRequest, onDelta func(StreamEvent) error) error {
 	body, err := json.Marshal(struct {
-		Model       string    `json:"model"`
-		Messages    []Message `json:"messages"`
-		Temperature float64   `json:"temperature"`
-		MaxTokens   int       `json:"max_tokens"`
-		Stream      bool      `json:"stream"`
+		Model       string           `json:"model"`
+		Messages    []Message        `json:"messages"`
+		Temperature float64          `json:"temperature"`
+		MaxTokens   int              `json:"max_tokens"`
+		Stream      bool             `json:"stream"`
+		Tools       []ToolDefinition `json:"tools,omitempty"`
+		ToolChoice  any              `json:"tool_choice,omitempty"`
 	}{
 		Model:       c.opts.Model,
 		Messages:    req.Messages,
 		Temperature: c.opts.Temperature,
 		MaxTokens:   c.opts.MaxOutputTokens,
 		Stream:      true,
+		Tools:       req.Tools,
+		ToolChoice:  req.ToolChoice,
 	})
 	if err != nil {
 		return &ModelError{Kind: ErrParse, Err: err}

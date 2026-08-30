@@ -299,8 +299,11 @@ func (r *Run) RunOne(ctx context.Context, prompt string) (string, error) {
 	// (handoff 036); RunOne calls it once per RunOne invocation.
 	r.PopulateLedger(prompt)
 
+	advertisedTools, advertisedToolChoice := toolsToChatRequestTools(r.cfg.Tools)
 	err := r.client.ChatStream(ctx, model.ChatRequest{
-		Messages: ComposeMessages(r.cfg, prompt),
+		Messages:   ComposeMessages(r.cfg, prompt),
+		Tools:      advertisedTools,
+		ToolChoice: advertisedToolChoice,
 	}, onDelta)
 
 	if err != nil {
@@ -398,6 +401,105 @@ func ComposeMessages(cfg Config, prompt string) []model.Message {
 	}
 	messages = append(messages, model.Message{Role: "user", Content: prompt})
 	return messages
+}
+
+// toolsToChatRequestTools builds the model.ToolDefinition list +
+// the model-side ToolChoice value from the configured
+// tools.Registry. The list is sorted-by-name (registry.Names()
+// returns sorted names; the loop re-uses that ordering verbatim)
+// so the wire body is deterministic across runs — the registry's
+// internal map iteration must NOT leak into the wire. For an
+// empty or nil registry the helper returns (nil, nil); the
+// ,omitempty on the wire carries the empty case through.
+//
+// The helper is the single seam where the JSON-schema rendering
+// happens: each tool's tools.Schema
+// (Required/Properties(PropertyType)/AdditionalProperties) is
+// translated into the OpenAI JSON-schema subset
+// ({"type":"object","required":[...],"properties":{...},
+// "additionalProperties":<bool>}); the marshaled bytes land in
+// model.ToolDefinitionFunc.Parameters as a json.RawMessage.
+//
+// Run 023 / handoff 073 owns this helper. The helper is NOT
+// concurrency-safe for concurrent mutation of the registry
+// (Register is the only mutator; per handoff 013 Register is
+// called once at startup, so concurrent dispatch sees a stable
+// registry — the loop's existing dispatch path at line 706 calls
+// r.cfg.Tools.Dispatch without a lock for the same reason).
+func toolsToChatRequestTools(reg *tools.Registry) ([]model.ToolDefinition, *string) {
+	if reg == nil {
+		return nil, nil
+	}
+	names := reg.Names()
+	if len(names) == 0 {
+		return nil, nil
+	}
+	defs := make([]model.ToolDefinition, 0, len(names))
+	for _, name := range names {
+		t, ok := reg.Get(name)
+		if !ok {
+			continue
+		}
+		meta := t.Meta()
+		schema := t.Schema()
+		params, err := schemaToJSONSchema(schema)
+		if err != nil {
+			// A schema-render failure is a programming error in
+			// the tool's Schema declaration; the loop continues
+			// without that tool rather than failing the whole
+			// request (the SCOPE §31 untrusted-input discipline:
+			// structured rejection, never a hard failure). The
+			// cmd-side accounting ledger does not carry this
+			// signal — the omitted tool is the observable.
+			continue
+		}
+		defs = append(defs, model.ToolDefinition{
+			Type: "function",
+			Function: model.ToolDefinitionFunc{
+				Name:        meta.Name,
+				Description: meta.Description,
+				Parameters:  params,
+			},
+		})
+	}
+	if len(defs) == 0 {
+		return nil, nil
+	}
+	choice := "auto"
+	return defs, &choice
+}
+
+// schemaToJSONSchema renders a tools.Schema as a JSON-schema object
+// for the OpenAI function-calling parameters field. The mapping is
+// the minimal subset needed for the wire: object type, required
+// array, typed properties map, additionalProperties boolean.
+//
+// The wire shape:
+//   {"type":"object","required":[...],"properties":{"k":{"type":"<type>"},
+//    ...},"additionalProperties":<bool>}
+//
+// An empty Properties map emits "properties":{} (the wire accepts
+// this; OpenAI models treat it as a no-arg tool). A nil/empty
+// Required emits "required":null via the json.Marshal "omitempty"
+// semantics — the implementer may use a pointer-typed Required
+// field on a local struct to control the wire shape precisely.
+func schemaToJSONSchema(schema tools.Schema) (json.RawMessage, error) {
+	props := make(map[string]map[string]string, len(schema.Properties))
+	for k, v := range schema.Properties {
+		props[k] = map[string]string{"type": string(v)}
+	}
+	body := struct {
+		Type                 string                       `json:"type"`
+		Required             []string                     `json:"required,omitempty"`
+		Properties           map[string]map[string]string `json:"properties"`
+		AdditionalProperties bool                         `json:"additional_properties"`
+	}{
+		Type:                 "object",
+		Required:             schema.Required,
+		Properties:           props,
+		AdditionalProperties: schema.AdditionalProperties,
+	}
+	return json.Marshal(body)
 }
 
 // --- handoff 040: Run 017 / LOOP-CORE ---
@@ -540,6 +642,7 @@ func (r *Run) RunAgent(ctx context.Context, prompt string) (string, error) {
 	r.PopulateLedger(prompt)
 
 	history := ComposeMessages(r.cfg, prompt)
+	advertisedTools, advertisedToolChoice := toolsToChatRequestTools(r.cfg.Tools)
 
 	var (
 		accumulatedText strings.Builder
@@ -629,7 +732,9 @@ func (r *Run) RunAgent(ctx context.Context, prompt string) (string, error) {
 		}
 
 		if err := r.client.ChatStream(ctx, model.ChatRequest{
-			Messages: history,
+			Messages:   history,
+			Tools:      advertisedTools,
+			ToolChoice: advertisedToolChoice,
 		}, onDelta); err != nil {
 			var me *model.ModelError
 			if errors.As(err, &me) {

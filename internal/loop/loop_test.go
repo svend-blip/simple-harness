@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/svend-blip/simple-harness/internal/event"
 	"github.com/svend-blip/simple-harness/internal/model"
 	"github.com/svend-blip/simple-harness/internal/skill"
+	"github.com/svend-blip/simple-harness/internal/tools"
 )
 
 // TestRunOne_HappyPath_AccumulatesAndStreams is the load-bearing
@@ -1061,4 +1063,88 @@ func TestRun_PopulateLedger_RunOneCallsHelper(t *testing.T) {
 	if led.Entries[1].Category != contextpkg.Task || led.Entries[1].Name != "task" {
 		t.Errorf("Entries[1] = {%q, %q}, want {Task, task}", led.Entries[1].Category, led.Entries[1].Name)
 	}
+}
+
+// TestRunOne_AdvertisesRegisteredTools pins the loop-side wiring
+// per Run 023 / handoff 073: the loop populates the
+// model.ChatRequest.Tools field from r.cfg.Tools (the registered
+// tool inventory). The pin registers 2 stub tools in a fresh
+// registry, constructs a Run with Config.Tools pointing at the
+// registry, calls RunOne, and asserts the captured body carries
+// a tools array whose function.name entries are exactly the
+// registered names. The pin is the loop-side complement to the
+// model-side TestChatRequest_Tools_AdvertisesRegisteredTools pin
+// in internal/model/client_test.go; together they cover the
+// full construction -> wire contract.
+func TestRunOne_AdvertisesRegisteredTools(t *testing.T) {
+	var gotBody struct {
+		Tools []struct {
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		} `json:"tools"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	reg := tools.NewRegistry()
+	reg.Register(&stubLoopTool{name: "read_file", desc: "r"})
+	reg.Register(&stubLoopTool{name: "write_file", desc: "w"})
+
+	var sidecar bytes.Buffer
+	em := event.NewEmitter(&sidecar, "sess-tools-advertise")
+	var stdout bytes.Buffer
+	client := model.NewClient(model.Options{
+		BaseURL:        srv.URL,
+		Model:          "qwen",
+		RequestTimeout: 2 * time.Second,
+	})
+	r := New(Config{
+		Model:      model.Options{BaseURL: srv.URL, Model: "qwen"},
+		Workspace:  "/tmp/ws",
+		Permission: "READ_ONLY",
+		Tools:      reg,
+	}, client, em, &stdout)
+
+	if _, err := r.RunOne(context.Background(), "hi"); err != nil {
+		t.Fatalf("RunOne: %v", err)
+	}
+	if len(gotBody.Tools) != 2 {
+		t.Fatalf("body.tools len = %d, want 2 (got=%+v)", len(gotBody.Tools), gotBody.Tools)
+	}
+	names := []string{}
+	for _, td := range gotBody.Tools {
+		names = append(names, td.Function.Name)
+	}
+	want := []string{"read_file", "write_file"}
+	if !reflect.DeepEqual(names, want) {
+		t.Errorf("body.tools names = %v, want %v (sorted)", names, want)
+	}
+}
+
+// stubLoopTool is the minimal tools.Tool implementation the new
+// TestRunOne_AdvertisesRegisteredTools pin needs. It is the
+// loop-side counterpart to the model-side stubTool helper in
+// internal/model/client_test.go.
+type stubLoopTool struct {
+	name string
+	desc string
+}
+
+func (s *stubLoopTool) Meta() tools.ToolMeta {
+	return tools.ToolMeta{Name: s.name, Description: s.desc}
+}
+
+func (s *stubLoopTool) Schema() tools.Schema {
+	return tools.Schema{}
+}
+
+func (s *stubLoopTool) Execute(ctx context.Context, call tools.Call) (tools.Result, error) {
+	return tools.Result{Status: "ok", Content: "stub"}, nil
 }

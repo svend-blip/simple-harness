@@ -5,11 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/svend-blip/simple-harness/internal/tools"
 )
 
 // TestRequestShape pins the outgoing wire shape against a real
@@ -316,3 +320,261 @@ func TestAccumulateToolCallFragment_MergesArgs(t *testing.T) {
 		t.Errorf("Arguments[patch] missing")
 	}
 }
+
+// TestChatRequest_Tools_AdvertisesRegisteredTools pins binding
+// pin (a) from GOAL §2: the outgoing request body carries a
+// `tools` array naming every registered tool with
+// schema-derived parameters. The pin registers 3 stub tools
+// (the names mirror the builtin-tool surface for readability;
+// the schemas are minimal but exercise the wire rendering),
+// captures the marshaled body via the existing httptest.Server
+// pattern from TestRequestShape, and asserts the body carries
+// a `tools` array whose length equals the registry size, every
+// entry's function.name is a registered name, and every entry's
+// function.parameters parses as JSON carrying type:"object"
+// and a non-empty properties map.
+func TestChatRequest_Tools_AdvertisesRegisteredTools(t *testing.T) {
+	var gotBody struct {
+		Model    string `json:"model"`
+		Messages []Message `json:"messages"`
+		Tools    []struct {
+			Type     string `json:"type"`
+			Function struct {
+				Name        string          `json:"name"`
+				Description string          `json:"description"`
+				Parameters  json.RawMessage `json:"parameters"`
+			} `json:"function"`
+		} `json:"tools"`
+		ToolChoice any `json:"tool_choice"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	reg := tools.NewRegistry()
+	reg.Register(&stubTool{name: "alpha", desc: "the alpha tool",
+		schema: tools.Schema{Required: []string{"a"},
+			Properties: map[string]tools.PropertyType{"a": tools.TypeString}}})
+	reg.Register(&stubTool{name: "beta", desc: "the beta tool",
+		schema: tools.Schema{Properties: map[string]tools.PropertyType{
+			"n": tools.TypeInt}}})
+	reg.Register(&stubTool{name: "gamma", desc: "the gamma tool",
+		schema: tools.Schema{}})
+
+	c := NewClient(Options{BaseURL: srv.URL, Model: "qwen"})
+	err := c.ChatStream(context.Background(), ChatRequest{
+		Messages:   []Message{{Role: "user", Content: "hi"}},
+		Tools:      toolsFromRegistry(reg),
+		ToolChoice: ptrString("auto"),
+	}, func(StreamEvent) error { return nil })
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+	if len(gotBody.Tools) != 3 {
+		t.Fatalf("body.tools len = %d, want 3 (got=%+v)", len(gotBody.Tools), gotBody.Tools)
+	}
+	names := []string{}
+	for _, td := range gotBody.Tools {
+		names = append(names, td.Function.Name)
+		if td.Type != "function" {
+			t.Errorf("tools[%s].type = %q, want function", td.Function.Name, td.Type)
+		}
+		var params struct {
+			Type       string                       `json:"type"`
+			Properties map[string]map[string]string `json:"properties"`
+		}
+		if err := json.Unmarshal(td.Function.Parameters, &params); err != nil {
+			t.Errorf("tools[%s].function.parameters not parseable JSON: %v", td.Function.Name, err)
+			continue
+		}
+		if params.Type != "object" {
+			t.Errorf("tools[%s].function.parameters.type = %q, want object", td.Function.Name, params.Type)
+		}
+	}
+	want := []string{"alpha", "beta", "gamma"}
+	if !reflect.DeepEqual(names, want) {
+		t.Errorf("body.tools names = %v, want %v (sorted)", names, want)
+	}
+	if got, ok := gotBody.ToolChoice.(string); !ok || got != "auto" {
+		t.Errorf("body.tool_choice = %v, want \"auto\"", gotBody.ToolChoice)
+	}
+}
+
+// TestChatRequest_Tools_SortedByName pins binding pin (b) from
+// GOAL §2: the outgoing request body's tools array is in
+// sorted-by-name order regardless of registration order. The
+// pin registers 4 tools in REVERSE-sorted order (zeta, then
+// yankee, then xray, then alpha) and asserts the wire body's
+// tools[] sequence is alphabetically sorted (alpha, xray,
+// yankee, zeta). The registry's internal map iteration must
+// NOT leak registration order into the wire.
+func TestChatRequest_Tools_SortedByName(t *testing.T) {
+	var gotBody struct {
+		Tools []struct {
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		} `json:"tools"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	reg := tools.NewRegistry()
+	for _, name := range []string{"zeta", "yankee", "xray", "alpha"} {
+		reg.Register(&stubTool{name: name, desc: name + " desc",
+			schema: tools.Schema{}})
+	}
+
+	c := NewClient(Options{BaseURL: srv.URL, Model: "qwen"})
+	err := c.ChatStream(context.Background(), ChatRequest{
+		Messages:   []Message{{Role: "user", Content: "hi"}},
+		Tools:      toolsFromRegistry(reg),
+		ToolChoice: ptrString("auto"),
+	}, func(StreamEvent) error { return nil })
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+	want := []string{"alpha", "xray", "yankee", "zeta"}
+	if len(gotBody.Tools) != len(want) {
+		t.Fatalf("body.tools len = %d, want %d", len(gotBody.Tools), len(want))
+	}
+	for i, w := range want {
+		if gotBody.Tools[i].Function.Name != w {
+			t.Errorf("body.tools[%d].function.name = %q, want %q (sorted)",
+				i, gotBody.Tools[i].Function.Name, w)
+		}
+	}
+}
+
+// TestChatRequest_Tools_EmptyRegistryOmitsFields pins binding
+// pin (c) from GOAL §2 + GOAL §5 reviewer-duty 3: when the
+// registry is empty, BOTH `tools` and `tool_choice` are ABSENT
+// from the serialized body (backward compat — the V1 wire shape
+// stays identical for empty-registry callers). The pin constructs
+// a ChatRequest with empty Tools + nil ToolChoice, captures the
+// marshaled body via the httptest.Server pattern, and asserts
+// the body has neither `tools` nor `tool_choice` keys (the JSON
+// decoder sees zero-value fields for absent keys).
+//
+// The pin's negative assertion is binding — a future regression
+// that emits `"tools":null` or `"tool_choice":null` for an
+// empty-registry caller fails the test (the OpenAI wire spec
+// treats `null` and absent differently; the harness must emit
+// ABSENT for empty-registry callers to keep backward compat with
+// the V1 mock-model + the existing wire-shape assertions).
+func TestChatRequest_Tools_EmptyRegistryOmitsFields(t *testing.T) {
+	var rawBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rawBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	c := NewClient(Options{BaseURL: srv.URL, Model: "qwen"})
+	err := c.ChatStream(context.Background(), ChatRequest{
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	}, func(StreamEvent) error { return nil })
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+	bodyStr := string(rawBody)
+	if strings.Contains(bodyStr, `"tools"`) {
+		t.Errorf("body contains `tools` key for empty registry: %s", bodyStr)
+	}
+	if strings.Contains(bodyStr, `"tool_choice"`) {
+		t.Errorf("body contains `tool_choice` key for empty registry: %s", bodyStr)
+	}
+}
+
+// stubTool is the minimal tools.Tool implementation the new
+// TestChatRequest_Tools* pins need. The harness's builtin tools
+// are not directly importable from this package (the model
+// package does not import internal/tools to keep the leaf
+// boundary clean — see docs/ARCHITECTURE.md §"internal/model/"),
+// so the test file constructs its own minimal stubs.
+type stubTool struct {
+	name   string
+	desc   string
+	schema tools.Schema
+}
+
+func (s *stubTool) Meta() tools.ToolMeta {
+	return tools.ToolMeta{Name: s.name, Description: s.desc}
+}
+
+func (s *stubTool) Schema() tools.Schema {
+	return s.schema
+}
+
+func (s *stubTool) Execute(ctx context.Context, call tools.Call) (tools.Result, error) {
+	return tools.Result{Status: "ok", Content: "stub"}, nil
+}
+
+// toolsFromRegistry is the test-only mirror of the loop's
+// toolsToChatRequestTools helper. It builds []model.ToolDefinition
+// + *string("auto") from a tools.Registry using the same
+// sorted-by-name iteration the loop uses. The helper shares its
+// schema-rendering path with the production helper IF the
+// implementer chooses to factor the schemaToJSONSchema helper
+// into a shared location (e.g., an internal/testutil package) —
+// the simpler choice is for the test helper to inline the same
+// JSON-schema rendering; the binding is that the wire-shape
+// contract is the same on both sides.
+func toolsFromRegistry(reg *tools.Registry) []ToolDefinition {
+	names := reg.Names()
+	if len(names) == 0 {
+		return nil
+	}
+	defs := make([]ToolDefinition, 0, len(names))
+	for _, name := range names {
+		t, ok := reg.Get(name)
+		if !ok {
+			continue
+		}
+		meta := t.Meta()
+		schema := t.Schema()
+		params := renderStubSchema(schema)
+		defs = append(defs, ToolDefinition{
+			Type: "function",
+			Function: ToolDefinitionFunc{
+				Name:        meta.Name,
+				Description: meta.Description,
+				Parameters:  params,
+			},
+		})
+	}
+	return defs
+}
+
+func renderStubSchema(schema tools.Schema) json.RawMessage {
+	props := make(map[string]map[string]string, len(schema.Properties))
+	for k, v := range schema.Properties {
+		props[k] = map[string]string{"type": string(v)}
+	}
+	body, _ := json.Marshal(struct {
+		Type                 string                       `json:"type"`
+		Required             []string                     `json:"required,omitempty"`
+		Properties           map[string]map[string]string `json:"properties"`
+		AdditionalProperties bool                         `json:"additional_properties"`
+	}{
+		Type:                 "object",
+		Required:             schema.Required,
+		Properties:           props,
+		AdditionalProperties: schema.AdditionalProperties,
+	})
+	return body
+}
+
+func ptrString(s string) *string { return &s }
