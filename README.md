@@ -122,7 +122,7 @@ V1 complete: 18 governed runs, SCOPE validation green
 V2 wave in progress per the 2026-08-29 scope amendment: MCP client with
 configuration-pinned servers (§43), mcp-light reference integration
 (§44), and model-invoked skills (§45).
-Criterion 30: see [docs/EVIDENCE-criterion-30.md](docs/EVIDENCE-criterion-30.md) — honest FAIL per Run 023 / handoff 074.
+Criterion 30: see [docs/EVIDENCE-criterion-30.md](docs/EVIDENCE-criterion-30.md) — PASS per Run 023 / handoff 078.
 
 ## Requirements
 
