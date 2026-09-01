@@ -8,3 +8,22 @@ coverage.out
 coverage.html
 /simple-harness
 /simple-harness-runtime
+
+# Environment, databases, backup and editor litter (added 2026-09-01;
+# .claude/settings.local.json was previously only protected by a
+# machine-local global ignore that does not travel with the repo)
+.env
+.env.*
+!.env.example
+*.db
+*.sqlite*
+*.bak
+*.old
+*.orig
+*~
+*.swp
+*.pid
+.claude/settings.local.json
+.pytest_cache/
+__pycache__/
+.DS_Store
