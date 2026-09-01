@@ -13,6 +13,41 @@ one task → one role → one workspace → one session
         → one model endpoint → model/tool loop → observable result
 ```
 
+## Use in the DPMtF ecosystem
+
+simple-harness is fully standalone — but it is also one of the coding
+harnesses the **DPMtF** framework can drive.
+
+**DPMtF (Deterministic Process Management to Finalisation)** is an
+open-source framework for coordinating multiple AI agents, models, and
+coding tools through a controlled process from defined intent to
+verified completion. Its principle: **the right model, the right
+harness, the right role** — model selection and harness selection are
+kept separate from the workflow itself, so premium resources are spent
+only where they add value.
+
+> A powerful cloud agent may benefit from a feature-rich coding harness,
+> while a local model may perform better through a lighter harness with
+> less overhead. DPMtF therefore treats the model and the harness as
+> separate parts of the execution configuration rather than forcing
+> every agent through the same toolchain.
+
+That lighter harness is what simple-harness is. In the ecosystem,
+[Harness Allocator](https://github.com/svend-blip/harness-allocator)
+resolves a role to simple-harness and builds the invocation,
+[Model Allocator](https://github.com/svend-blip/model-allocator)
+supplies the resolved model endpoint, and
+[DPMtF-WebUI](https://github.com/svend-blip/DPMtF-WebUI) dispatches
+governed flow steps through it — the composition proven live by the
+9000 test flows. The quickstart in DPMtF-WebUI's SETUP.md clones this
+repo as a sibling, and the committed runtime binary means a fresh clone
+works with nothing to build.
+
+None of that is required to use it: without DPMtF, simple-harness runs
+exactly as described below.
+
+**The DPMtF ecosystem:** [DPMtF-WebUI](https://github.com/svend-blip/DPMtF-WebUI) · [model-allocator](https://github.com/svend-blip/model-allocator) · [harness-allocator](https://github.com/svend-blip/harness-allocator) · [mcp-light](https://github.com/svend-blip/mcp-light) · [DPMtF-LightWorker](https://github.com/svend-blip/DPMtF-LightWorker) · [simple-harness](https://github.com/svend-blip/simple-harness)
+
 ## Quick start
 
 ```bash
