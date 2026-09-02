@@ -142,7 +142,7 @@ func (ReadFile) Execute(ctx context.Context, call tools.Call) (tools.Result, err
 	// line range when omitted; both are clamped on the way out.
 	startLine := 1
 	if v, present := call.Arguments["start_line"]; present {
-		if iv, ok := v.(int); ok {
+		if iv, ok := intArg(v); ok {
 			startLine = iv
 		} else {
 			// Schema validator catches this for the
@@ -157,7 +157,7 @@ func (ReadFile) Execute(ctx context.Context, call tools.Call) (tools.Result, err
 	}
 	endLine := 0 // sentinel: "set later from the file's last line"
 	if v, present := call.Arguments["end_line"]; present {
-		if iv, ok := v.(int); ok {
+		if iv, ok := intArg(v); ok {
 			endLine = iv
 		} else {
 			return tools.Result{Status: "error", Error: &tools.ToolError{

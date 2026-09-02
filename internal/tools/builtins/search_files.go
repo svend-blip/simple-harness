@@ -120,7 +120,7 @@ func (SearchFiles) Execute(ctx context.Context, call tools.Call) (tools.Result, 
 
 	maxResults := searchFilesDefaultMax
 	if v, present := call.Arguments["max_results"]; present {
-		if iv, ok := v.(int); ok {
+		if iv, ok := intArg(v); ok {
 			maxResults = iv
 		} else {
 			return tools.Result{Status: "error", Error: &tools.ToolError{

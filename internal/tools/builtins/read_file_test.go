@@ -377,3 +377,37 @@ func TestReadFile_PathEscapeRejected_DirectExecute(t *testing.T) {
 	// Silence the dir-variable warning.
 	_ = dir
 }
+// TestReadFile_JSONDecodedLineNumbers: a model's call arrives through
+// encoding/json, so start_line/end_line are float64, not int. The schema
+// accepts a whole float64; the tool must too. Every ranged read_file from
+// a MiniMax session failed on this on 2026-09-02.
+func TestReadFile_JSONDecodedLineNumbers(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(path, []byte("l1\nl2\nl3\nl4\nl5\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rf := ReadFile{}
+	call := tools.Call{Name: "read_file", Arguments: map[string]any{
+		"path":       path,
+		"start_line": float64(2),
+		"end_line":   float64(3),
+	}}
+	res, err := rf.Execute(context.Background(), call)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res.Status != "ok" {
+		t.Fatalf("status %q, error %+v", res.Status, res.Error)
+	}
+	got := readFileContent(t, res).Content
+	if !strings.Contains(got, "l2") || !strings.Contains(got, "l3") || strings.Contains(got, "l4") {
+		t.Fatalf("expected lines 2-3 only, got %q", got)
+	}
+	// A fractional number is still a schema violation.
+	call.Arguments["start_line"] = 2.5
+	res, _ = rf.Execute(context.Background(), call)
+	if res.Status != "error" || res.Error == nil || res.Error.Kind != "schema_violation" {
+		t.Fatalf("fractional start_line must be rejected, got %+v", res)
+	}
+}
