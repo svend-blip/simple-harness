@@ -87,12 +87,18 @@ type MCPServerConfig struct {
 // the SCOPE example verbatim and keeps the JSON key 1:1 — see
 // handoff 006 §1 (config struct) for the readability cost decision.
 type ModelConfig struct {
-	Provider        string        `json:"provider"`
-	BaseURL         string        `json:"base_url"`
-	Model           string        `json:"model"`
-	APIKey          string        `json:"api_key"`
-	Temperature     float64       `json:"temperature"`
-	MaxOutputTokens int           `json:"max_output_tokens"`
+	Provider        string  `json:"provider"`
+	BaseURL         string  `json:"base_url"`
+	Model           string  `json:"model"`
+	APIKey          string  `json:"api_key"`
+	Temperature     float64 `json:"temperature"`
+	MaxOutputTokens int     `json:"max_output_tokens"`
+	// ReasoningEffort is sent as the OpenAI-compatible `reasoning_effort`
+	// request field when non-empty (low | medium | high | xhigh). Empty
+	// means the field is omitted and the model uses its own default.
+	// Added 2026-09-02 for the Qwen Cloud Token Plan, where reasoning
+	// tokens count against max_tokens and the default effort is xhigh.
+	ReasoningEffort string        `json:"reasoning_effort"`
 	RequestTimeout  time.Duration `json:"request_timeout"`
 }
 
@@ -341,6 +347,11 @@ func setEnvField(cfg *Config, field, val string) error {
 			return fmt.Errorf("invalid max_output_tokens %q: %w", val, err)
 		}
 		mc.MaxOutputTokens = n
+	case "reasoning_effort":
+		if err := validateReasoningEffort(val); err != nil {
+			return err
+		}
+		mc.ReasoningEffort = val
 	case "request_timeout":
 		d, err := time.ParseDuration(val)
 		if err != nil {
@@ -506,6 +517,7 @@ func (c Config) Render(w io.Writer) error {
 			APIKey:          shadow.Model.APIKey,
 			Temperature:     shadow.Model.Temperature,
 			MaxOutputTokens: shadow.Model.MaxOutputTokens,
+			ReasoningEffort: shadow.Model.ReasoningEffort,
 			RequestTimeout:  shadow.Model.RequestTimeout.String(),
 		},
 		MCPServers:   mcpView,
@@ -534,6 +546,7 @@ type renderModelView struct {
 	APIKey          string  `json:"api_key"`
 	Temperature     float64 `json:"temperature"`
 	MaxOutputTokens int     `json:"max_output_tokens"`
+	ReasoningEffort string  `json:"reasoning_effort,omitempty"`
 	RequestTimeout  string  `json:"request_timeout"`
 }
 
@@ -573,6 +586,7 @@ type modelOverlay struct {
 	APIKey          *string  `json:"api_key"`
 	Temperature     *float64 `json:"temperature"`
 	MaxOutputTokens *int     `json:"max_output_tokens"`
+	ReasoningEffort *string  `json:"reasoning_effort"`
 	RequestTimeout  *string  `json:"request_timeout"`
 }
 
@@ -665,6 +679,14 @@ func applyOverlay(cfg *Config, overlay configOverlay, modelPresent map[string]st
 		} else if _, ok := modelPresent["max_output_tokens"]; ok {
 			mc.MaxOutputTokens = 0
 		}
+		if m.ReasoningEffort != nil {
+			if err := validateReasoningEffort(*m.ReasoningEffort); err != nil {
+				return err
+			}
+			mc.ReasoningEffort = *m.ReasoningEffort
+		} else if _, ok := modelPresent["reasoning_effort"]; ok {
+			mc.ReasoningEffort = ""
+		}
 		if m.RequestTimeout != nil {
 			dur, err := parseDurationField(*m.RequestTimeout, "request_timeout")
 			if err != nil {
@@ -752,4 +774,14 @@ func parseDurationField(s, fieldName string) (time.Duration, error) {
 		return time.Duration(secs * float64(time.Second)), nil
 	}
 	return 0, fmt.Errorf("invalid %s %q (expected Go duration string or numeric seconds)", fieldName, s)
+}
+
+// validateReasoningEffort accepts the empty string (field omitted) and the
+// four effort levels the OpenAI-compatible `reasoning_effort` field takes.
+func validateReasoningEffort(val string) error {
+	switch val {
+	case "", "low", "medium", "high", "xhigh":
+		return nil
+	}
+	return fmt.Errorf("invalid reasoning_effort %q: want low, medium, high or xhigh", val)
 }

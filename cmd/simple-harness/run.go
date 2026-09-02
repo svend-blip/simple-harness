@@ -659,6 +659,7 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir,
 		APIKey:          cfg.Model.APIKey,
 		Temperature:     cfg.Model.Temperature,
 		MaxOutputTokens: cfg.Model.MaxOutputTokens,
+		ReasoningEffort: cfg.Model.ReasoningEffort,
 		RequestTimeout:  cfg.Model.RequestTimeout,
 	}
 	client := model.NewClient(modelOpts)

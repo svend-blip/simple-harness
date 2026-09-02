@@ -40,6 +40,8 @@ type Options struct {
 	APIKey          string
 	Temperature     float64
 	MaxOutputTokens int
+	// ReasoningEffort, when non-empty, is sent as `reasoning_effort`.
+	ReasoningEffort string
 	RequestTimeout  time.Duration
 }
 
@@ -423,6 +425,7 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, onDelta func(S
 		Messages    []wireMessage    `json:"messages"`
 		Temperature float64          `json:"temperature"`
 		MaxTokens   int              `json:"max_tokens"`
+		Reasoning   string           `json:"reasoning_effort,omitempty"`
 		Stream      bool             `json:"stream"`
 		Tools       []ToolDefinition `json:"tools,omitempty"`
 		ToolChoice  any              `json:"tool_choice,omitempty"`
@@ -431,6 +434,7 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, onDelta func(S
 		Messages:    toWireMessages(req.Messages),
 		Temperature: c.opts.Temperature,
 		MaxTokens:   c.opts.MaxOutputTokens,
+		Reasoning:   c.opts.ReasoningEffort,
 		Stream:      true,
 		Tools:       req.Tools,
 		ToolChoice:  req.ToolChoice,
@@ -599,10 +603,10 @@ type toolCallWireEntry struct {
 // to carry []model.Message so callers (the loop) populate the
 // domain ToolCall type and conversion happens at the wire edge.
 type wireMessage struct {
-	Role       string               `json:"role"`
-	Content    string               `json:"content"`
-	ToolCalls  []toolCallWireEntry  `json:"tool_calls,omitempty"`
-	ToolCallID string               `json:"tool_call_id,omitempty"`
+	Role       string              `json:"role"`
+	Content    string              `json:"content"`
+	ToolCalls  []toolCallWireEntry `json:"tool_calls,omitempty"`
+	ToolCallID string              `json:"tool_call_id,omitempty"`
 }
 
 // toWireMessage converts a domain model.Message into its wire

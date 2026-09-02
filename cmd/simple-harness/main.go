@@ -703,6 +703,7 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, seams ...any) int
 		APIKey:          cfg.Model.APIKey,
 		Temperature:     cfg.Model.Temperature,
 		MaxOutputTokens: cfg.Model.MaxOutputTokens,
+		ReasoningEffort: cfg.Model.ReasoningEffort,
 		RequestTimeout:  cfg.Model.RequestTimeout,
 	})
 	// Run 009 / handoff 033: compose the SCOPE §14 message list.
@@ -740,6 +741,7 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, seams ...any) int
 			APIKey:          cfg.Model.APIKey,
 			Temperature:     cfg.Model.Temperature,
 			MaxOutputTokens: cfg.Model.MaxOutputTokens,
+			ReasoningEffort: cfg.Model.ReasoningEffort,
 			RequestTimeout:  cfg.Model.RequestTimeout,
 		},
 		Workspace:      o.workspace,
