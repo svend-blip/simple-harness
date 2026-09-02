@@ -675,11 +675,45 @@ func toWireMessage(m Message) wireMessage {
 // toWireMessages converts a slice of domain messages to the wire
 // representation. A convenience for the ChatStream marshal path.
 func toWireMessages(msgs []Message) []wireMessage {
+	msgs = coalesceLeadingSystem(msgs)
 	out := make([]wireMessage, 0, len(msgs))
 	for _, m := range msgs {
 		out = append(out, toWireMessage(m))
 	}
 	return out
+}
+
+// coalesceLeadingSystem joins the run of system messages at the head of
+// the list into ONE system message, segments in their original order
+// separated by a blank line. ComposeMessages deliberately emits one
+// system message per slot (base, external governance, each skill) so
+// the composition stays testable; on the wire that shape is not
+// portable. Cloud chat endpoints accept several system messages, but a
+// local runtime applying the model's chat template does not: FreeToken
+// (Qwen3.8-Flash-Next) rejects the second one with HTTP 400 "System
+// message must be at the beginning", measured 2026-09-03 on flow
+// 9000-02-ELOOP handoff 46 (exit 3 in 0.2 s, no output). One system
+// message is what every endpoint accepts, so it is the only shape sent.
+// System messages after the first non-system message are left alone.
+func coalesceLeadingSystem(msgs []Message) []Message {
+	n := 0
+	for n < len(msgs) && msgs[n].Role == "system" {
+		n++
+	}
+	if n <= 1 {
+		return msgs
+	}
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(msgs[i].Content)
+	}
+	merged := make([]Message, 0, len(msgs)-n+1)
+	merged = append(merged, Message{Role: "system", Content: b.String()})
+	merged = append(merged, msgs[n:]...)
+	return merged
 }
 
 // streamOptions is the OpenAI-compatible stream_options request block.

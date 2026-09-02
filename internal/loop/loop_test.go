@@ -571,13 +571,16 @@ func TestRunOne_PassesComposedMessagesToClient(t *testing.T) {
 		t.Fatalf("RunOne: %v", err)
 	}
 
-	if len(captured.Messages) != 4 {
-		t.Fatalf("captured len(messages) = %d, want 4 (got=%+v)", len(captured.Messages), captured.Messages)
+	// On the wire the three composed system slots travel as ONE system
+	// message (base, external, skill — in that order, blank-line
+	// separated): FreeToken's chat template rejects a second system
+	// message with HTTP 400 (2026-09-03, 9000-02-ELOOP h46). The
+	// composition itself is still three slots — see TestComposeMessages_*.
+	if len(captured.Messages) != 2 {
+		t.Fatalf("captured len(messages) = %d, want 2 (got=%+v)", len(captured.Messages), captured.Messages)
 	}
 	want := []struct{ role, content string }{
-		{"system", HarnessSystem},
-		{"system", "EXT"},
-		{"system", "SKILL"},
+		{"system", HarnessSystem + "\n\nEXT\n\nSKILL"},
 		{"user", "hello"},
 	}
 	for i, w := range want {
@@ -1241,28 +1244,30 @@ func TestToolLoop_Messages_FollowupBodyCarriesToolCallsAndToolCallID(t *testing.
 		t.Fatalf("captured len = %d, want >= 2 (got=%+v)", len(captured), captured)
 	}
 	followup := captured[1]
-	if got := len(followup.Messages); got != 6 {
-		t.Fatalf("followup len(messages) = %d, want 6 (4 initial + 1 assistant-with-tool_calls + 1 tool-message) (got=%+v)", got, followup.Messages)
+	// 2 initial on the wire (one merged system + user), see
+	// TestRunOne_PassesComposedMessagesToClient.
+	if got := len(followup.Messages); got != 4 {
+		t.Fatalf("followup len(messages) = %d, want 4 (2 initial + 1 assistant-with-tool_calls + 1 tool-message) (got=%+v)", got, followup.Messages)
 	}
-	assistant := followup.Messages[4]
+	assistant := followup.Messages[2]
 	if assistant.Role != "assistant" {
-		t.Errorf("followup.messages[4].role = %q, want assistant", assistant.Role)
+		t.Errorf("followup.messages[2].role = %q, want assistant", assistant.Role)
 	}
 	if len(assistant.ToolCalls) != 1 {
-		t.Fatalf("followup.messages[4].tool_calls len = %d, want 1 (got=%+v)", len(assistant.ToolCalls), assistant.ToolCalls)
+		t.Fatalf("followup.messages[2].tool_calls len = %d, want 1 (got=%+v)", len(assistant.ToolCalls), assistant.ToolCalls)
 	}
 	if assistant.ToolCalls[0].ID != "call_test1" {
-		t.Errorf("followup.messages[4].tool_calls[0].id = %q, want call_test1", assistant.ToolCalls[0].ID)
+		t.Errorf("followup.messages[2].tool_calls[0].id = %q, want call_test1", assistant.ToolCalls[0].ID)
 	}
 	if assistant.ToolCalls[0].Function.Name != "apply_patch" {
-		t.Errorf("followup.messages[4].tool_calls[0].function.name = %q, want apply_patch", assistant.ToolCalls[0].Function.Name)
+		t.Errorf("followup.messages[2].tool_calls[0].function.name = %q, want apply_patch", assistant.ToolCalls[0].Function.Name)
 	}
 	var args map[string]any
 	if err := json.Unmarshal([]byte(assistant.ToolCalls[0].Function.Arguments), &args); err != nil {
-		t.Errorf("followup.messages[4].tool_calls[0].function.arguments not parseable JSON: %v (raw=%s)", err, assistant.ToolCalls[0].Function.Arguments)
+		t.Errorf("followup.messages[2].tool_calls[0].function.arguments not parseable JSON: %v (raw=%s)", err, assistant.ToolCalls[0].Function.Arguments)
 	}
 	if _, ok := args["path"]; !ok {
-		t.Errorf("followup.messages[4].tool_calls[0].function.arguments missing 'path' key (got=%+v)", args)
+		t.Errorf("followup.messages[2].tool_calls[0].function.arguments missing 'path' key (got=%+v)", args)
 	}
 	last := followup.Messages[len(followup.Messages)-1]
 	if last.Role != "tool" {
