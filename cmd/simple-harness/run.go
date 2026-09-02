@@ -51,6 +51,7 @@ import (
 	"github.com/svend-blip/simple-harness/internal/model"
 	"github.com/svend-blip/simple-harness/internal/session"
 	"github.com/svend-blip/simple-harness/internal/skill"
+	"github.com/svend-blip/simple-harness/internal/tools/builtins"
 )
 
 // runUsage is the help text printed by `simple-harness run --help`
@@ -523,6 +524,10 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir,
 		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
 		return 2
 	}
+	// The shell tool's default deadline is configuration, applied here
+	// because the tool registry is process-global and config is loaded
+	// per subcommand.
+	builtins.DefaultTimeout = cfg.ShellTimeout
 
 	sessionID, err := newSessionID()
 	if err != nil {

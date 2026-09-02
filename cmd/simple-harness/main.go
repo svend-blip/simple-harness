@@ -193,9 +193,9 @@ See docs/ARCHITECTURE.md §"Distribution shape" for the full contract.
 // the freshly-loaded skill.
 type interactiveOpts struct {
 	workspace string
-	stateDir  string // Run 008: --state-dir; defaults to ~/.simple-harness/sessions
+	stateDir  string       // Run 008: --state-dir; defaults to ~/.simple-harness/sessions
 	skill     *skill.Skill // resolved at flag-parse time; nil if --skill not set
-	limit     int    // Run 010 / handoff 038: --limit <n> flag; applied to the per-prompt ledger after each RunOne call returns
+	limit     int          // Run 010 / handoff 038: --limit <n> flag; applied to the per-prompt ledger after each RunOne call returns
 }
 
 // run is the testable inner entry point. It returns the process
@@ -454,6 +454,7 @@ func runConfig(args []string) int {
 		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
 		return 2 // SCOPE §28, configuration error
 	}
+	builtins.DefaultTimeout = cfg.ShellTimeout
 
 	// Render the redacted config into a buffer (preserves the
 	// "<redacted>" substitution for non-empty api_key per SCOPE §30).
@@ -533,10 +534,10 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, seams ...any) int
 	// directionality is part of the type identity at the dynamic-
 	// type level even though it is assignable across directions.
 	var (
-		sigCh             <-chan os.Signal
-		o                 interactiveOpts
-		customSigCh       bool
-		cancelPressed     atomic.Bool
+		sigCh              <-chan os.Signal
+		o                  interactiveOpts
+		customSigCh        bool
+		cancelPressed      atomic.Bool
 		interruptRequested atomic.Bool
 	)
 	for _, s := range seams {
@@ -578,6 +579,7 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, seams ...any) int
 		fmt.Fprintf(stderr, "config error: %v\n", err)
 		return 2
 	}
+	builtins.DefaultTimeout = cfg.ShellTimeout
 
 	// Build session identity.
 	sessionID, err := newSessionID()
@@ -679,14 +681,14 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, seams ...any) int
 	interruptDone := make(chan struct{}, 1)
 	go func() {
 		for range sigCh {
-		if !cancelPressed.Load() {
-			cancelPressed.Store(true)
-			cancelRun()
-			fmt.Fprintln(stderr, "(cancel requested — Ctrl+C again to terminate)")
-			continue
-		}
-		if !interruptRequested.Load() {
-			interruptRequested.Store(true)
+			if !cancelPressed.Load() {
+				cancelPressed.Store(true)
+				cancelRun()
+				fmt.Fprintln(stderr, "(cancel requested — Ctrl+C again to terminate)")
+				continue
+			}
+			if !interruptRequested.Load() {
+				interruptRequested.Store(true)
 				_ = em.Interrupted(sessionID)
 				fmt.Fprintln(stderr, "interrupted")
 				interruptDone <- struct{}{}
@@ -971,9 +973,9 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, seams ...any) int
 					// terminates per GOAL §2). The reset happens after
 					// a successful prompt completion, when the user has
 					// moved on to a new prompt.
-				if cancelPressed.Load() && errors.Is(me.Err, context.Canceled) {
-					continue
-				}
+					if cancelPressed.Load() && errors.Is(me.Err, context.Canceled) {
+						continue
+					}
 					fmt.Fprintln(stderr, "\ninterrupted")
 					return 6
 				}

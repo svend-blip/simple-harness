@@ -37,6 +37,21 @@ import (
 // direct Execute.
 type Shell struct{}
 
+// DefaultTimeout is the deadline applied to a shell call whose caller
+// omitted timeout_ms (or passed <= 0). Zero means no default — the
+// historical behaviour. The cmd layer sets it from config.ShellTimeout
+// after Load; the tool itself never reads the environment, so the test
+// surface stays a plain package variable.
+//
+// Why a default: the per-call timeout_ms existed since handoff 021,
+// but a model never sets it. Measured 2026-09-02 on a dispatched chain
+// role: `helper & ...` from this tool left the helper holding the
+// stdout pipe, and the call — with no deadline — waited 3 h 24 min
+// until an operator killed the helper by hand. The default turns that
+// into a "timeout" result the model can act on, and the existing
+// process-group SIGTERM/SIGKILL path reaps the helper.
+var DefaultTimeout time.Duration
+
 // Meta implements tools.Tool.
 func (Shell) Meta() tools.ToolMeta {
 	return tools.ToolMeta{
@@ -113,7 +128,7 @@ type ShellResult struct {
 // Per SCOPE §27 "controlled escalation where required" — two
 // seconds gives well-behaved children (default signal disposition)
 // time to exit cleanly while bounding the wall-clock wait for
-// children that ignore SIGTERM (e.g. `trap '' TERM; sleep 60`).
+// children that ignore SIGTERM (e.g. `trap ” TERM; sleep 60`).
 const terminateGrace = 2 * time.Second
 
 // truncateMarkerFor builds the marker with the cap value
@@ -238,6 +253,9 @@ func (Shell) Execute(ctx context.Context, call tools.Call) (tools.Result, error)
 		case float64:
 			timeoutMs = int(n)
 		}
+	}
+	if timeoutMs <= 0 && DefaultTimeout > 0 {
+		timeoutMs = int(DefaultTimeout / time.Millisecond)
 	}
 	var maxOutputBytes int
 	if v, ok := call.Arguments["max_output_bytes"]; ok && v != nil {

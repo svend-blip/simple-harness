@@ -38,6 +38,15 @@ import (
 type Config struct {
 	Model      ModelConfig       `json:"model"`
 	MCPServers []MCPServerConfig `json:"mcp_servers,omitempty"`
+	// ShellTimeout is the default deadline applied to a shell tool call
+	// whose caller did not pass timeout_ms. Zero disables the default
+	// (the pre-2026-09-02 behaviour: a call with no timeout_ms runs
+	// until the process group exits). The default exists because a
+	// model never sets timeout_ms on its own: measured 2026-09-02 on a
+	// chain role, a shell call that backgrounded a helper and left the
+	// pipe open waited 3 h 24 min. JSON key `shell_timeout`, env
+	// SIMPLE_HARNESS_SHELL_TIMEOUT, Go duration syntax ("10m", "600s").
+	ShellTimeout time.Duration `json:"shell_timeout"`
 }
 
 // MCPServerConfig is the resolved shape of one entry under the
@@ -103,6 +112,7 @@ func Default() Config {
 			MaxOutputTokens: 8192,
 			RequestTimeout:  30 * time.Second,
 		},
+		ShellTimeout: 10 * time.Minute,
 	}
 }
 
@@ -337,6 +347,15 @@ func setEnvField(cfg *Config, field, val string) error {
 			return fmt.Errorf("invalid request_timeout %q: %w", val, err)
 		}
 		mc.RequestTimeout = d
+	case "shell_timeout":
+		d, err := time.ParseDuration(val)
+		if err != nil {
+			return fmt.Errorf("invalid shell_timeout %q: %w", val, err)
+		}
+		if d < 0 {
+			return fmt.Errorf("invalid shell_timeout %q: must not be negative", val)
+		}
+		cfg.ShellTimeout = d
 	default:
 		// Unknown SIMPLE_HARNESS_* env vars are silently ignored so
 		// future fields can land without breaking older binaries.
@@ -423,15 +442,15 @@ func validateMCPServers(servers []MCPServerConfig) error {
 // (and `errors.Is` checks at WORK 4) can identify the failure mode
 // without string-matching the message.
 var (
-	errMCPServersNameRequired       = fmt.Errorf("name is required")
-	errMCPServersTransportRequired  = fmt.Errorf("transport is required (must be \"http\" or \"stdio\")")
-	errMCPServersTransportInvalid   = fmt.Errorf("transport must be \"http\" or \"stdio\"")
-	errMCPServersEndpointRequired   = fmt.Errorf("endpoint is required for transport \"http\"")
-	errMCPServersHTTPNoCommand      = fmt.Errorf("command must be empty for transport \"http\"")
-	errMCPServersCommandRequired    = fmt.Errorf("command is required for transport \"stdio\" (non-empty)")
-	errMCPServersStdioNoEndpoint    = fmt.Errorf("endpoint must be empty for transport \"stdio\"")
-	errMCPServersPermissionInvalid  = fmt.Errorf("permission must be \"read_only\", \"workspace_write\", or \"full_access\" (empty inherits harness default)")
-	errMCPServersAllowlistEmpty     = fmt.Errorf("allowlist entries must be non-empty strings")
+	errMCPServersNameRequired      = fmt.Errorf("name is required")
+	errMCPServersTransportRequired = fmt.Errorf("transport is required (must be \"http\" or \"stdio\")")
+	errMCPServersTransportInvalid  = fmt.Errorf("transport must be \"http\" or \"stdio\"")
+	errMCPServersEndpointRequired  = fmt.Errorf("endpoint is required for transport \"http\"")
+	errMCPServersHTTPNoCommand     = fmt.Errorf("command must be empty for transport \"http\"")
+	errMCPServersCommandRequired   = fmt.Errorf("command is required for transport \"stdio\" (non-empty)")
+	errMCPServersStdioNoEndpoint   = fmt.Errorf("endpoint must be empty for transport \"stdio\"")
+	errMCPServersPermissionInvalid = fmt.Errorf("permission must be \"read_only\", \"workspace_write\", or \"full_access\" (empty inherits harness default)")
+	errMCPServersAllowlistEmpty    = fmt.Errorf("allowlist entries must be non-empty strings")
 )
 
 // Render writes the resolved configuration to w in a deterministic,
@@ -489,7 +508,8 @@ func (c Config) Render(w io.Writer) error {
 			MaxOutputTokens: shadow.Model.MaxOutputTokens,
 			RequestTimeout:  shadow.Model.RequestTimeout.String(),
 		},
-		MCPServers: mcpView,
+		MCPServers:   mcpView,
+		ShellTimeout: shadow.ShellTimeout.String(),
 	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
@@ -501,8 +521,9 @@ func (c Config) Render(w io.Writer) error {
 // mirrors Config but uses string for request_timeout so the output is
 // human-readable.
 type renderView struct {
-	Model      renderModelView `json:"model"`
-	MCPServers []renderMCPView `json:"mcp_servers"`
+	Model        renderModelView `json:"model"`
+	MCPServers   []renderMCPView `json:"mcp_servers"`
+	ShellTimeout string          `json:"shell_timeout"`
 }
 
 // renderModelView mirrors ModelConfig for marshalling only.
@@ -540,8 +561,9 @@ type renderMCPView struct {
 // "field unset in the file" (nil → leave prior value alone) from
 // "field set to the zero value" (non-nil → replace prior value).
 type configOverlay struct {
-	Model      *modelOverlay       `json:"model"`
-	MCPServers *[]mcpServerOverlay `json:"mcp_servers"`
+	Model        *modelOverlay       `json:"model"`
+	MCPServers   *[]mcpServerOverlay `json:"mcp_servers"`
+	ShellTimeout *string             `json:"shell_timeout"`
 }
 
 type modelOverlay struct {
@@ -597,6 +619,16 @@ type mcpServerOverlay struct {
 // pointer-overlay per-field is sufficient to detect the
 // present-with-value case.
 func applyOverlay(cfg *Config, overlay configOverlay, modelPresent map[string]struct{}, mcpServersPresent bool) error {
+	if overlay.ShellTimeout != nil {
+		d, err := time.ParseDuration(*overlay.ShellTimeout)
+		if err != nil {
+			return fmt.Errorf("invalid shell_timeout %q: %w", *overlay.ShellTimeout, err)
+		}
+		if d < 0 {
+			return fmt.Errorf("invalid shell_timeout %q: must not be negative", *overlay.ShellTimeout)
+		}
+		cfg.ShellTimeout = d
+	}
 	if overlay.Model == nil && overlay.MCPServers == nil && !mcpServersPresent {
 		return nil
 	}
