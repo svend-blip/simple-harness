@@ -48,6 +48,11 @@ type Event struct {
 	Delta    string         `json:"delta,omitempty"`
 	ExitCode int            `json:"exit_code,omitempty"`
 	Config   *SessionConfig `json:"config,omitempty"`
+	// Usage is the token-count block on "usage" events, emitted once
+	// per model request when the upstream reports it (2026-09-02). It
+	// is what a throughput measurement needs: completion tokens and the
+	// reasoning share per request, not per session.
+	Usage *UsageBlock `json:"usage,omitempty"`
 
 	// CallID is the per-call identifier on tool_call and
 	// tool_result events. The model emits a unique call_id
@@ -149,7 +154,7 @@ func (e *Emitter) Started(cfg SessionConfig) error {
 // value across the wire.
 func (e *Emitter) Status(status string) error {
 	return e.Emit(Event{
-		Event: "status",
+		Event:  "status",
 		Status: status,
 	})
 }
@@ -190,6 +195,24 @@ func (e *Emitter) ModelRequest() error {
 	})
 }
 
+// UsageBlock is the payload of a "usage" event.
+type UsageBlock struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	ReasoningTokens  int `json:"reasoning_tokens"`
+}
+
+// Usage emits a "usage" event with the token counts of the model
+// request that just finished. Emitted only when the upstream reported
+// a usage block (stream_options.include_usage), so its absence means
+// "not measured", never "zero".
+func (e *Emitter) Usage(u UsageBlock) error {
+	return e.Emit(Event{
+		Event: "usage",
+		Usage: &u,
+	})
+}
+
 // Interrupted emits the "interrupted" event per SCOPE §26's headless
 // signal sequence: SIGINT/SIGTERM cancel the in-flight operation,
 // the harness emits this event with the session_id, flushes the
@@ -225,7 +248,7 @@ func (e *Emitter) Interrupted(sessionID string) error {
 // it yet.
 func (e *Emitter) ToolCall(callID, toolName string) error {
 	return e.Emit(Event{
-		Event: "tool_call",
+		Event:  "tool_call",
 		CallID: callID,
 		Tool:   toolName,
 	})

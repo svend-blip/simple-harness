@@ -613,11 +613,13 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, seams ...any) int
 	// and messages.jsonl (one JSON object per appended message)
 	// under the same <state-dir>/<session-id>/ directory.
 	sessWriter, err := session.NewWriter(o.stateDir, sessionID, session.Config{
-		BaseURL:    normalizedBase,
-		Model:      cfg.Model.Model,
-		Workspace:  o.workspace,
-		Permission: permissionStr,
-		OutputMode: "", // interactive mode does not use --output (always streams to sidecar)
+		BaseURL:         normalizedBase,
+		Model:           cfg.Model.Model,
+		Workspace:       o.workspace,
+		Permission:      permissionStr,
+		OutputMode:      "", // interactive mode does not use --output (always streams to sidecar)
+		MaxOutputTokens: cfg.Model.MaxOutputTokens,
+		ReasoningEffort: cfg.Model.ReasoningEffort,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "internal error: cannot open session writer: %v\n", err)

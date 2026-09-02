@@ -612,11 +612,13 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir,
 	// with the final status/exit on every return path of this
 	// function.
 	sessWriter, err := session.NewWriter(stateDir, sessionID, session.Config{
-		BaseURL:    normalizedBase,
-		Model:      modelName,
-		Workspace:  workspace,
-		Permission: permissionStr,
-		OutputMode: outputMode,
+		BaseURL:         normalizedBase,
+		Model:           modelName,
+		Workspace:       workspace,
+		Permission:      permissionStr,
+		OutputMode:      outputMode,
+		MaxOutputTokens: cfg.Model.MaxOutputTokens,
+		ReasoningEffort: cfg.Model.ReasoningEffort,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "internal error: cannot open session writer: %v\n", err)

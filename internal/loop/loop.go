@@ -288,6 +288,15 @@ func (r *Run) RunOne(ctx context.Context, prompt string) (string, error) {
 				return err
 			}
 		}
+		if ev.Usage != nil {
+			if err := r.em.Usage(event.UsageBlock{
+				PromptTokens:     ev.Usage.PromptTokens,
+				CompletionTokens: ev.Usage.CompletionTokens,
+				ReasoningTokens:  ev.Usage.ReasoningTokens(),
+			}); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 
@@ -475,8 +484,9 @@ func toolsToChatRequestTools(reg *tools.Registry) ([]model.ToolDefinition, *stri
 // array, typed properties map, additionalProperties boolean.
 //
 // The wire shape:
-//   {"type":"object","required":[...],"properties":{"k":{"type":"<type>"},
-//    ...},"additionalProperties":<bool>}
+//
+//	{"type":"object","required":[...],"properties":{"k":{"type":"<type>"},
+//	 ...},"additionalProperties":<bool>}
 //
 // An empty Properties map emits "properties":{} (the wire accepts
 // this; OpenAI models treat it as a no-arg tool). A nil/empty
@@ -579,31 +589,31 @@ const defaultMaxTurns = 8
 //     Skill(s) + user task).
 //  3. For each turn (1 to MaxTurns):
 //     a. Call r.client.ChatStream with the running history
-//        and the onDelta callback that (i) accumulates
-//        per-index tool-call deltas into a per-turn
-//        accumulatedCall map, (ii) emits the existing
-//        assistant_stream event for any ev.Delta text, (iii)
-//        emits status: STREAMING on first non-empty event.
+//     and the onDelta callback that (i) accumulates
+//     per-index tool-call deltas into a per-turn
+//     accumulatedCall map, (ii) emits the existing
+//     assistant_stream event for any ev.Delta text, (iii)
+//     emits status: STREAMING on first non-empty event.
 //     b. If zero tool calls accumulated (all per-index
-//        accumulators are nil/empty), this is a "no tool
-//        calls" final response → emits status: COMPLETED +
-//        completed(exit_code: 0) and returns the accumulated
-//        text.
+//     accumulators are nil/empty), this is a "no tool
+//     calls" final response → emits status: COMPLETED +
+//     completed(exit_code: 0) and returns the accumulated
+//     text.
 //     c. If one or more tool calls accumulated, dispatch
-//        each in sequence via r.cfg.Tools.Dispatch(ctx,
-//        call, ws, pol, perm.Authorize). On error, append a
-//        tool-result message with status="error" + the
-//        structured error JSON to the message history and
-//        continue to the next turn (the SCOPE §31
-//        "untrusted input" discipline: structured rejection
-//        is the harness's contract with the model, not a
-//        hard failure).
+//     each in sequence via r.cfg.Tools.Dispatch(ctx,
+//     call, ws, pol, perm.Authorize). On error, append a
+//     tool-result message with status="error" + the
+//     structured error JSON to the message history and
+//     continue to the next turn (the SCOPE §31
+//     "untrusted input" discipline: structured rejection
+//     is the harness's contract with the model, not a
+//     hard failure).
 //     d. If a permission violation surfaces, emit
-//        status: FAILED + completed(exit_code: 4) and
-//        return *PermissionError.
+//     status: FAILED + completed(exit_code: 4) and
+//     return *PermissionError.
 //     e. After all tool calls in the current turn are
-//        dispatched, increment the turn counter and loop
-//        back to step 3a.
+//     dispatched, increment the turn counter and loop
+//     back to step 3a.
 //
 // On exhaustion: emit status: FAILED with reason
 // "TOOL_DISPATCH_OVERFLOW: max-turns <N> exceeded" +
@@ -717,6 +727,15 @@ func (r *Run) RunAgent(ctx context.Context, prompt string) (string, error) {
 				}
 				accumulatedText.WriteString(ev.Delta)
 				if err := r.em.AssistantStream(ev.Delta); err != nil {
+					return err
+				}
+			}
+			if ev.Usage != nil {
+				if err := r.em.Usage(event.UsageBlock{
+					PromptTokens:     ev.Usage.PromptTokens,
+					CompletionTokens: ev.Usage.CompletionTokens,
+					ReasoningTokens:  ev.Usage.ReasoningTokens(),
+				}); err != nil {
 					return err
 				}
 			}
@@ -915,9 +934,9 @@ func encodeToolResult(call *tools.Call, result tools.Result) (string, error) {
 		return string(b), nil
 	}
 	body := map[string]any{
-		"name":  call.Name,
+		"name":   call.Name,
 		"status": "error",
-		"error": result.Error,
+		"error":  result.Error,
 	}
 	b, err := json.Marshal(body)
 	if err != nil {

@@ -303,6 +303,24 @@ type Usage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+	// CompletionTokensDetails carries the reasoning split some
+	// OpenAI-compatible endpoints report (DashScope, OpenAI). Nil when
+	// the upstream does not send it.
+	CompletionTokensDetails *UsageDetails `json:"completion_tokens_details,omitempty"`
+}
+
+// UsageDetails is the completion_tokens_details block.
+type UsageDetails struct {
+	ReasoningTokens int `json:"reasoning_tokens"`
+}
+
+// ReasoningTokens returns the reasoning share of the completion, or 0
+// when the upstream did not report one.
+func (u *Usage) ReasoningTokens() int {
+	if u == nil || u.CompletionTokensDetails == nil {
+		return 0
+	}
+	return u.CompletionTokensDetails.ReasoningTokens
 }
 
 // StreamEvent is one parsed SSE event. Exactly one of Delta,
@@ -421,20 +439,25 @@ func NewClient(opts Options) *Client {
 // model, messages, temperature, max_tokens, and stream: true.
 func (c *Client) ChatStream(ctx context.Context, req ChatRequest, onDelta func(StreamEvent) error) error {
 	body, err := json.Marshal(struct {
-		Model       string           `json:"model"`
-		Messages    []wireMessage    `json:"messages"`
-		Temperature float64          `json:"temperature"`
-		MaxTokens   int              `json:"max_tokens"`
-		Reasoning   string           `json:"reasoning_effort,omitempty"`
-		Stream      bool             `json:"stream"`
-		Tools       []ToolDefinition `json:"tools,omitempty"`
-		ToolChoice  any              `json:"tool_choice,omitempty"`
+		Model       string        `json:"model"`
+		Messages    []wireMessage `json:"messages"`
+		Temperature float64       `json:"temperature"`
+		MaxTokens   int           `json:"max_tokens"`
+		Reasoning   string        `json:"reasoning_effort,omitempty"`
+		Stream      bool          `json:"stream"`
+		// stream_options.include_usage asks the upstream to send the
+		// usage block on the final chunk; without it OpenAI-compatible
+		// streams carry no token counts at all (2026-09-02).
+		StreamOpts streamOptions    `json:"stream_options"`
+		Tools      []ToolDefinition `json:"tools,omitempty"`
+		ToolChoice any              `json:"tool_choice,omitempty"`
 	}{
 		Model:       c.opts.Model,
 		Messages:    toWireMessages(req.Messages),
 		Temperature: c.opts.Temperature,
 		MaxTokens:   c.opts.MaxOutputTokens,
 		Reasoning:   c.opts.ReasoningEffort,
+		StreamOpts:  streamOptions{IncludeUsage: true},
 		Stream:      true,
 		Tools:       req.Tools,
 		ToolChoice:  req.ToolChoice,
@@ -648,4 +671,9 @@ func toWireMessages(msgs []Message) []wireMessage {
 		out = append(out, toWireMessage(m))
 	}
 	return out
+}
+
+// streamOptions is the OpenAI-compatible stream_options request block.
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }

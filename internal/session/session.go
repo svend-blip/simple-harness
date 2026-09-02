@@ -19,9 +19,10 @@ import "time"
 
 // Status is the canonical final status of a session. The mapping
 // matches the event.Emitter's status event payloads:
-//   "completed" — success path (loop's RunOne returned nil error)
-//   "interrupted" — SIGINT/SIGTERM-triggered cancellation (Run 007)
-//   "failed" — non-cancellation error path (*model.ModelError or generic)
+//
+//	"completed" — success path (loop's RunOne returned nil error)
+//	"interrupted" — SIGINT/SIGTERM-triggered cancellation (Run 007)
+//	"failed" — non-cancellation error path (*model.ModelError or generic)
 type Status string
 
 const (
@@ -40,6 +41,10 @@ type Config struct {
 	Workspace  string `json:"workspace"`
 	Permission string `json:"permission"`
 	OutputMode string `json:"output_mode,omitempty"`
+	// Resolved model knobs (2026-09-02): what this session actually ran
+	// with, so a measurement can group sessions by effort and ceiling.
+	MaxOutputTokens int    `json:"max_output_tokens,omitempty"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 // Session is the in-memory representation of session.json. It is
