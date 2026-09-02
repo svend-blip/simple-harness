@@ -620,6 +620,8 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, seams ...any) int
 		OutputMode:      "", // interactive mode does not use --output (always streams to sidecar)
 		MaxOutputTokens: cfg.Model.MaxOutputTokens,
 		ReasoningEffort: cfg.Model.ReasoningEffort,
+		EnableThinking:  cfg.Model.EnableThinking,
+		ThinkingBudget:  cfg.Model.ThinkingBudget,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "internal error: cannot open session writer: %v\n", err)
@@ -706,6 +708,8 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, seams ...any) int
 		Temperature:     cfg.Model.Temperature,
 		MaxOutputTokens: cfg.Model.MaxOutputTokens,
 		ReasoningEffort: cfg.Model.ReasoningEffort,
+		EnableThinking:  cfg.Model.EnableThinking,
+		ThinkingBudget:  cfg.Model.ThinkingBudget,
 		RequestTimeout:  cfg.Model.RequestTimeout,
 	})
 	// Run 009 / handoff 033: compose the SCOPE §14 message list.
@@ -744,6 +748,8 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, seams ...any) int
 			Temperature:     cfg.Model.Temperature,
 			MaxOutputTokens: cfg.Model.MaxOutputTokens,
 			ReasoningEffort: cfg.Model.ReasoningEffort,
+			EnableThinking:  cfg.Model.EnableThinking,
+			ThinkingBudget:  cfg.Model.ThinkingBudget,
 			RequestTimeout:  cfg.Model.RequestTimeout,
 		},
 		Workspace:      o.workspace,

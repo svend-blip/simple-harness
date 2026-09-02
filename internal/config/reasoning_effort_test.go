@@ -38,3 +38,23 @@ func TestEnvInvalidReasoningEffortFails(t *testing.T) {
 		t.Errorf("error = %v, want mention of reasoning_effort", err)
 	}
 }
+
+func TestEnvAppliesThinkingControls(t *testing.T) {
+	cfg, err := loadFrom(t.TempDir(), t.TempDir(), []string{"SIMPLE_HARNESS_ENABLE_THINKING=false", "SIMPLE_HARNESS_THINKING_BUDGET=512"})
+	if err != nil {
+		t.Fatalf("loadFrom: %v", err)
+	}
+	if cfg.Model.EnableThinking == nil || *cfg.Model.EnableThinking {
+		t.Fatalf("EnableThinking = %v, want false", cfg.Model.EnableThinking)
+	}
+	if cfg.Model.ThinkingBudget != 512 {
+		t.Fatalf("ThinkingBudget = %d, want 512", cfg.Model.ThinkingBudget)
+	}
+	def, _ := loadFrom(t.TempDir(), t.TempDir(), nil)
+	if def.Model.EnableThinking != nil || def.Model.ThinkingBudget != 0 {
+		t.Fatal("thinking controls must default to omitted")
+	}
+	if _, err := loadFrom(t.TempDir(), t.TempDir(), []string{"SIMPLE_HARNESS_ENABLE_THINKING=maybe"}); err == nil {
+		t.Fatal("expected an error for enable_thinking=maybe")
+	}
+}

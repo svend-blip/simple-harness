@@ -48,3 +48,18 @@ func TestReasoningEffortOmittedWhenEmpty(t *testing.T) {
 		t.Fatal("reasoning_effort must be omitted when unset")
 	}
 }
+
+func TestThinkingControlsSentOnlyWhenSet(t *testing.T) {
+	off := false
+	body := captureBody(t, Options{Model: "qwen3.8-max", MaxOutputTokens: 1024, EnableThinking: &off, ThinkingBudget: 512})
+	if body["enable_thinking"] != false || body["thinking_budget"] != float64(512) {
+		t.Fatalf("thinking fields = %v / %v", body["enable_thinking"], body["thinking_budget"])
+	}
+	body = captureBody(t, Options{Model: "qwen3.8-max", MaxOutputTokens: 1024})
+	if _, ok := body["enable_thinking"]; ok {
+		t.Fatal("enable_thinking must be omitted when unset")
+	}
+	if _, ok := body["thinking_budget"]; ok {
+		t.Fatal("thinking_budget must be omitted when unset")
+	}
+}

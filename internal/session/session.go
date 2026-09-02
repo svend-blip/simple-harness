@@ -45,6 +45,8 @@ type Config struct {
 	// with, so a measurement can group sessions by effort and ceiling.
 	MaxOutputTokens int    `json:"max_output_tokens,omitempty"`
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	EnableThinking  *bool  `json:"enable_thinking,omitempty"`
+	ThinkingBudget  int    `json:"thinking_budget,omitempty"`
 }
 
 // Session is the in-memory representation of session.json. It is

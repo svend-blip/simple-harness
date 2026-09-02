@@ -98,8 +98,15 @@ type ModelConfig struct {
 	// means the field is omitted and the model uses its own default.
 	// Added 2026-09-02 for the Qwen Cloud Token Plan, where reasoning
 	// tokens count against max_tokens and the default effort is xhigh.
-	ReasoningEffort string        `json:"reasoning_effort"`
-	RequestTimeout  time.Duration `json:"request_timeout"`
+	ReasoningEffort string `json:"reasoning_effort"`
+	// EnableThinking, when set, is sent as the DashScope-style
+	// `enable_thinking` request field (hybrid-thinking models accept it);
+	// ThinkingBudget as `thinking_budget`. Nil / 0 mean omitted. Measured
+	// 2026-09-02 on qwen3.8-max: thinking off = 28 tokens in 1.6 s for a
+	// small code task where the default spent 228 tokens in 8.2 s.
+	EnableThinking *bool         `json:"enable_thinking"`
+	ThinkingBudget int           `json:"thinking_budget"`
+	RequestTimeout time.Duration `json:"request_timeout"`
 }
 
 // Default returns the frozen default configuration. The defaults match
@@ -352,6 +359,25 @@ func setEnvField(cfg *Config, field, val string) error {
 			return err
 		}
 		mc.ReasoningEffort = val
+	case "enable_thinking":
+		switch val {
+		case "true", "1", "on":
+			b := true
+			mc.EnableThinking = &b
+		case "false", "0", "off":
+			b := false
+			mc.EnableThinking = &b
+		case "":
+			mc.EnableThinking = nil
+		default:
+			return fmt.Errorf("invalid enable_thinking %q: want true or false", val)
+		}
+	case "thinking_budget":
+		var n int
+		if _, err := fmt.Sscanf(val, "%d", &n); err != nil {
+			return fmt.Errorf("invalid thinking_budget %q: %w", val, err)
+		}
+		mc.ThinkingBudget = n
 	case "request_timeout":
 		d, err := time.ParseDuration(val)
 		if err != nil {
@@ -518,6 +544,8 @@ func (c Config) Render(w io.Writer) error {
 			Temperature:     shadow.Model.Temperature,
 			MaxOutputTokens: shadow.Model.MaxOutputTokens,
 			ReasoningEffort: shadow.Model.ReasoningEffort,
+			EnableThinking:  shadow.Model.EnableThinking,
+			ThinkingBudget:  shadow.Model.ThinkingBudget,
 			RequestTimeout:  shadow.Model.RequestTimeout.String(),
 		},
 		MCPServers:   mcpView,
@@ -547,6 +575,8 @@ type renderModelView struct {
 	Temperature     float64 `json:"temperature"`
 	MaxOutputTokens int     `json:"max_output_tokens"`
 	ReasoningEffort string  `json:"reasoning_effort,omitempty"`
+	EnableThinking  *bool   `json:"enable_thinking,omitempty"`
+	ThinkingBudget  int     `json:"thinking_budget,omitempty"`
 	RequestTimeout  string  `json:"request_timeout"`
 }
 
@@ -587,6 +617,8 @@ type modelOverlay struct {
 	Temperature     *float64 `json:"temperature"`
 	MaxOutputTokens *int     `json:"max_output_tokens"`
 	ReasoningEffort *string  `json:"reasoning_effort"`
+	EnableThinking  *bool    `json:"enable_thinking"`
+	ThinkingBudget  *int     `json:"thinking_budget"`
 	RequestTimeout  *string  `json:"request_timeout"`
 }
 
@@ -686,6 +718,17 @@ func applyOverlay(cfg *Config, overlay configOverlay, modelPresent map[string]st
 			mc.ReasoningEffort = *m.ReasoningEffort
 		} else if _, ok := modelPresent["reasoning_effort"]; ok {
 			mc.ReasoningEffort = ""
+		}
+		if m.EnableThinking != nil {
+			b := *m.EnableThinking
+			mc.EnableThinking = &b
+		} else if _, ok := modelPresent["enable_thinking"]; ok {
+			mc.EnableThinking = nil
+		}
+		if m.ThinkingBudget != nil {
+			mc.ThinkingBudget = *m.ThinkingBudget
+		} else if _, ok := modelPresent["thinking_budget"]; ok {
+			mc.ThinkingBudget = 0
 		}
 		if m.RequestTimeout != nil {
 			dur, err := parseDurationField(*m.RequestTimeout, "request_timeout")

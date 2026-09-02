@@ -619,6 +619,8 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir,
 		OutputMode:      outputMode,
 		MaxOutputTokens: cfg.Model.MaxOutputTokens,
 		ReasoningEffort: cfg.Model.ReasoningEffort,
+		EnableThinking:  cfg.Model.EnableThinking,
+		ThinkingBudget:  cfg.Model.ThinkingBudget,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "internal error: cannot open session writer: %v\n", err)
@@ -662,6 +664,8 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir,
 		Temperature:     cfg.Model.Temperature,
 		MaxOutputTokens: cfg.Model.MaxOutputTokens,
 		ReasoningEffort: cfg.Model.ReasoningEffort,
+		EnableThinking:  cfg.Model.EnableThinking,
+		ThinkingBudget:  cfg.Model.ThinkingBudget,
 		RequestTimeout:  cfg.Model.RequestTimeout,
 	}
 	client := model.NewClient(modelOpts)

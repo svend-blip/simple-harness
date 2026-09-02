@@ -42,7 +42,12 @@ type Options struct {
 	MaxOutputTokens int
 	// ReasoningEffort, when non-empty, is sent as `reasoning_effort`.
 	ReasoningEffort string
-	RequestTimeout  time.Duration
+	// EnableThinking (nil = omitted) and ThinkingBudget (0 = omitted) are
+	// sent as `enable_thinking` / `thinking_budget` (DashScope-style
+	// hybrid-thinking controls; other providers never see them).
+	EnableThinking *bool
+	ThinkingBudget int
+	RequestTimeout time.Duration
 }
 
 // Message is one chat-completions message. Role is one of "system",
@@ -444,6 +449,8 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, onDelta func(S
 		Temperature float64       `json:"temperature"`
 		MaxTokens   int           `json:"max_tokens"`
 		Reasoning   string        `json:"reasoning_effort,omitempty"`
+		Thinking    *bool         `json:"enable_thinking,omitempty"`
+		Budget      int           `json:"thinking_budget,omitempty"`
 		Stream      bool          `json:"stream"`
 		// stream_options.include_usage asks the upstream to send the
 		// usage block on the final chunk; without it OpenAI-compatible
@@ -457,6 +464,8 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, onDelta func(S
 		Temperature: c.opts.Temperature,
 		MaxTokens:   c.opts.MaxOutputTokens,
 		Reasoning:   c.opts.ReasoningEffort,
+		Thinking:    c.opts.EnableThinking,
+		Budget:      c.opts.ThinkingBudget,
 		StreamOpts:  streamOptions{IncludeUsage: true},
 		Stream:      true,
 		Tools:       req.Tools,
