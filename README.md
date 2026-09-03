@@ -102,11 +102,28 @@ simple-harness>
   boundary: `read_only`, `workspace_write`, `full_access`. No silent
   escalation; the effective mode is externally visible (`config show`).
 - **Headless contract:** versioned JSONL events (`protocol_version: "1"`),
-  a real status model, documented exit codes (0 ok, 2 config, 3 model/API,
-  4 permission, 6 interrupted), tested SIGINT/SIGTERM semantics, and
+  a real status model, documented exit codes (0 ok, 1 max-turns / generic
+  failure, 2 config, 3 model/API, 4 permission, 6 interrupted), tested
+  SIGINT/SIGTERM semantics, and
   child-process cleanup via process groups. No terminal scraping needed —
   see `docs/HARNESS-CONTRACT.md` (the frozen V1 public contract) and
   `scripts/contract-check.sh` (model-free conformance checker).
+- **One system message on the wire:** the composition keeps one system
+  message per slot (base prompt, external governance, each skill), but
+  `toWireMessages` joins the leading run into a single system message.
+  Cloud endpoints accept several; a local runtime applying the model's
+  chat template does not (FreeToken/Qwen: HTTP 400 "System message must be
+  at the beginning", which the harness surfaces only as exit 3). Measured
+  2026-09-03; see `internal/model/client.go`.
+- **Output ceiling:** `SIMPLE_HARNESS_MAX_OUTPUT_TOKENS` (default 8192) is
+  sent as `max_tokens`. A tool call larger than the ceiling is truncated
+  mid-JSON and the run ends with exit 1 and no error text — the session's
+  last `usage` event then shows `completion_tokens` equal to the ceiling.
+  Size it for whole-file writes (32768 for coding roles) and tell the
+  model to write each file with its own call.
+- **Reasoning controls:** `reasoning_effort`, `enable_thinking` and
+  `thinking_budget` (config / `SIMPLE_HARNESS_*`) are sent per request
+  when set; `usage` events carry `reasoning_tokens`.
 - **MCP client (V2):** configuration-pinned servers via the
   `mcp_servers` config key — the harness connects to configured
   Model Context Protocol servers at session start and exposes their
