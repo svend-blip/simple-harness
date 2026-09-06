@@ -502,7 +502,7 @@ func schemaToJSONSchema(schema tools.Schema) (json.RawMessage, error) {
 		Type                 string                       `json:"type"`
 		Required             []string                     `json:"required,omitempty"`
 		Properties           map[string]map[string]string `json:"properties"`
-		AdditionalProperties bool                         `json:"additional_properties"`
+		AdditionalProperties bool                         `json:"additionalProperties"`
 	}{
 		Type:                 "object",
 		Required:             schema.Required,

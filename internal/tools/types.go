@@ -94,7 +94,7 @@ type ToolError struct {
 type Schema struct {
 	Required             []string                `json:"required,omitempty"`
 	Properties           map[string]PropertyType `json:"properties,omitempty"`
-	AdditionalProperties bool                    `json:"additional_properties"` // default false
+	AdditionalProperties bool                    `json:"additionalProperties"` // default false
 }
 
 // PropertyType declares the expected type of an argument. The string
@@ -105,8 +105,8 @@ type PropertyType string
 // PropertyType constants. The string values match JSON types.
 const (
 	TypeString PropertyType = "string"
-	TypeInt    PropertyType = "int"
-	TypeBool   PropertyType = "bool"
+	TypeInt    PropertyType = "integer"
+	TypeBool   PropertyType = "boolean"
 	TypeNumber PropertyType = "number"
 	TypeArray  PropertyType = "array"
 	TypeObject PropertyType = "object"

@@ -828,6 +828,11 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir,
 	if errors.As(err, &me) {
 		switch me.Kind {
 		case model.ErrHTTP, model.ErrParse, model.ErrUpstream:
+			// Surface the model/API error so exit 3 is diagnosable. It was
+			// previously swallowed here — visible in neither the pane,
+			// events.jsonl, nor session.json — which cost three diagnoses of
+			// the DeepSeek strict-schema 400 on 2026-09-06.
+			fmt.Fprintln(os.Stderr, "model/API error (exit 3):", err)
 			_ = em.Completed(3)
 			if sidecar != nil {
 				_ = sidecar.Sync()
@@ -835,6 +840,7 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir,
 			}
 			return 3
 		case model.ErrTimeout:
+			fmt.Fprintln(os.Stderr, "model/API timeout (exit 6):", err)
 			_ = em.Completed(6)
 			if sidecar != nil {
 				_ = sidecar.Sync()
