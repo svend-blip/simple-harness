@@ -76,6 +76,14 @@ func (m *Manager) AddServer(ctx context.Context, srv Server, transport Transport
 			Schema:       schema,
 			Transport:    transport,
 		})
+		// A server that lists the same tool name twice (or two tools that
+		// resolve to the same final name) must not crash the harness: the
+		// base tools.Registry.Register panics on duplicates — right for
+		// internal built-ins, wrong for external MCP listings we do not
+		// control. Skip the redundant one and keep the first.
+		if _, exists := m.registry.Get(finalName); exists {
+			continue
+		}
 		m.registry.Register(adapter)
 		state.tools = append(state.tools, finalName)
 	}
