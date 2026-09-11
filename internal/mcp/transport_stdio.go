@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/svend-blip/simple-harness/internal/procgroup"
 	"io"
 	"os/exec"
 	"sync"
@@ -41,7 +42,7 @@ import (
 // internal/tools/builtins/shell.go:189-197 + pinned by
 // TestShell_ProcessGroupOwnership). With Setpgid:true, the child's
 // PID equals its PGID; the Close path uses
-// `syscall.Kill(-pgid, ...)` to signal the whole group, mirroring
+// `procgroup.Signal(pgid, ...)` to signal the whole group, mirroring
 // the shell builtin.
 //
 // SCOPE §30 compliance: error messages NEVER include the raw
@@ -81,7 +82,7 @@ func NewStdioTransport(ctx context.Context, command []string) (*stdioTransport, 
 		return nil, fmt.Errorf("mcp: stdio: command must be non-empty")
 	}
 	cmd := exec.Command(command[0], command[1:]...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = procgroup.Attr()
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("mcp: stdio: stdin pipe: %w", err)
@@ -157,7 +158,7 @@ func (t *stdioTransport) Call(ctx context.Context, name string, args map[string]
 //  1. Close stdin → child reads EOF → child exits gracefully.
 //  2. Wait up to 2s for cmd.Wait to return.
 //  3. If still alive, SIGTERM the process group
-//     (syscall.Kill(-pgid, SIGTERM); pgid = cmd.Process.Pid because
+//     (procgroup.Signal(pgid, SIGTERM); pgid = cmd.Process.Pid because
 //     Setpgid:true makes the child its own group leader).
 //  4. Wait up to 2s for cmd.Wait to return.
 //  5. If still alive, SIGKILL the process group as last resort.
@@ -186,11 +187,11 @@ func (t *stdioTransport) Close() error {
 	if waitDone(done, 2*time.Second) {
 		return nil
 	}
-	_ = syscall.Kill(-pgid, syscall.SIGTERM)
+	_ = procgroup.Signal(pgid, syscall.SIGTERM)
 	if waitDone(done, 2*time.Second) {
 		return nil
 	}
-	_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	_ = procgroup.Signal(pgid, syscall.SIGKILL)
 	<-done
 	return nil
 }

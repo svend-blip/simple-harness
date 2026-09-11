@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/svend-blip/simple-harness/internal/procgroup"
 	"io"
 	"os/exec"
 	"strconv"
@@ -267,11 +268,11 @@ func (Shell) Execute(ctx context.Context, call tools.Call) (tools.Result, error)
 		}
 	}
 
-	cmd := exec.Command("sh", "-c", command)
+	cmd := shellCommand(command)
 	if cwd != "" {
 		cmd.Dir = cwd
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = procgroup.Attr()
 
 	var stdoutBuf, stderrBuf bytes.Buffer
 	cmd.Stdout = newCappedWriter(&stdoutBuf, maxOutputBytes)
@@ -282,16 +283,7 @@ func (Shell) Execute(ctx context.Context, call tools.Call) (tools.Result, error)
 		return tools.Result{}, fmt.Errorf("shell: start %q: %w", command, err)
 	}
 
-	pgid, pgidErr := syscall.Getpgid(cmd.Process.Pid)
-	if pgidErr != nil {
-		// Setpgid:true was set; this should not fail unless
-		// the child already exited (e.g. sh -c 'exit 0' ran
-		// and exited between Start and Getpgid). Defensive
-		// fallback: kill the child directly.
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
-		return tools.Result{}, fmt.Errorf("shell: Getpgid(%d): %w", cmd.Process.Pid, pgidErr)
-	}
+	pid := cmd.Process.Pid
 
 	// Cancellation sources. First to fire wins; the sync.Once
 	// ensures we send SIGTERM exactly once even if both ctx and
@@ -305,7 +297,7 @@ func (Shell) Execute(ctx context.Context, call tools.Call) (tools.Result, error)
 	var signalOnce sync.Once
 	signalTerm := func() {
 		signalOnce.Do(func() {
-			_ = syscall.Kill(-pgid, syscall.SIGTERM)
+			_ = procgroup.Signal(pid, syscall.SIGTERM)
 		})
 	}
 
@@ -359,7 +351,7 @@ func (Shell) Execute(ctx context.Context, call tools.Call) (tools.Result, error)
 			// SIGKILL actually killed the child (i.e.
 			// waitDone has NOT yet received a value when we
 			// get here).
-			if err := syscall.Kill(-pgid, syscall.SIGKILL); err == nil {
+			if err := procgroup.Signal(pid, syscall.SIGKILL); err == nil {
 				// SIGKILL was sent (not ESRCH) — child was
 				// still alive after the grace. This is the
 				// escalation path.
