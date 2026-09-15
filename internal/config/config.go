@@ -550,6 +550,11 @@ func (c Config) Render(w io.Writer) error {
 		},
 		MCPServers:   mcpView,
 		ShellTimeout: shadow.ShellTimeout.String(),
+		Position: renderPositionView{
+			RunID:     os.Getenv("SIMPLE_HARNESS_RUN_ID"),
+			HandoffID: os.Getenv("SIMPLE_HARNESS_HANDOFF_ID"),
+			FlowKey:   os.Getenv("SIMPLE_HARNESS_FLOW_KEY"),
+		},
 	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
@@ -559,11 +564,26 @@ func (c Config) Render(w io.Writer) error {
 
 // renderView is the JSON marshalling shape for Render output. It
 // mirrors Config but uses string for request_timeout so the output is
-// human-readable.
+// human-readable. Position is NOT part of Config: the harness's
+// position comes from the environment only (no config-file key), so
+// Render reads it at render time via os.Getenv and shows the empty
+// string for unset variables. That lets an operator see exactly what
+// the MCP adapter will fill for run_id / handoff_id / flow_key.
 type renderView struct {
-	Model        renderModelView `json:"model"`
-	MCPServers   []renderMCPView `json:"mcp_servers"`
-	ShellTimeout string          `json:"shell_timeout"`
+	Model        renderModelView    `json:"model"`
+	MCPServers   []renderMCPView    `json:"mcp_servers"`
+	ShellTimeout string             `json:"shell_timeout"`
+	Position     renderPositionView `json:"position"`
+}
+
+// renderPositionView mirrors the harness's environment-read position
+// for marshalling only. Each field is the value of the matching
+// SIMPLE_HARNESS_* environment variable as the process sees it; unset
+// variables render as the empty string.
+type renderPositionView struct {
+	RunID     string `json:"run_id"`
+	HandoffID string `json:"handoff_id"`
+	FlowKey   string `json:"flow_key"`
 }
 
 // renderModelView mirrors ModelConfig for marshalling only.

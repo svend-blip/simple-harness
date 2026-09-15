@@ -216,6 +216,25 @@ start — see `docs/examples/mcp-light.json` for a reference config and
 `docs/HARNESS-CONTRACT.md` for the MCP client section. The `api_key`
 field is redacted in `config show` output per SCOPE §30.
 
+## MCP position defaults
+
+The harness fills three attribution arguments on MCP tool calls when
+the model omits them, from its own environment:
+
+- `SIMPLE_HARNESS_RUN_ID` → the `run_id` argument
+- `SIMPLE_HARNESS_HANDOFF_ID` → the `handoff_id` argument
+- `SIMPLE_HARNESS_FLOW_KEY` → the `flow_key` argument
+
+The rule: an argument is filled only when the tool's schema declares
+that property, the call has no value for it (absent or the empty
+string), and the matching environment variable is non-empty. A value
+the model supplied always wins. The fills apply to MCP tools only;
+builtin tools see exactly what the model sent. `simple-harness config
+show` renders the current values under a top-level `position` object
+(empty string when unset).
+
+Why: a retrieval that cannot be attributed to a run cannot be audited.
+
 ## Running
 
 Interactive: `bin/simple-harness --workspace ~/project`. Headless:

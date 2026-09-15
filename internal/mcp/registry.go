@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/svend-blip/simple-harness/internal/tools"
 )
@@ -366,9 +367,15 @@ func (a *mcpAdapter) Schema() tools.Schema { return a.schema }
 // Execute implements tools.Tool. The adapter's role at execute time
 // is narrowly scoped:
 //
-//  1. Call transport.Call verbatim with the original tool name (the
-//     MCP server sees the name it advertised in its listing; the
-//     collision-resolved FinalName is the registry-facing name only).
+//  1. Apply the position defaults (applyPositionDefaults) to
+//     call.Arguments, then call transport.Call with the original tool
+//     name (the MCP server sees the name it advertised in its
+//     listing; the collision-resolved FinalName is the registry-facing
+//     name only). The harness fills run_id / handoff_id / flow_key
+//     from its own environment when the model omitted them, so every
+//     retrieval the server logs is attributable to a run; a value the
+//     model supplied always wins. The filled values never appear in a
+//     log line; the error messages below are unchanged by the fill.
 //  2. A transport error becomes Result{Status:"error", Error:
 //     &tools.ToolError{Kind:"execution_failed", ...}} — same shape
 //     as a builtin execution failure. The model sees this structured
@@ -385,7 +392,8 @@ func (a *mcpAdapter) Schema() tools.Schema { return a.schema }
 // carried on the adapter for symmetry with other Tool
 // implementations but are not consumed by Execute directly.
 func (a *mcpAdapter) Execute(ctx context.Context, call tools.Call) (tools.Result, error) {
-	out, err := a.transport.Call(ctx, a.origName, call.Arguments)
+	args := applyPositionDefaults(a.schema, call.Arguments, os.Getenv)
+	out, err := a.transport.Call(ctx, a.origName, args)
 	if err != nil {
 		return tools.Result{Status: "error", Error: &tools.ToolError{
 			Kind:    "execution_failed",
