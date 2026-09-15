@@ -129,7 +129,7 @@ type ShellResult struct {
 // Per SCOPE §27 "controlled escalation where required" — two
 // seconds gives well-behaved children (default signal disposition)
 // time to exit cleanly while bounding the wall-clock wait for
-// children that ignore SIGTERM (e.g. `trap ” TERM; sleep 60`).
+// children that ignore SIGTERM (e.g. `trap "" TERM; sleep 60`).
 const terminateGrace = 2 * time.Second
 
 // truncateMarkerFor builds the marker with the cap value

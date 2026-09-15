@@ -267,7 +267,7 @@ func TestShell_TimeoutKillsWholeGroup(t *testing.T) {
 }
 
 // TestShell_TimeoutEscalatesToSIGKILL: a child that traps SIGTERM
-// (`trap '' TERM; sleep 60`) ignores the harness's first signal.
+// (`trap "" TERM; sleep 60`) ignores the harness's first signal.
 // The grace goroutine then escalates to SIGKILL after
 // terminateGrace (2s). After Execute returns,
 // TerminationReason == "escalated" and the test wall-clock is

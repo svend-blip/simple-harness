@@ -418,8 +418,8 @@ func TestGrep_Equivalence_BothBackends(t *testing.T) {
 	writeFile(t, subdir, "c.md", []byte("needle in md deep\n"))
 
 	patterns := []struct {
-		name             string
-		args             map[string]any
+		name string
+		args map[string]any
 	}{
 		{
 			name: "basic",

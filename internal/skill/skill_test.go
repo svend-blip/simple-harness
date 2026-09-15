@@ -212,8 +212,8 @@ func TestLoad_SourceFieldReportsOrigin(t *testing.T) {
 		wantContent string
 	}
 	cases := []struct {
-		label   string
-		setup   func(t *testing.T) (LoadOptions, fixture)
+		label string
+		setup func(t *testing.T) (LoadOptions, fixture)
 	}{
 		{
 			label: "workspace-only",

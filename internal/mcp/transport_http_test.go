@@ -257,7 +257,7 @@ type recordedSessionRequest struct {
 type sessionRequiredHTTPServer struct {
 	mu                sync.Mutex
 	assignedSessionID string
-	initializeStatus  int          // 0 = 200; non-zero overrides the success path
+	initializeStatus  int // 0 = 200; non-zero overrides the success path
 	requests          []recordedSessionRequest
 	listings          []ListedTool
 	calls             []stubCall

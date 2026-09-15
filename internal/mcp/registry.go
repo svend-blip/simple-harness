@@ -13,13 +13,13 @@ import (
 //  1. transport.List(ctx) → []ListedTool.
 //  2. For each ListedTool:
 //     - Apply the allowlist filter (drop any tool whose name is not in
-//       Server.Allowlist when Allowlist is non-empty; the filter is at
-//       REGISTRATION time, so an excluded tool is never callable).
+//     Server.Allowlist when Allowlist is non-empty; the filter is at
+//     REGISTRATION time, so an excluded tool is never callable).
 //     - Convert InputSchema (the server's verbatim JSON Schema as a
-//       map[string]interface{}) → tools.Schema via schemaFromMap.
+//     map[string]interface{}) → tools.Schema via schemaFromMap.
 //     - Resolve the final name via ResolveFinalName (builtin wins;
-//       MCP tool is registered under "<server>__<tool>" on collision;
-//       double underscore; server name sanitized).
+//     MCP tool is registered under "<server>__<tool>" on collision;
+//     double underscore; server name sanitized).
 //     - Build the mcpAdapter and register it against the registry.
 //  3. Record the serverState (Server + Transport + the resolved
 //     FinalNames) so Manager.Close can release the Transport.

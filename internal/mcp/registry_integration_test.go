@@ -20,7 +20,7 @@ type builtinEchoTool struct {
 	reply string
 }
 
-func (b *builtinEchoTool) Meta() tools.ToolMeta  { return tools.ToolMeta{Name: b.name} }
+func (b *builtinEchoTool) Meta() tools.ToolMeta { return tools.ToolMeta{Name: b.name} }
 func (b *builtinEchoTool) Schema() tools.Schema { return tools.Schema{} }
 func (b *builtinEchoTool) Execute(_ context.Context, _ tools.Call) (tools.Result, error) {
 	return tools.Result{Status: "ok", Content: b.reply}, nil
@@ -289,7 +289,7 @@ func TestMCP_PermissionMapping_SchemaViolationBecomesToolError(t *testing.T) {
 	srv := Server{Name: "weather", Transport: "stdio", Command: []string{"stub"}}
 	transport := newStubTransport([]ListedTool{
 		{
-			Name: "do_thing",
+			Name:        "do_thing",
 			Description: "do a thing",
 			InputSchema: map[string]interface{}{
 				"required": []interface{}{"path"},

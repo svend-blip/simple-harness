@@ -382,7 +382,7 @@ func TestComposeMessages_OnlySkill(t *testing.T) {
 // order.
 func TestComposeMessages_AllSlotsPopulated(t *testing.T) {
 	got := ComposeMessages(Config{
-		System:        "H",
+		System:         "H",
 		SystemExternal: "E",
 		Skills: []skill.Skill{
 			{Name: "a", Content: "A"},
@@ -439,9 +439,9 @@ func TestComposeMessages_OrderingIsPermutationProof(t *testing.T) {
 	for _, p := range permutations {
 		t.Run(p.name, func(t *testing.T) {
 			got := ComposeMessages(Config{
-				System:        p.sys,
+				System:         p.sys,
 				SystemExternal: p.ext,
-				Skills:        p.skills,
+				Skills:         p.skills,
 			}, p.prompt)
 			// 4 messages: harness, external, skill, user.
 			if len(got) != 4 {
@@ -480,7 +480,7 @@ func TestComposeMessages_OrderingIsPermutationProof(t *testing.T) {
 // canonical positions.
 func TestComposeMessages_SkillsPreserveOrder(t *testing.T) {
 	got := ComposeMessages(Config{
-		System:        "H",
+		System:         "H",
 		SystemExternal: "E",
 		Skills: []skill.Skill{
 			{Name: "1", Content: "A"},
@@ -526,7 +526,9 @@ func TestComposeMessages_EmptySkillContentIsSkipped(t *testing.T) {
 // an httptest server that captures the request body and asserts
 // the incoming messages JSON is exactly
 // [system: HarnessSystem, system: "EXT", system: "SKILL",
-//   user: "hello"]
+//
+//	user: "hello"]
+//
 // when constructed with the full populated Config. A future
 // regression that drops a slot, reorders slots, or adds duplicate
 // messages fails this test (it parses the actual outgoing JSON).

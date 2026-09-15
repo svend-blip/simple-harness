@@ -44,12 +44,14 @@ import (
 //     response. JSON-RPC error → List returns the wrapped error
 //     (declared-but-unreachable / structured startup error per
 //     GOAL §2 bound decision 4).
+//
 //   - Call(): POST to endpoint with {"jsonrpc":"2.0","id":<n>,
 //     "method":"tools/call","params":{"name":<name>,"arguments":
 //     <args>}}. Parse the response. "result": {"content":[...]} or
 //     similar; transport.Call returns the result map verbatim. JSON-
 //     RPC error → Call returns the wrapped error (structured
 //     transport failure per GOAL §2 bound decision 4).
+//
 //   - Close(): releases the http.Client's idle connections. No
 //     long-lived resources are held beyond that.
 //

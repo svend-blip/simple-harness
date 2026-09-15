@@ -232,11 +232,11 @@ func TestJsonTypeToPropertyType_AllKnown(t *testing.T) {
 // maps to "internal_error" (the same fallback the registry uses).
 func TestStageToKind(t *testing.T) {
 	cases := map[string]string{
-		"schema":          "schema_violation",
-		"path":            "path_escape",
-		"policy":          "permission_denied",
-		"unknown_stage":   "internal_error",
-		"":                "internal_error",
+		"schema":        "schema_violation",
+		"path":          "path_escape",
+		"policy":        "permission_denied",
+		"unknown_stage": "internal_error",
+		"":              "internal_error",
 	}
 	for stage, want := range cases {
 		got := stageToKind(stage, "ignored")

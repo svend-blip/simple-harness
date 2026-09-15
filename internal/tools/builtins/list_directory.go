@@ -71,7 +71,7 @@ type ListDirectoryResult struct {
 //  3. os.ReadDir(path). For each entry:
 //     - directory: Type="dir", SizeBytes omitted.
 //     - file (or symlink, mode aside): Type="file", SizeBytes =
-//       entry.Info.Size().
+//     entry.Info.Size().
 //  4. Sort the entries by Name (case-sensitive; os.ReadDir's
 //     alphabetical order is OS-dependent, so we re-sort to make the
 //     contract explicit and stable across platforms).

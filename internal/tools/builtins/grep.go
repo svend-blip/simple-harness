@@ -105,13 +105,13 @@ const grepMaxCap = 10000
 //  4. Look up `rg` via execLookPath. If found, take the rg-shell-out
 //     path (step 5a). If not, take the native-fallback path (step
 //     5b). Both paths produce the same GrepResult shape.
-//  5a. RG shell-out: invoke `rg --no-heading --line-number
+//     5a. RG shell-out: invoke `rg --no-heading --line-number
 //     --no-messages --with-filename [-i] [--glob=<file_pattern>]
 //     <pattern> <path>`. Parse stdout (each line is "file:line:text")
 //     into GrepMatch rows. Set Backend = "rg". rg exit 1 (no matches)
 //     is treated as success with an empty matches slice; exit 2+ is
 //     Kind: "rg_failed".
-//  5b. Native fallback: filepath.WalkDir the directory, skipping
+//     5b. Native fallback: filepath.WalkDir the directory, skipping
 //     .git at any depth. For each file (not directory) that matches
 //     file_pattern (if specified; default match all), open and read
 //     line-by-line via bufio.Scanner. For each line, test the

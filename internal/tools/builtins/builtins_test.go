@@ -971,6 +971,7 @@ func TestIntegration_PermissionDenial_SHELL_READ_ONLY(t *testing.T) {
 	// observable proof, but the test asserts the structured
 	// Kind which is the binding evidence.)
 }
+
 // TestIntegration_PermissionDenial_SHELL_WORKSPACE_WRITE_Allowed:
 // a WORKSPACE_WRITE shell call reaches Execute (the policy stage
 // permits shell under WORKSPACE_WRITE because the call does not

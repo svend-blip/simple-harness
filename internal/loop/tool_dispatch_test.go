@@ -342,11 +342,11 @@ func TestToolDispatch_LoopCore_MaxTurns_StopsOverflowingModel(t *testing.T) {
 	lines := strings.Split(strings.TrimRight(sidecar.String(), "\n"), "\n")
 
 	var (
-		modelRequestCount  int
-		foundOverflow      bool
-		foundFailedStatus  bool
-		completedExitCode  int
-		overflowLineIndex  = -1
+		modelRequestCount   int
+		foundOverflow       bool
+		foundFailedStatus   bool
+		completedExitCode   int
+		overflowLineIndex   = -1
 		streamAfterOverflow int
 	)
 	for i, line := range lines {

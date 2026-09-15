@@ -533,7 +533,7 @@ func TestToolCall_StreamedArgs_MalformedAtFinish_Errors(t *testing.T) {
 // and a non-empty properties map.
 func TestChatRequest_Tools_AdvertisesRegisteredTools(t *testing.T) {
 	var gotBody struct {
-		Model    string `json:"model"`
+		Model    string    `json:"model"`
 		Messages []Message `json:"messages"`
 		Tools    []struct {
 			Type     string `json:"type"`

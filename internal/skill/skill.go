@@ -13,8 +13,8 @@
 //
 // Two search roots are recognised by default:
 //
-//	1. <workspace>/.simple-harness/skills/<name>/SKILL.md   (workspace)
-//	2. ~/.simple-harness/skills/<name>/SKILL.md             (global)
+//  1. <workspace>/.simple-harness/skills/<name>/SKILL.md   (workspace)
+//  2. ~/.simple-harness/skills/<name>/SKILL.md             (global)
 //
 // The workspace root wins on collision (SCOPE §15 — projects can
 // override a globally-shipped skill without modifying the global

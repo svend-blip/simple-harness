@@ -67,8 +67,8 @@ func RegisterBuiltins(r *tools.Registry) {
 	r.Register(ApplyPatch{})
 	r.Register(Grep{})
 	r.Register(ListDirectory{})
-	r.Register(ListSkills{})   // Run 021 / handoff 068 — SCOPE §45
-	r.Register(LoadSkill{})    // Run 021 / handoff 068 — SCOPE §45
+	r.Register(ListSkills{}) // Run 021 / handoff 068 — SCOPE §45
+	r.Register(LoadSkill{})  // Run 021 / handoff 068 — SCOPE §45
 	r.Register(ReadFile{})
 	r.Register(SearchFiles{})
 	r.Register(Shell{})

@@ -28,11 +28,11 @@ func searchFilesContent(t *testing.T, res tools.Result) SearchFilesResult {
 func TestSearchFiles_HappyPath_Substring(t *testing.T) {
 	dir := t.TempDir()
 	files := map[string]string{
-		"alpha.txt":   "x",
-		"beta.txt":    "x",
-		"gamma.go":    "x",
-		"delta.txt":   "x",
-		"epsilon.md":  "x",
+		"alpha.txt":  "x",
+		"beta.txt":   "x",
+		"gamma.go":   "x",
+		"delta.txt":  "x",
+		"epsilon.md": "x",
 	}
 	for name := range files {
 		writeFile(t, dir, name, []byte(files[name]))

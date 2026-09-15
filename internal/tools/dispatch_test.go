@@ -184,8 +184,8 @@ type errorTool struct {
 	err  error
 }
 
-func (e *errorTool) Meta() ToolMeta  { return ToolMeta{Name: e.name} }
-func (e *errorTool) Schema() Schema  { return Schema{} }
+func (e *errorTool) Meta() ToolMeta { return ToolMeta{Name: e.name} }
+func (e *errorTool) Schema() Schema { return Schema{} }
 func (e *errorTool) Execute(_ context.Context, _ Call) (Result, error) {
 	return Result{}, e.err
 }

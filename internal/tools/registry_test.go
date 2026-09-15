@@ -61,8 +61,8 @@ func TestRegistry_GetRegisteredAndUnknown(t *testing.T) {
 // call (empty schema) and returns Status="ok" with Content=Arguments.
 type echoTool struct{ name string }
 
-func (e *echoTool) Meta() ToolMeta              { return ToolMeta{Name: e.name} }
-func (e *echoTool) Schema() Schema              { return Schema{} }
+func (e *echoTool) Meta() ToolMeta { return ToolMeta{Name: e.name} }
+func (e *echoTool) Schema() Schema { return Schema{} }
 func (e *echoTool) Execute(_ context.Context, call Call) (Result, error) {
 	return Result{Status: "ok", Content: call.Arguments}, nil
 }

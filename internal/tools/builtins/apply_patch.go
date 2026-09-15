@@ -553,11 +553,11 @@ func parseRange(s string) (hunkRange, error) {
 // NOT ending in '\n' has its last element as the file's tail
 // without a trailing newline. This preserves the round-trip:
 //
-//   strings.Join(splitLines(bytes), "\n") == bytes
+//	strings.Join(splitLines(bytes), "\n") == bytes
 //
 // when bytes ends in '\n', and
 //
-//   strings.Join(splitLines(bytes), "\n") == bytes
+//	strings.Join(splitLines(bytes), "\n") == bytes
 //
 // when bytes does not end in '\n'.
 func splitLines(b []byte) []string {

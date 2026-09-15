@@ -129,12 +129,12 @@ func TestMCP_TransportStdio_StubCall(t *testing.T) {
 // TestMCP_TransportStdio_ProcessGroupOwnership: the SCOPE §27 +
 // Run 005 process-group pin. Three assertions:
 //
-//   (a) the child is spawned with Setpgid:true
-//       (syscall.Getpgid(child.Pid) == child.Pid);
-//   (b) Close reaps the child (no zombie — syscall.Wait4 with
-//       WNOHANG returns -1/ECHILD after Close returns);
-//   (c) the long-running child is actually killed by Close
-//       (kill -0 returns ESRCH after Close returns).
+//	(a) the child is spawned with Setpgid:true
+//	    (syscall.Getpgid(child.Pid) == child.Pid);
+//	(b) Close reaps the child (no zombie — syscall.Wait4 with
+//	    WNOHANG returns -1/ECHILD after Close returns);
+//	(c) the long-running child is actually killed by Close
+//	    (kill -0 returns ESRCH after Close returns).
 //
 // The test does NOT call List/Call on the transport — the
 // longRunningStub does not respond to requests; the test only

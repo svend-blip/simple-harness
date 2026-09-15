@@ -377,6 +377,7 @@ func TestReadFile_PathEscapeRejected_DirectExecute(t *testing.T) {
 	// Silence the dir-variable warning.
 	_ = dir
 }
+
 // TestReadFile_JSONDecodedLineNumbers: a model's call arrives through
 // encoding/json, so start_line/end_line are float64, not int. The schema
 // accepts a whole float64; the tool must too. Every ranged read_file from
