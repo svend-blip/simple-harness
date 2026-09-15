@@ -77,6 +77,14 @@ audited.
 
 Every existing test that passes on `e5629bd` still passes.
 
+## 2.5 Not yours
+
+Three untracked backup binaries predate this task
+(`bin/simple-harness-runtime.bak-pre-*`). Leave them exactly as they are:
+do not rename, move, delete or commit them. TG4's fence ignores `bin/`
+for that reason (amended by the reviewer 2026-09-15 after the criterion
+flagged them).
+
 ## 3. Constraints
 
 Work only here; never modify DPMtF, mcp-light, knowledge-service or
@@ -105,7 +113,7 @@ expect: exit 0
 
 id: TG4
 what: FENCE — only the deliverable paths changed
-run: cd /home/svend/simple-harness && test -n "$(git status --porcelain)" && test -z "$(git status --porcelain | awk '{print $2}' | grep -v -E '^(internal/mcp/|internal/config/|cmd/simple-harness/|README.md|SCOPE.md)')"
+run: cd /home/svend/simple-harness && test -n "$(git status --porcelain)" && test -z "$(git status --porcelain | awk '{print $2}' | grep -v -E '^bin/' | grep -v -E '^(internal/mcp/|internal/config/|cmd/simple-harness/|README.md|SCOPE.md)')"
 expect: exit 0
 
 id: TG5
