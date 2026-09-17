@@ -36,6 +36,12 @@ def main() -> int:
                 reduced += 1
             if status.startswith("CONTEXT_BUDGET_EXCEEDED"):
                 overflow = True
+    if calls == 0:
+        # A row of zeros looks like a result. It is not one: the arm never
+        # reached the model, and printing it beside a real arm would invite
+        # a comparison between a measurement and a failure.
+        print(f"{label:<12}{'DID NOT RUN — exit ' + rc:>54}")
+        return 1
     mark = "over" if max_prompt > int(limit) else ""
     print(f"{label:<12}{calls:>10}{input_tokens:>12,}{max_prompt:>13,}{mark:<1}"
           f"{reduced:>10}{runtime:>9}s{rc:>9}"

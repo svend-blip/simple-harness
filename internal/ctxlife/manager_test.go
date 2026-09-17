@@ -825,3 +825,97 @@ func TestAToolCallAndItsAnswerAreNeverSplitByTheRecentWindow(t *testing.T) {
 		}
 	}
 }
+
+// -- §14 step 12: the last safe reduction -------------------------
+
+// The case this exists for, found by a real benchmark rather than
+// imagined: a 16k budget, a model reading source files, and a recent
+// window of eight whose tool results alone exceed the budget. Pruning
+// and compaction both ran and the run still failed.
+func TestARecentWindowTooLargeForTheBudgetIsNarrowedRatherThanFailing(t *testing.T) {
+	c := &fixedCompactor{summary: "objective x"}
+	m := New(16384)
+	m.KeepRecentTurns = 8
+	m.Compactor = c
+	in := []model.Message{sys("instructions")}
+	for i := 0; i < 12; i++ {
+		in = append(in, callAndResult(fmt.Sprintf("c%d", i), 3000)...)
+	}
+	in = append(in, user("continue"))
+
+	out, acct, err := m.Fit(in)
+	if err != nil {
+		t.Fatalf("a run that could have continued failed instead: %v", err)
+	}
+	if !acct.WithinBudget() {
+		t.Fatalf("still over budget: %d of %d", acct.Total, acct.Budget)
+	}
+	if m.Stats.RecentWindowNarrowings == 0 {
+		t.Fatal("it fit without narrowing, so this proves nothing")
+	}
+	if err := pairingIsValid(out); err != nil {
+		t.Fatalf("narrowing broke the tool-call pairing: %v", err)
+	}
+}
+
+func TestNarrowingLeavesTheConfiguredWindowUnchangedForTheNextInference(t *testing.T) {
+	c := &fixedCompactor{summary: "x"}
+	m := New(16384)
+	m.KeepRecentTurns = 8
+	m.Compactor = c
+	in := []model.Message{sys("i")}
+	for i := 0; i < 12; i++ {
+		in = append(in, callAndResult(fmt.Sprintf("c%d", i), 3000)...)
+	}
+	in = append(in, user("task"))
+	if _, _, err := m.Fit(in); err != nil {
+		t.Fatal(err)
+	}
+	if m.KeepRecentTurns != 8 {
+		t.Fatalf("the policy was changed to %d; narrowing is a decision about "+
+			"one inference, not a new setting", m.KeepRecentTurns)
+	}
+}
+
+func TestTheWindowIsNeverNarrowedBelowItsFloor(t *testing.T) {
+	// Every message is enormous, so no width fits and the floor is
+	// reached. A model that cannot see what it just did cannot
+	// continue doing it, so this must fail rather than empty the
+	// window.
+	c := &fixedCompactor{summary: "x"}
+	m := New(4096)
+	m.KeepRecentTurns = 8
+	m.MinRecentTurns = 2
+	m.Compactor = c
+	in := []model.Message{sys("i")}
+	for i := 0; i < 10; i++ {
+		in = append(in, callAndResult(fmt.Sprintf("c%d", i), 4000)...)
+	}
+	in = append(in, user("task"))
+	_, _, err := m.Fit(in)
+	if err == nil {
+		t.Fatal("the window was narrowed past its floor")
+	}
+	if !strings.Contains(err.Error(), "will not narrow below 2") {
+		t.Fatalf("the diagnostic does not say where it stopped: %v", err)
+	}
+}
+
+func TestNarrowingIsNotReachedWhenPruningAloneSuffices(t *testing.T) {
+	m := New(16384)
+	m.KeepRecentTurns = 4
+	in := []model.Message{sys("i")}
+	for i := 0; i < 20; i++ {
+		in = append(in, callAndResult(fmt.Sprintf("c%d", i), 800)...)
+	}
+	in = append(in, user("task"))
+	if _, _, err := m.Fit(in); err != nil {
+		t.Fatal(err)
+	}
+	if m.Stats.ToolResultsPruned == 0 {
+		t.Fatal("pruning did not run, so this proves nothing")
+	}
+	if m.Stats.RecentWindowNarrowings != 0 {
+		t.Fatal("the window was narrowed even though pruning was enough")
+	}
+}

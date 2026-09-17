@@ -46,7 +46,7 @@ run_arm() { # run_arm <label> <extra-flags...>
     set +e
     "$BIN" run --base-url "$BASE" --model "$MODEL" --workspace "$WORK" \
         --prompt-file "$WORK/task.txt" --max-turns "$TURNS" \
-        --output json "$@" >"$sidecar" 2>"$TMP/$label.err"
+        --output jsonl "$@" >"$sidecar" 2>"$TMP/$label.err"
     rc=$?
     set -e
     end=$(date +%s.%N)

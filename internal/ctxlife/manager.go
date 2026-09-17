@@ -54,15 +54,16 @@ type Compactor interface {
 // Stats is §16's observable surface. Every field is a count or a
 // token figure the manager actually produced, not a derived rate.
 type Stats struct {
-	Inferences         int
-	Reductions         int
-	ToolResultsPruned  int
-	TokensPruned       int
-	Compactions        int
-	TokensCompacted    int
-	CompactionFailures int
-	PeakActiveTokens   int
-	LastActiveTokens   int
+	Inferences             int
+	Reductions             int
+	ToolResultsPruned      int
+	TokensPruned           int
+	Compactions            int
+	TokensCompacted        int
+	CompactionFailures     int
+	RecentWindowNarrowings int
+	PeakActiveTokens       int
+	LastActiveTokens       int
 }
 
 // Accounting is §4's full picture of one candidate context.
@@ -112,6 +113,12 @@ type Manager struct {
 	// the cheapest reduction and needs no inference.
 	PruneToolResults bool
 
+	// MinRecentTurns is the number of trailing messages that stay
+	// verbatim even when the window is narrowed to make a run fit.
+	// Zero means DefaultMinRecentTurns. A model that cannot see
+	// what it just did cannot continue doing it.
+	MinRecentTurns int
+
 	// Compactor enables §10. Nil means conversation compaction is
 	// unavailable, which is reported rather than worked around.
 	Compactor Compactor
@@ -127,6 +134,7 @@ type Manager struct {
 // configuration at all, per §17.
 const (
 	DefaultKeepRecentTurns = 8
+	DefaultMinRecentTurns  = 2
 
 	// The placeholder that replaces a pruned tool result. It says
 	// what was there and how big it was, so a reader of the
@@ -375,7 +383,71 @@ func (m *Manager) Fit(messages []model.Message) ([]model.Message, Accounting, er
 		}
 	}
 
+	// §14 step 12: additional safe reduction, when the alternative
+	// is failing a run that could have continued.
+	//
+	// The recent verbatim window is a fixed count of messages, and
+	// with large tool results a window of eight can exceed a small
+	// budget on its own — measured against a real model reading
+	// source files at a 16k limit, where pruning and compaction both
+	// ran and the run still failed. Narrowing the window makes those
+	// results prunable too.
+	//
+	// It narrows rather than disappears: MinRecentTurns messages stay
+	// verbatim whatever happens, because a model that cannot see what
+	// it just did cannot continue doing it. Reaching that floor and
+	// still not fitting is a real failure, and is reported as one.
+	if m.PruneToolResults && m.KeepRecentTurns > m.minRecent() {
+		if narrowed, n, tokens, ok := m.narrowAndPrune(working, &acct); ok {
+			working = narrowed
+			m.Stats.RecentWindowNarrowings++
+			m.Stats.ToolResultsPruned += n
+			m.Stats.TokensPruned += tokens
+			m.Stats.LastActiveTokens = acct.Total
+			m.trackPeak(acct.Total)
+			return working, acct, nil
+		}
+	}
+
 	return nil, acct, m.cannotFit(acct)
+}
+
+// minRecent is the floor the recent window will not go below.
+func (m *Manager) minRecent() int {
+	if m.MinRecentTurns > 0 {
+		return m.MinRecentTurns
+	}
+	return DefaultMinRecentTurns
+}
+
+// narrowAndPrune shrinks the verbatim window step by step, pruning at
+// each step, and stops at the first width that fits. It restores the
+// configured width before returning either way: the narrowing is a
+// decision about this inference, not a change to the policy.
+func (m *Manager) narrowAndPrune(messages []model.Message, acct *Accounting,
+) ([]model.Message, int, int, bool) {
+	original := m.KeepRecentTurns
+	defer func() { m.KeepRecentTurns = original }()
+
+	totalPruned, totalTokens := 0, 0
+	for width := original / 2; width >= m.minRecent(); width /= 2 {
+		m.KeepRecentTurns = width
+		pruned, n, tokens := m.pruneToolResults(messages)
+		totalPruned += n
+		totalTokens += tokens
+		if n > 0 {
+			messages = pruned
+		}
+		got := m.Account(messages)
+		if got.WithinBudget() {
+			*acct = got
+			return messages, totalPruned, totalTokens, true
+		}
+		if width == m.minRecent() {
+			break
+		}
+	}
+	return messages, totalPruned, totalTokens, false
 }
 
 func (m *Manager) trackPeak(total int) {
@@ -400,7 +472,8 @@ func (m *Manager) cannotFit(a Accounting) error {
 	}
 	if a.Recent > a.Budget/2 {
 		why = append(why, fmt.Sprintf("the %d most recent messages held verbatim "+
-			"are %d tokens", m.KeepRecentTurns, a.Recent))
+			"are %d tokens, and the window will not narrow below %d",
+			m.KeepRecentTurns, a.Recent, m.minRecent()))
 	}
 	if len(why) == 0 {
 		why = append(why, "every allowed reduction has been applied")
