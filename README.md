@@ -160,6 +160,21 @@ Reference study of Pi and Whip: `docs/RECON.md` and
 `docs/COMPARATIVE-VALIDATION.md`. Concurrency stance (sequential V1,
 extension points documented): `docs/ADR-002-concurrency.md`.
 
+## Bounded context
+
+The harness keeps what it sends to the model inside a budget derived from the
+model's context limit, so a long session does not grow until the runtime
+refuses it. Older tool results are replaced with placeholders, then older
+conversation is compacted; instructions, skills, the current task and the
+recent verbatim window are never touched to make room, and if the budget
+cannot be met the run fails and says why.
+
+Durable history is not the active context. Nothing is deleted — what changes
+is the view that goes on the wire.
+
+It needs no configuration; `--context-limit <n>` or `context.model_limit` tells
+it the model's window. See [docs/BOUNDED-CONTEXT-LIFECYCLE.md](docs/BOUNDED-CONTEXT-LIFECYCLE.md).
+
 ## Boundaries
 
 The governing scope (`docs/SCOPE.md`) draws hard lines: no multi-agent
