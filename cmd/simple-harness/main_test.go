@@ -2994,15 +2994,16 @@ func copyFixtureInto(projectRoot, targetDir string) error {
 // (replace "return a - b" with "return a + b"), then a final
 // non-empty assistant-text delta on the second request. The
 // test asserts:
-//   (i) the workspace's calculator.py was patched on disk
-//       (content-based assertion — "return a + b" present).
-//   (ii) python3 -m pytest against the workspace exits 0
-//        (the planted defect is fixed).
-//   (iii) the JSONL stream carries tool_call + tool_result
-//         events with matching call_ids (Run 017 / handoff
-//         041's additive event types).
-//   (iv) the JSONL stream carries a completed event with
-//        exit_code 0.
+//
+//	(i) the workspace's calculator.py was patched on disk
+//	    (content-based assertion — "return a + b" present).
+//	(ii) python3 -m pytest against the workspace exits 0
+//	     (the planted defect is fixed).
+//	(iii) the JSONL stream carries tool_call + tool_result
+//	      events with matching call_ids (Run 017 / handoff
+//	      041's additive event types).
+//	(iv) the JSONL stream carries a completed event with
+//	     exit_code 0.
 func TestE2E_AcceptanceRunner_HappyPath_HarnessDrivesPatch(t *testing.T) {
 	savedReg := globalRegistry
 	t.Cleanup(func() { globalRegistry = savedReg })
@@ -3149,15 +3150,16 @@ func TestE2E_AcceptanceRunner_HappyPath_HarnessDrivesPatch(t *testing.T) {
 // a streaming SSE response with a tool-call applying the calculator
 // defect fix on the first request, then a final assistant-text
 // delta on the second request). The test asserts:
-//   (i) the script's exit code is 0 (TG3 binding — the
-//       runner's assertion chain succeeded against the mock
-//       model on the first attempt).
-//   (ii) the script's stderr contains "attempt 1: PASS" (TG3
-//        binding — first attempt succeeded, no retry needed).
-//   (iii) the script's stdout is empty (the runner writes
-//         nothing to stdout; all log lines go to stderr).
-//   (iv) the script's stderr carries the session_id extracted
-//        from the JSONL transcript's "started" event.
+//
+//	(i) the script's exit code is 0 (TG3 binding — the
+//	    runner's assertion chain succeeded against the mock
+//	    model on the first attempt).
+//	(ii) the script's stderr contains "attempt 1: PASS" (TG3
+//	     binding — first attempt succeeded, no retry needed).
+//	(iii) the script's stdout is empty (the runner writes
+//	      nothing to stdout; all log lines go to stderr).
+//	(iv) the script's stderr carries the session_id extracted
+//	     from the JSONL transcript's "started" event.
 //
 // The test pre-anchors the script's $WORKSPACE via the
 // WORKSPACE_DIR_OVERRIDE env var (the binding-pin seam exposed
@@ -3180,7 +3182,7 @@ func TestE2E_AcceptanceRunner_HappyPath_ScriptInvokesHarness(t *testing.T) {
 	}
 	calcPath := filepath.Join(overrideWorkspace, "calculator.py")
 	argsJSON, err := json.Marshal(map[string]any{
-		"path": calcPath,
+		"path":  calcPath,
 		"patch": "--- a/calculator.py\n+++ b/calculator.py\n@@ -22,3 +22,3 @@\n def add(a, b):\n     # BUG: should be `return a + b`. Planted for the e2e slice.\n-    return a - b\n+    return a + b\n",
 	})
 	if err != nil {
@@ -3297,25 +3299,26 @@ func TestE2E_ReviewRunner_RequiresArgs_Exits1(t *testing.T) {
 // duty 2).
 //
 // The test asserts:
-//   (i) driveRun returns exit code 4 (the deterministic-boundary
-//       rejection — PermissionError → exit 4 per handoff 041).
-//       The handoff's prescriptive text says "exit code 0", but
-//       the actual harness behavior (verified at handoff 044 via
-//       TestToolDispatch_PermissionViolation_Exits4_EmitsToolResultError
-//       at main_test.go:2861) returns 4 on permission violation.
-//       The workspace is unchanged because the perm layer refused
-//       the mutation — that IS the binding evidence.
-//   (ii) the workspace's calculator.py SHA-256 is BYTE-IDENTICAL
-//        to the pristine fixture's SHA-256 (zero mutation = the
-//        strongest assertion: the model attempted the mutation,
-//        the harness rejected it, the file is byte-identical).
-//   (iii) the JSONL stream carries a tool_call event with
-//         tool=apply_patch AND a status event with state=FAILED
-//         AND a completed event with exit_code=4 (the Form 1
-//         rejection-evidence clause per GOAL §2 + SCOPE §41).
-//   (iv) the JSONL stream carries at least one assistant_stream
-//        event with non-empty content (the review-text clause
-//        per GOAL §2).
+//
+//	(i) driveRun returns exit code 4 (the deterministic-boundary
+//	    rejection — PermissionError → exit 4 per handoff 041).
+//	    The handoff's prescriptive text says "exit code 0", but
+//	    the actual harness behavior (verified at handoff 044 via
+//	    TestToolDispatch_PermissionViolation_Exits4_EmitsToolResultError
+//	    at main_test.go:2861) returns 4 on permission violation.
+//	    The workspace is unchanged because the perm layer refused
+//	    the mutation — that IS the binding evidence.
+//	(ii) the workspace's calculator.py SHA-256 is BYTE-IDENTICAL
+//	     to the pristine fixture's SHA-256 (zero mutation = the
+//	     strongest assertion: the model attempted the mutation,
+//	     the harness rejected it, the file is byte-identical).
+//	(iii) the JSONL stream carries a tool_call event with
+//	      tool=apply_patch AND a status event with state=FAILED
+//	      AND a completed event with exit_code=4 (the Form 1
+//	      rejection-evidence clause per GOAL §2 + SCOPE §41).
+//	(iv) the JSONL stream carries at least one assistant_stream
+//	     event with non-empty content (the review-text clause
+//	     per GOAL §2).
 func TestE2E_ReviewRunner_HappyPath_HarnessDrivesPatch(t *testing.T) {
 	savedReg := globalRegistry
 	t.Cleanup(func() { globalRegistry = savedReg })
@@ -3550,17 +3553,18 @@ func TestE2E_ReviewRunner_HappyPath_HarnessDrivesPatch(t *testing.T) {
 // to stderr. The script then exits 0.
 //
 // The test asserts:
-//   (i) the script's exit code is 0 (the runner's assertion
-//       chain passed on attempt 1 — TG3 binding).
-//   (ii) the script's stderr contains
-//        "attempt 1: PASS" (TG3 binding — first attempt
-//        succeeded, no retry needed).
-//   (iii) the script's stdout is empty (the runner writes
-//         nothing to stdout; all log lines go to stderr).
-//   (iv) the script's stderr contains
-//        "rejection_form=rejected_tool_call" (the Form 1
-//        detection worked; the script logs the form for
-//        the reviewer's audit).
+//
+//	(i) the script's exit code is 0 (the runner's assertion
+//	    chain passed on attempt 1 — TG3 binding).
+//	(ii) the script's stderr contains
+//	     "attempt 1: PASS" (TG3 binding — first attempt
+//	     succeeded, no retry needed).
+//	(iii) the script's stdout is empty (the runner writes
+//	      nothing to stdout; all log lines go to stderr).
+//	(iv) the script's stderr contains
+//	     "rejection_form=rejected_tool_call" (the Form 1
+//	     detection worked; the script logs the form for
+//	     the reviewer's audit).
 //
 // WORKSPACE_DIR_OVERRIDE pre-anchors the script's $WORKSPACE so
 // the binding pin can compute the absolute path the mock
@@ -3693,26 +3697,26 @@ func TestE2E_ReviewRunner_HappyPath_ScriptInvokesHarness(t *testing.T) {
 //
 //  1. Spins up an httptest.NewServer MCP stub that:
 //     - on `initialize`: returns the canonical JSON-RPC
-//       initialize response + sets the Mcp-Session-Id response
-//       header (mirrors the handoff-066 streamable-http
-//       session negotiation).
+//     initialize response + sets the Mcp-Session-Id response
+//     header (mirrors the handoff-066 streamable-http
+//     session negotiation).
 //     - on `notifications/initialized`: returns HTTP 204.
 //     - on `tools/list`: returns a single tool
-//       `get_governance_index`.
+//     `get_governance_index`.
 //     - on `tools/call` with name `get_governance_index`:
-//       returns a JSON-RPC result with a stub marker
-//       `STUB_MCP_GOVERNANCE_INDEX_PAYLOAD`.
+//     returns a JSON-RPC result with a stub marker
+//     `STUB_MCP_GOVERNANCE_INDEX_PAYLOAD`.
 //     - records every request (method + Mcp-Session-Id
-//       header) into a thread-safe slice for assertion (b).
+//     header) into a thread-safe slice for assertion (b).
 //
 //  2. Spins up an httptest.NewServer mock model that:
 //     - first request: emits one tool_call for
-//       `get_governance_index` (BARE per HARNESS-CONTRACT.md
-//       §"Collision naming" — collides with no harness builtin).
+//     `get_governance_index` (BARE per HARNESS-CONTRACT.md
+//     §"Collision naming" — collides with no harness builtin).
 //     - second request: emits an assistant content delta.
 //     - third+ request: returns HTTP 500 (defensive — the
-//       loop must reach the single-turn happy path with
-//       --max-turns 4).
+//     loop must reach the single-turn happy path with
+//     --max-turns 4).
 //
 //  3. Writes a workspace's .simple-harness/config.json with
 //     the stub MCP server (transport=http, endpoint=stubURL,
@@ -3725,32 +3729,32 @@ func TestE2E_ReviewRunner_HappyPath_ScriptInvokesHarness(t *testing.T) {
 //
 //  5. Asserts:
 //     (a) Tool calls observed end-to-end: the JSONL carries
-//         a tool_call event with tool "get_governance_index"
-//         (BARE per amendment 4) AND a tool_result event with
-//         the same call_id + tool_result_status "ok" AND
-//         the tool_result event's content contains the stub
-//         marker substring "STUB_MCP_GOVERNANCE_INDEX_PAYLOAD"
-//         (proves the harness dispatched the call to the
-//         real stub server and got the canned response back).
+//     a tool_call event with tool "get_governance_index"
+//     (BARE per amendment 4) AND a tool_result event with
+//     the same call_id + tool_result_status "ok" AND
+//     the tool_result event's content contains the stub
+//     marker substring "STUB_MCP_GOVERNANCE_INDEX_PAYLOAD"
+//     (proves the harness dispatched the call to the
+//     real stub server and got the canned response back).
 //     (b) Transport session negotiation: the stub server's
-//         recordedRequests slice contains at least one
-//         initialize request (with NO Mcp-Session-Id header)
-//         followed by a tools/list request (with a non-empty
-//         Mcp-Session-Id header matching the stub's assigned
-//         session id). Also includes a tools/call recorded
-//         request with the Mcp-Session-Id header attached.
+//     recordedRequests slice contains at least one
+//     initialize request (with NO Mcp-Session-Id header)
+//     followed by a tools/list request (with a non-empty
+//     Mcp-Session-Id header matching the stub's assigned
+//     session id). Also includes a tools/call recorded
+//     request with the Mcp-Session-Id header attached.
 //     (c) Harness exit code 0: the JSONL carries a completed
-//         event AND the harness returns exit 0 from driveRun.
+//     event AND the harness returns exit 0 from driveRun.
 //     (d) Registry collision-naming compliance: the
-//         tool_call event's tool field is the BARE form
-//         `get_governance_index` (HARNESS-CONTRACT.md
-//         §"Collision naming"). The harness's
-//         internal/tools.Registry is not directly accessible
-//         from the run-mode path, so the (a) assertion is
-//         the binding surface (the bare name in the
-//         tool_call event proves the registry registered the
-//         bare form); the (c) assertion is the positive
-//         control (a misnaming would break the dispatch).
+//     tool_call event's tool field is the BARE form
+//     `get_governance_index` (HARNESS-CONTRACT.md
+//     §"Collision naming"). The harness's
+//     internal/tools.Registry is not directly accessible
+//     from the run-mode path, so the (a) assertion is
+//     the binding surface (the bare name in the
+//     tool_call event proves the registry registered the
+//     bare form); the (c) assertion is the positive
+//     control (a misnaming would break the dispatch).
 func TestMCPLight_GetGovernanceIndex(t *testing.T) {
 	// (1) Stub MCP server — captures every request for the
 	// session-negotiation assertion (b).

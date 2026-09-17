@@ -53,6 +53,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/svend-blip/simple-harness/internal/config"
 	contextpkg "github.com/svend-blip/simple-harness/internal/context"
 	"github.com/svend-blip/simple-harness/internal/event"
 	"github.com/svend-blip/simple-harness/internal/loop"
@@ -170,9 +171,10 @@ Verb: doctor
 // 036/037) and "doctor" (SCOPE §20 doctor diagnostics, handoff
 // 038). Unknown verbs print contextUsage + exit 1. Missing verb
 // prints contextUsage + exits 1. SCOPE §28 mapping:
-//   0 = clean (success)
-//   1 = generic failure (parse error, runtime I/O error)
-//   2 = configuration error (missing/invalid flag, context overflow)
+//
+//	0 = clean (success)
+//	1 = generic failure (parse error, runtime I/O error)
+//	2 = configuration error (missing/invalid flag, context overflow)
 func runContext(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprint(os.Stderr, contextUsage)
@@ -385,6 +387,7 @@ func runContextShow(args []string) int {
 		System:         loop.HarnessSystem,
 		SystemExternal: *systemText + systemFileContent,
 		Skills:         skills,
+		ContextPolicy:  contextPolicyFrom(config.ContextConfig{}, *limit),
 	}, client, em, io.Discard)
 
 	// Run 010 / handoff 038: --limit <n> overflow wiring on the
@@ -409,7 +412,30 @@ func runContextShow(args []string) int {
 	}
 
 	fmt.Print(r.Ledger().Report())
+
+	// Bounded Context Lifecycle (addendum §16): the budget and
+	// the lifecycle counters, appended to the existing accounting
+	// report rather than replacing it. The addendum asks for the
+	// existing observability to be extended, and a second command
+	// printing a second set of numbers would be the duplication
+	// it warns against.
+	if m := r.ContextManager(); m != nil {
+		messages := loop.ComposeMessages(loop.Config{
+			System:         loop.HarnessSystem,
+			SystemExternal: systemFileContent,
+			Skills:         skillsFor(loadedSkill),
+		}, promptText)
+		fmt.Print("\n" + m.Report(m.Account(messages)))
+	}
 	return 0
+}
+
+// skillsFor is the one-or-none skill slice the composition takes.
+func skillsFor(s *skill.Skill) []skill.Skill {
+	if s == nil {
+		return nil
+	}
+	return []skill.Skill{*s}
 }
 
 // runContextDoctor prints the SCOPE §20 doctor diagnostics for the
@@ -585,6 +611,7 @@ func runContextDoctor(args []string) int {
 		System:         loop.HarnessSystem,
 		SystemExternal: *systemText + systemFileContent,
 		Skills:         skills,
+		ContextPolicy:  contextPolicyFrom(config.ContextConfig{}, *limit),
 	}, client, em, io.Discard)
 
 	// Run 010 / handoff 038: --limit <n> overflow wiring on the

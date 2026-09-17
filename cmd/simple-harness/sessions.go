@@ -155,7 +155,8 @@ func splitStateDirFlag(args []string) (string, []string) {
 // Empty state-dir: print nothing, exit 0.
 //
 // Flags:
-//   --state-dir <dir>  override the default state directory
+//
+//	--state-dir <dir>  override the default state directory
 func runSessionsList(args []string) int {
 	stateDirFlag, args := splitStateDirFlag(args)
 
@@ -226,12 +227,14 @@ func runSessionsList(args []string) int {
 // <state-dir>/<id>/session.json and prints it.
 //
 // Errors:
-//   id missing            -> print sessionsUsage, exit 1
-//   session.json missing  -> print "session not found", exit 1
-//   session.json corrupt  -> print "parse error", exit 1
+//
+//	id missing            -> print sessionsUsage, exit 1
+//	session.json missing  -> print "session not found", exit 1
+//	session.json corrupt  -> print "parse error", exit 1
 //
 // Flags:
-//   --state-dir <dir>  override the default state directory
+//
+//	--state-dir <dir>  override the default state directory
 func runSessionsShow(args []string) int {
 	stateDirFlag, args := splitStateDirFlag(args)
 

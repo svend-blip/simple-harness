@@ -47,6 +47,58 @@ type Config struct {
 	// pipe open waited 3 h 24 min. JSON key `shell_timeout`, env
 	// SIMPLE_HARNESS_SHELL_TIMEOUT, Go duration syntax ("10m", "600s").
 	ShellTimeout time.Duration `json:"shell_timeout"`
+	// Context configures the Bounded Context Lifecycle. The zero
+	// value is the safe default, so a config file that says
+	// nothing about context still gets a bounded one — the
+	// addendum's §17 requirement that safe behaviour work without
+	// mandatory configuration.
+	Context ContextConfig `json:"context,omitempty"`
+}
+
+// ContextConfig is the addendum §17 surface. Every field is
+// optional and zero means "derive it". The fields deliberately do
+// not expose every knob the manager has: §17 asks that normal users
+// not be shown tuning parameters, so the ones here are the four a
+// deployment might genuinely need to set.
+type ContextConfig struct {
+	// Policy is "bounded" (the default) or "unbounded", which
+	// restores the behaviour that preceded the addendum. Empty
+	// means bounded.
+	Policy string `json:"policy,omitempty"`
+	// ModelLimit is the effective model context limit in tokens.
+	// Zero means unknown: the harness then accounts and reports
+	// but cannot bound, and says so rather than guessing a limit
+	// it would be unsafe to be wrong about.
+	ModelLimit int `json:"model_limit,omitempty"`
+	// GenerationReserve and SafetyReserve override the derived
+	// reserves. Zero means derive them.
+	GenerationReserve int `json:"generation_reserve,omitempty"`
+	SafetyReserve     int `json:"safety_reserve,omitempty"`
+	// KeepRecentTurns is how many trailing messages stay verbatim
+	// through pruning and compaction. Zero means the default.
+	KeepRecentTurns int `json:"keep_recent_turns,omitempty"`
+	// ToolResultPruning and Compaction are pointers so that an
+	// explicit false can be told from an absent key. Nil means on.
+	ToolResultPruning *bool `json:"tool_result_pruning,omitempty"`
+	Compaction        *bool `json:"compaction,omitempty"`
+}
+
+// Bounded reports whether the lifecycle is on. Anything other than
+// an explicit "unbounded" is bounded, so a typo in the policy name
+// leaves the safe behaviour in place rather than silently removing
+// it.
+func (c ContextConfig) Bounded() bool {
+	return !strings.EqualFold(strings.TrimSpace(c.Policy), "unbounded")
+}
+
+// PruningEnabled and CompactionEnabled resolve the tri-state
+// pointers. Absent means on.
+func (c ContextConfig) PruningEnabled() bool {
+	return c.ToolResultPruning == nil || *c.ToolResultPruning
+}
+
+func (c ContextConfig) CompactionEnabled() bool {
+	return c.Compaction == nil || *c.Compaction
 }
 
 // MCPServerConfig is the resolved shape of one entry under the

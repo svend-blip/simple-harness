@@ -689,6 +689,7 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir,
 		Skills:         skills,
 		Tools:          globalRegistry,
 		MaxTurns:       maxTurns,
+		ContextPolicy:  contextPolicyFrom(cfg.Context, limit),
 	}, client, em, loopOut)
 
 	// Run 010 / handoff 038: --limit <n> overflow wiring on the
@@ -878,4 +879,28 @@ func validateReadableFile(path string) error {
 	}
 	_ = f.Close()
 	return nil
+}
+
+// contextPolicyFrom translates the config file's context section into
+// the loop's policy (addendum §17).
+//
+// The --limit flag wins over the config file when it is set: a flag
+// is a deliberate act for this run, and the config file is a standing
+// preference. When neither says anything the limit is unknown, and
+// the harness accounts and reports without bounding rather than
+// guessing a limit it would be unsafe to be wrong about.
+func contextPolicyFrom(cc config.ContextConfig, flagLimit int) loop.ContextPolicy {
+	limit := cc.ModelLimit
+	if flagLimit > 0 {
+		limit = flagLimit
+	}
+	return loop.ContextPolicy{
+		Disabled:                 !cc.Bounded(),
+		ModelLimit:               limit,
+		GenerationReserve:        cc.GenerationReserve,
+		SafetyReserve:            cc.SafetyReserve,
+		KeepRecentTurns:          cc.KeepRecentTurns,
+		DisableToolResultPruning: !cc.PruningEnabled(),
+		DisableCompaction:        !cc.CompactionEnabled(),
+	}
 }

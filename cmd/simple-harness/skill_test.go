@@ -166,15 +166,17 @@ func TestRun_Skill_NoSkill_FlagIsOptional(t *testing.T) {
 // TestRun_Skill_SkillsDirOverride covers two cases:
 //
 // (a) when --skills-dir <tmp> points at a temp dir holding
-//     cold-start/SKILL.md, --skill cold-start resolves via the
-//     override (Source="override") — the run proceeds past the
-//     skill-checkpoint to the unreachable-endpoint (exit 3).
+//
+//	cold-start/SKILL.md, --skill cold-start resolves via the
+//	override (Source="override") — the run proceeds past the
+//	skill-checkpoint to the unreachable-endpoint (exit 3).
 //
 // (b) when --skills-dir points at an empty / missing dir, an
-//     unknown --skill still produces exit 2 with the
-//     "unknown skill" stderr message. The override REPLACES
-//     both default roots — when the override is empty, even a
-//     well-known skill name (cold-start) resolves nowhere.
+//
+//	unknown --skill still produces exit 2 with the
+//	"unknown skill" stderr message. The override REPLACES
+//	both default roots — when the override is empty, even a
+//	well-known skill name (cold-start) resolves nowhere.
 func TestRun_Skill_SkillsDirOverride(t *testing.T) {
 	// Case (a): --skills-dir override resolves cold-start.
 	overrideDir := t.TempDir()
