@@ -649,3 +649,65 @@ func TestParsedArgumentsAreCountedWhenTheRawFormIsAbsent(t *testing.T) {
 		t.Fatalf("parsed arguments cost %d tokens", MessageTokens(msg))
 	}
 }
+
+// -- §16 observability --------------------------------------------
+
+func TestTheReportNamesEveryFigureTheAddendumAsksFor(t *testing.T) {
+	m := New(131072)
+	m.ToolSchemaTokens = 8870
+	in := []model.Message{sys(filler(500)), asst(filler(300)),
+		toolResult("c", filler(400)), user("task")}
+	a := m.Account(in)
+	text := m.Report(a)
+	for _, want := range []string{
+		"Model context limit", "Active input budget", "Generation reserve",
+		"Safety reserve", "Pinned", "Recent verbatim", "Reducible",
+		"Tool schemas", "Active context", "Budget utilization",
+		"Tool results pruned", "Compactions", "Peak active context",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("the report does not show %q", want)
+		}
+	}
+}
+
+func TestTheReportSaysWhenTheContextIsNotBounded(t *testing.T) {
+	m := New(0)
+	text := m.Report(m.Account([]model.Message{user("task")}))
+	if !strings.Contains(text, "unknown") || !strings.Contains(text, "not bounded") {
+		t.Fatalf("an unbounded context was reported as if it were bounded:\n%s", text)
+	}
+}
+
+func TestTheSummaryReportsWhatReductionDid(t *testing.T) {
+	c := &fixedCompactor{summary: "compact"}
+	m := New(4096)
+	m.KeepRecentTurns = 2
+	m.Compactor = c
+	in := []model.Message{sys("i")}
+	for i := 0; i < 20; i++ {
+		in = append(in, asst("calling"), toolResult("c", filler(400)))
+	}
+	in = append(in, user("task"))
+	_, a, err := m.Fit(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := m.Summary(a)
+	if !strings.Contains(s, "pruned") {
+		t.Fatalf("the summary does not mention pruning: %s", s)
+	}
+	if !strings.Contains(s, "/") {
+		t.Fatalf("the summary does not show the budget: %s", s)
+	}
+}
+
+func TestUtilizationIsCheckableAgainstTheFiguresBesideIt(t *testing.T) {
+	m := New(131072)
+	in := []model.Message{sys(filler(1000)), user("task")}
+	a := m.Account(in)
+	want := float64(a.Total) / float64(a.Budget)
+	if a.Utilization() != want {
+		t.Fatalf("utilization %v does not match %d/%d", a.Utilization(), a.Total, a.Budget)
+	}
+}

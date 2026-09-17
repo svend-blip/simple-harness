@@ -493,3 +493,19 @@ func (m *Manager) compact(messages []model.Message) ([]model.Message, int, int, 
 func IsCompacted(msg model.Message) bool {
 	return msg.Role == "system" && strings.HasPrefix(msg.Content, compactedHeader)
 }
+
+// ToolSchemaTokens estimates what an advertised tool surface costs on
+// the wire. The loop builds that surface and the message list does
+// not carry it, so §4's "complete context" accounting needs this
+// figure to come from the caller.
+func ToolSchemaTokens(defs []model.ToolDefinition) int {
+	n := 0
+	for _, def := range defs {
+		n += contextpkg.Estimate(def.Type)
+		n += contextpkg.Estimate(def.Function.Name)
+		n += contextpkg.Estimate(def.Function.Description)
+		n += contextpkg.Estimate(string(def.Function.Parameters))
+		n += 8 // the JSON scaffolding around each definition
+	}
+	return n
+}

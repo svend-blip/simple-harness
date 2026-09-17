@@ -34,6 +34,7 @@ import (
 	"strings"
 
 	contextpkg "github.com/svend-blip/simple-harness/internal/context"
+	"github.com/svend-blip/simple-harness/internal/ctxlife"
 	"github.com/svend-blip/simple-harness/internal/event"
 	"github.com/svend-blip/simple-harness/internal/model"
 	"github.com/svend-blip/simple-harness/internal/path"
@@ -115,6 +116,40 @@ type Config struct {
 	// maps to exit 1.
 	Tools    *tools.Registry
 	MaxTurns int
+
+	// ContextPolicy configures the Bounded Context Lifecycle
+	// (addendum §17). The zero value is the safe default:
+	// bounded when a model context limit is known, pruning on,
+	// compaction on when a client is available. A harness with
+	// no configuration at all therefore still bounds its
+	// context, which is what §17 asks for.
+	ContextPolicy ContextPolicy
+}
+
+// ContextPolicy is the addendum §17 configuration surface. Every
+// field has a safe zero value, so the struct can be left alone.
+type ContextPolicy struct {
+	// Disabled turns the lifecycle off entirely, restoring the
+	// unbounded behaviour that preceded it. It exists so that a
+	// bug here can be worked around without downgrading, not
+	// because anyone should use it.
+	Disabled bool
+	// ModelLimit is the effective model context limit in tokens.
+	// Zero means unknown: the lifecycle then accounts and
+	// reports but cannot bound, and says so.
+	ModelLimit int
+	// GenerationReserve and SafetyReserve override the derived
+	// reserves. Zero means derive them from ModelLimit.
+	GenerationReserve int
+	SafetyReserve     int
+	// KeepRecentTurns is how many trailing messages stay
+	// verbatim. Zero means the package default.
+	KeepRecentTurns int
+	// DisableToolResultPruning turns off §9.
+	DisableToolResultPruning bool
+	// DisableCompaction turns off §10 even when a client is
+	// available.
+	DisableCompaction bool
 }
 
 // Run is a single-turn interactive loop session. It owns the model
@@ -129,6 +164,7 @@ type Run struct {
 	em     *event.Emitter
 	out    io.Writer
 	ledger *contextpkg.Ledger
+	ctxmgr *ctxlife.Manager
 }
 
 // New returns a Run with its dependencies wired. The caller supplies
@@ -137,14 +173,52 @@ type Run struct {
 // the streamed assistant text written to it). The context ledger
 // is initialized empty; RunOne populates it after ComposeMessages.
 func New(cfg Config, client *model.Client, em *event.Emitter, out io.Writer) *Run {
-	return &Run{
+	r := &Run{
 		cfg:    cfg,
 		client: client,
 		em:     em,
 		out:    out,
 		ledger: &contextpkg.Ledger{},
 	}
+	r.ctxmgr = newContextManager(cfg, client)
+	if r.ctxmgr != nil {
+		r.ledger.Limit = r.ctxmgr.Budget.ModelLimit
+	}
+	return r
 }
+
+// newContextManager builds the Bounded Context Lifecycle manager
+// from the policy, or returns nil when the policy disables it. A nil
+// manager means RunAgent behaves exactly as it did before this
+// addendum — which is what makes Disabled a real escape hatch rather
+// than a differently-configured version of the same code path.
+func newContextManager(cfg Config, client *model.Client) *ctxlife.Manager {
+	p := cfg.ContextPolicy
+	if p.Disabled {
+		return nil
+	}
+	m := ctxlife.New(p.ModelLimit)
+	if p.GenerationReserve > 0 {
+		m.Budget.GenerationReserve = p.GenerationReserve
+	}
+	if p.SafetyReserve > 0 {
+		m.Budget.SafetyReserve = p.SafetyReserve
+	}
+	if p.KeepRecentTurns > 0 {
+		m.KeepRecentTurns = p.KeepRecentTurns
+	}
+	m.PruneToolResults = !p.DisableToolResultPruning
+	if !p.DisableCompaction && client != nil {
+		m.Compactor = &ctxlife.ModelCompactor{Client: client}
+	}
+	return m
+}
+
+// ContextManager returns the Run's context lifecycle manager, or nil
+// when the policy disabled it. The cmd-side `context show` rendering
+// reads its Stats and Report; callers must treat it as read-only
+// while a run is in flight.
+func (r *Run) ContextManager() *ctxlife.Manager { return r.ctxmgr }
 
 // SetSkills replaces the Skills field of the Run's Config with
 // the given slice. It is the seam the interactive REPL uses when
@@ -543,6 +617,20 @@ func (e *PermissionError) Unwrap() error { return e.Underlying }
 // RunAgent was called — a precondition failure the loop
 // refuses to paper over. The cmd maps this to exit 2
 // (SCOPE §28, configuration error).
+// ContextBudgetError is the addendum §21 failure: the active context
+// could not be brought within the safe budget by any reduction the
+// policy allows. It wraps the manager's diagnostic, which names the
+// cause — oversized pinned context, an oversized tool surface, a
+// failed compaction, or simply that every allowed reduction has
+// already been applied.
+type ContextBudgetError struct{ Underlying error }
+
+func (e *ContextBudgetError) Error() string {
+	return "loop: context budget exceeded: " + e.Underlying.Error()
+}
+
+func (e *ContextBudgetError) Unwrap() error { return e.Underlying }
+
 type ConfigError struct{ Reason string }
 
 func (e *ConfigError) Error() string { return "loop: " + e.Reason }
@@ -654,6 +742,15 @@ func (r *Run) RunAgent(ctx context.Context, prompt string) (string, error) {
 	history := ComposeMessages(r.cfg, prompt)
 	advertisedTools, advertisedToolChoice := toolsToChatRequestTools(r.cfg.Tools)
 
+	// The tool surface is part of the context that goes on the wire
+	// (addendum §4) and the message list does not carry it, so the
+	// loop — which built it — is the only place that can tell the
+	// manager what it costs.
+	if r.ctxmgr != nil {
+		r.ctxmgr.ToolSchemaTokens = ctxlife.ToolSchemaTokens(advertisedTools)
+	}
+	lastReductions := 0
+
 	var (
 		accumulatedText strings.Builder
 		streamed        bool
@@ -750,8 +847,41 @@ func (r *Run) RunAgent(ctx context.Context, prompt string) (string, error) {
 			return nil
 		}
 
+		// Bounded Context Lifecycle (addendum §7): the active
+		// context is built and validated against the safe budget
+		// BEFORE every inference, so the harness never knowingly
+		// sends more than the budget allows. This is proactive —
+		// it does not wait for the runtime to refuse an oversized
+		// request, which on a long local run happens late and
+		// costs the whole run.
+		//
+		// `history` itself is never reduced. The manager returns a
+		// bounded view of it and that view is what goes on the
+		// wire; the durable history the caller accumulates, and
+		// whatever the session log persists, are untouched
+		// (addendum §3, §20).
+		active := history
+		if r.ctxmgr != nil {
+			fitted, acct, err := r.ctxmgr.Fit(history)
+			if err != nil {
+				// §21: the budget cannot be met by any allowed
+				// reduction. Fail explicitly and say why, rather
+				// than sending something that will be refused or,
+				// worse, silently truncated.
+				_ = r.em.Status("CONTEXT_BUDGET_EXCEEDED: " + err.Error())
+				_ = r.em.Status("FAILED")
+				_ = r.em.Completed(1)
+				return accumulatedText.String(), &ContextBudgetError{Underlying: err}
+			}
+			active = fitted
+			if r.ctxmgr.Stats.Reductions > lastReductions {
+				lastReductions = r.ctxmgr.Stats.Reductions
+				_ = r.em.Status("CONTEXT_REDUCED: " + r.ctxmgr.Summary(acct))
+			}
+		}
+
 		if err := r.client.ChatStream(ctx, model.ChatRequest{
-			Messages:   history,
+			Messages:   active,
 			Tools:      advertisedTools,
 			ToolChoice: advertisedToolChoice,
 		}, onDelta); err != nil {
