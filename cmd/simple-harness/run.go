@@ -812,7 +812,20 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir,
 		var permErr *loop.PermissionError
 		var maxTurnsErr *loop.MaxTurnsError
 		var cfgErr *loop.ConfigError
+		var ctxErr *loop.ContextBudgetError
 		switch {
+		case errors.As(err, &ctxErr):
+			// Addendum §21: the failure must identify its cause.
+			// This one goes to stderr as well as the sidecar,
+			// unlike the other sentinels, because it is a
+			// configuration problem the operator has to act on —
+			// the limit is too small, the instructions too large,
+			// or the tool surface too wide — and a silent exit
+			// leaves them without any of that.
+			fmt.Fprintf(os.Stderr, "config error: %v\n", ctxErr.Underlying)
+			_ = sidecar.Sync()
+			_ = sidecar.Close()
+			return 2
 		case errors.As(err, &permErr):
 			_ = sidecar.Sync()
 			_ = sidecar.Close()
