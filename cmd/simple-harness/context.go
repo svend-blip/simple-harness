@@ -236,6 +236,7 @@ func runContextShow(args []string) int {
 	systemText := fs.String("system", "", "inline external system/governance prompt (mutually exclusive with --system-file; one of the two is allowed). SCOPE §14.")
 	systemFile := fs.String("system-file", "", "optional path to a system prompt file (mutually exclusive with --system). SCOPE §14.")
 	limit := fs.Int("limit", 0, "configured context limit in tokens (default: 0 = unknown, no overflow check). When set to a positive integer and the populated ledger's Total() exceeds it, the surface exits 2 with the SCOPE §18 overflow error. SCOPE §18.")
+	contextLimit := fs.Int("context-limit", 0, "the model's context window in tokens, for the Bounded Context Lifecycle (addendum §5). Distinct from --limit, which is the accounting overflow check. Zero leaves the context unbounded.")
 
 	if err := fs.Parse(args); err != nil {
 		return 1
@@ -387,7 +388,7 @@ func runContextShow(args []string) int {
 		System:         loop.HarnessSystem,
 		SystemExternal: *systemText + systemFileContent,
 		Skills:         skills,
-		ContextPolicy:  contextPolicyFrom(config.ContextConfig{}, *limit),
+		ContextPolicy:  contextPolicyFrom(config.ContextConfig{}, *contextLimit),
 	}, client, em, io.Discard)
 
 	// Run 010 / handoff 038: --limit <n> overflow wiring on the
@@ -479,6 +480,7 @@ func runContextDoctor(args []string) int {
 	systemText := fs.String("system", "", "inline external system/governance prompt (mutually exclusive with --system-file; one of the two is allowed). SCOPE §14.")
 	systemFile := fs.String("system-file", "", "optional path to a system prompt file (mutually exclusive with --system). SCOPE §14.")
 	limit := fs.Int("limit", 0, "configured context limit in tokens (default: 0 = unknown, no overflow check). When set to a positive integer and the populated ledger's Total() exceeds it, the surface exits 2 with the SCOPE §18 overflow error. SCOPE §18.")
+	contextLimit := fs.Int("context-limit", 0, "the model's context window in tokens, for the Bounded Context Lifecycle (addendum §5). Distinct from --limit, which is the accounting overflow check. Zero leaves the context unbounded.")
 
 	if err := fs.Parse(args); err != nil {
 		return 1
@@ -611,7 +613,7 @@ func runContextDoctor(args []string) int {
 		System:         loop.HarnessSystem,
 		SystemExternal: *systemText + systemFileContent,
 		Skills:         skills,
-		ContextPolicy:  contextPolicyFrom(config.ContextConfig{}, *limit),
+		ContextPolicy:  contextPolicyFrom(config.ContextConfig{}, *contextLimit),
 	}, client, em, io.Discard)
 
 	// Run 010 / handoff 038: --limit <n> overflow wiring on the

@@ -208,6 +208,7 @@ func runRun(args []string) int {
 	// exit code is 2 so the operator notices the
 	// misconfiguration). SCOPE §18.
 	limit := fs.Int("limit", 0, "configured context limit in tokens (default: 0 = unknown, no overflow check). When set, the populated ledger is checked for overflow AFTER the model call returns; an overflow exits 2 with the SCOPE §18 overflow error. SCOPE §18.")
+	contextLimitFlag := fs.Int("context-limit", 0, "the model's context window in tokens, for the Bounded Context Lifecycle (addendum §5). Distinct from --limit, which is an accounting check applied after the call. Zero means take it from the config file's context.model_limit, or leave the context unbounded if that is unset too.")
 	// Run 017 / handoff 041: --max-turns <n> flag. Default
 	// is 8 per the GOAL §2 deliverable 6 default. The value
 	// flows into loop.Config.MaxTurns; the run-mode
@@ -450,6 +451,7 @@ func runRun(args []string) int {
 		loadedSkill,
 		*limit,
 		*maxTurns,
+		*contextLimitFlag,
 	)
 }
 
@@ -503,7 +505,7 @@ func runRun(args []string) int {
 //  8. Checks r.Ledger().Overflow() if limit > 0 (handoff 038).
 //
 // The function returns the SCOPE §28 exit code.
-func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir, systemText, systemFileContent string, loadedSkill *skill.Skill, limit, maxTurns int) int {
+func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir, systemText, systemFileContent string, loadedSkill *skill.Skill, limit, maxTurns, contextLimit int) int {
 	// Defensive double-check on the mutual-exclusion of --system
 	// and --system-file. runRun already rejects this with exit 2
 	// before this function is reached; the inner check covers any
@@ -689,7 +691,7 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir,
 		Skills:         skills,
 		Tools:          globalRegistry,
 		MaxTurns:       maxTurns,
-		ContextPolicy:  contextPolicyFrom(cfg.Context, limit),
+		ContextPolicy:  contextPolicyFrom(cfg.Context, contextLimit),
 	}, client, em, loopOut)
 
 	// Run 010 / handoff 038: --limit <n> overflow wiring on the
@@ -884,11 +886,19 @@ func validateReadableFile(path string) error {
 // contextPolicyFrom translates the config file's context section into
 // the loop's policy (addendum §17).
 //
-// The --limit flag wins over the config file when it is set: a flag
-// is a deliberate act for this run, and the config file is a standing
-// preference. When neither says anything the limit is unknown, and
-// the harness accounts and reports without bounding rather than
-// guessing a limit it would be unsafe to be wrong about.
+// flagLimit is --context-limit, which is the model's context window.
+// It is deliberately NOT --limit: that flag is an accounting check
+// ("tell me if the composition exceeds n", verified after the call
+// and exiting 2), and this is a budget the harness plans against
+// before the call. Treating them as one made `--limit 100` mean "this
+// model has a hundred-token window", which failed the run for the
+// wrong reason with the wrong exit code.
+//
+// The flag wins over the config file when set: a flag is a deliberate
+// act for this run, a config file is a standing preference. When
+// neither says anything the limit is unknown, and the harness
+// accounts and reports without bounding rather than guessing a limit
+// it would be unsafe to be wrong about.
 func contextPolicyFrom(cc config.ContextConfig, flagLimit int) loop.ContextPolicy {
 	limit := cc.ModelLimit
 	if flagLimit > 0 {
