@@ -152,5 +152,24 @@ code, all read out of the harness's own JSONL sidecar.
 The figure that matters is the largest single prompt: with the lifecycle it
 stays under the budget, and without it, it does not.
 
+Measured 2026-09-17 against `qwen3.6-27b-64k` through Ollama, a 16 384-token
+limit, twelve turns, the task being to read this repository one file at a time:
+
+| arm | model calls | input tokens | largest prompt | reductions |
+|---|---:|---:|---:|---:|
+| bounded | 8 | 62 047 | 10 853 | 2 |
+| baseline | 10 | 171 634 | **46 079** | 0 |
+
+The baseline's largest prompt was 2.8x the stated limit and it completed
+anyway, because that model's real window is 64k. That is the failure this
+addendum is about: an unbounded harness works until the day the numbers line
+up differently, and then it does not.
+
+The bounded arm used 64% fewer input tokens and never exceeded its budget. It
+also failed at turn 8 on the first measurement, which is how the
+window-narrowing reduction came to exist — see §14 step 12 and
+`RecentWindowNarrowings`. The re-measurement after that fix is outstanding:
+the GPU on the benchmark host stopped responding partway through it.
+
 `scripts/smoketest-context.sh` is the faster check — twelve acceptance
 criteria against the built binary, using a stub endpoint, needing no model.
