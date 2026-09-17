@@ -140,3 +140,17 @@ which is why the caller's history cannot be damaged by it.
 
 `RunAgent` remains responsible for running the agent. It asks the manager what
 to send, immediately before sending it.
+
+## Benchmarking it
+
+`scripts/benchmark-context.sh <base-url> <model> [limit] [turns]` runs the same
+long task twice against the same local model and runtime, differing only in
+whether `--context-limit` is set. It reports model calls, total input tokens,
+the largest single prompt, how many reductions happened, runtime and exit
+code, all read out of the harness's own JSONL sidecar.
+
+The figure that matters is the largest single prompt: with the lifecycle it
+stays under the budget, and without it, it does not.
+
+`scripts/smoketest-context.sh` is the faster check — twelve acceptance
+criteria against the built binary, using a stub endpoint, needing no model.
