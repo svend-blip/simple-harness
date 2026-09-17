@@ -711,3 +711,117 @@ func TestUtilizationIsCheckableAgainstTheFiguresBesideIt(t *testing.T) {
 		t.Fatalf("utilization %v does not match %d/%d", a.Utilization(), a.Total, a.Budget)
 	}
 }
+
+// -- §24.10/§24.11 the wire stays valid after reduction -----------
+
+// pairingIsValid checks the invariant every OpenAI-compatible
+// endpoint enforces: every tool message answers a tool_call that is
+// present earlier in the list, and every tool_call is answered.
+// A reduction that breaks this produces a 400 from the runtime,
+// which is the worst way to find out.
+func pairingIsValid(msgs []model.Message) error {
+	open := map[string]bool{}
+	for _, msg := range msgs {
+		for _, call := range msg.ToolCalls {
+			open[call.ID] = true
+		}
+		if msg.Role == "tool" {
+			if msg.ToolCallID == "" {
+				return fmt.Errorf("a tool message carries no tool_call_id")
+			}
+			if !open[msg.ToolCallID] {
+				return fmt.Errorf("tool result %q answers a call that is not "+
+					"in the list", msg.ToolCallID)
+			}
+			delete(open, msg.ToolCallID)
+		}
+	}
+	if len(open) > 0 {
+		for id := range open {
+			return fmt.Errorf("tool call %q was never answered", id)
+		}
+	}
+	return nil
+}
+
+func callAndResult(id string, resultSize int) []model.Message {
+	return []model.Message{
+		{Role: "assistant", ToolCalls: []model.ToolCall{
+			{ID: id, Name: "read_file", ArgumentsRaw: `{"path":"x"}`}}},
+		{Role: "tool", ToolCallID: id, Content: filler(resultSize)},
+	}
+}
+
+func TestPruningKeepsEveryToolCallAnsweredAndEveryAnswerCalled(t *testing.T) {
+	m := New(4096)
+	m.KeepRecentTurns = 3
+	in := []model.Message{sys("instructions")}
+	for i := 0; i < 20; i++ {
+		in = append(in, callAndResult(fmt.Sprintf("call-%d", i), 400)...)
+	}
+	in = append(in, user("continue"))
+	if err := pairingIsValid(in); err != nil {
+		t.Fatalf("the fixture is already invalid: %v", err)
+	}
+
+	out, _, err := m.Fit(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Stats.ToolResultsPruned == 0 {
+		t.Fatal("nothing was pruned, so this proves nothing")
+	}
+	if err := pairingIsValid(out); err != nil {
+		t.Fatalf("pruning broke the tool-call pairing: %v", err)
+	}
+}
+
+func TestCompactionKeepsEveryToolCallAnsweredAndEveryAnswerCalled(t *testing.T) {
+	c := &fixedCompactor{summary: "objective x, next y"}
+	// Every recent-window size is tried, because the defect this
+	// guards is a boundary that falls between a call and its
+	// answer — which only happens at some sizes.
+	for keep := 0; keep <= 8; keep++ {
+		m := New(4096)
+		m.KeepRecentTurns = keep
+		m.Compactor = c
+		in := []model.Message{sys("instructions")}
+		for i := 0; i < 24; i++ {
+			in = append(in, callAndResult(fmt.Sprintf("call-%d", i), 300)...)
+		}
+		in = append(in, user("continue"))
+
+		out, _, err := m.Fit(in)
+		if err != nil {
+			continue // an explicit failure is allowed
+		}
+		if err := pairingIsValid(out); err != nil {
+			t.Fatalf("keep=%d: reduction broke the tool-call pairing: %v", keep, err)
+		}
+	}
+}
+
+func TestAToolCallAndItsAnswerAreNeverSplitByTheRecentWindow(t *testing.T) {
+	for keep := 0; keep <= 8; keep++ {
+		m := New(131072)
+		m.KeepRecentTurns = keep
+		in := []model.Message{sys("i")}
+		for i := 0; i < 6; i++ {
+			in = append(in, callAndResult(fmt.Sprintf("c%d", i), 10)...)
+		}
+		in = append(in, user("task"))
+		prios := m.Classify(in)
+		for i, msg := range in {
+			if msg.Role != "tool" {
+				continue
+			}
+			// The assistant message that made this call is the
+			// one before it in these fixtures.
+			if prios[i] != prios[i-1] {
+				t.Fatalf("keep=%d: call at %d is %v but its answer at %d is %v; "+
+					"a reduction can then remove one and leave the other",
+					keep, i-1, prios[i-1], i, prios[i])
+			}
+		}
+	}
+}

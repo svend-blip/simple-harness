@@ -184,7 +184,41 @@ func (m *Manager) Classify(messages []model.Message) []Priority {
 			out[i] = Reducible
 		}
 	}
+	keepToolPairsTogether(messages, out)
 	return out
+}
+
+// keepToolPairsTogether gives a tool call and its answer the same
+// priority, taking the more-retained of the two.
+//
+// Without this the recent window can fall between them, and then a
+// reduction removes one and leaves the other: an assistant message
+// whose tool_calls have no answers, or a tool message answering a
+// call that is no longer in the list. Every OpenAI-compatible
+// endpoint rejects both with a 400, which is the worst way to find
+// out — mid-run, on a request the harness built itself.
+func keepToolPairsTogether(messages []model.Message, prios []Priority) {
+	callerOf := make(map[string]int)
+	for i, msg := range messages {
+		for _, call := range msg.ToolCalls {
+			callerOf[call.ID] = i
+		}
+	}
+	for i, msg := range messages {
+		if msg.Role != "tool" || msg.ToolCallID == "" {
+			continue
+		}
+		j, ok := callerOf[msg.ToolCallID]
+		if !ok {
+			continue // an orphan already; reduction cannot make it worse
+		}
+		// Lower Priority values are more retained.
+		if prios[j] < prios[i] {
+			prios[i] = prios[j]
+		} else if prios[i] < prios[j] {
+			prios[j] = prios[i]
+		}
+	}
 }
 
 // MessageTokens is the estimated cost of one message on the wire,
