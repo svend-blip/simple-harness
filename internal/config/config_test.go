@@ -441,3 +441,36 @@ func TestMCP_SecretRedaction(t *testing.T) {
 		t.Fatalf("Render output leaked header VALUE marker \"marker-header-public\" (output=%s)", out)
 	}
 }
+
+// TestUserConfigIsNotAlsoTheProjectConfig — a project under HOME
+// with no project config of its own must not have
+// ~/.simple-harness/config.json applied a second time as its project
+// config: the user config is a distinct, earlier layer.
+func TestUserConfigIsNotAlsoTheProjectConfig(t *testing.T) {
+	home := t.TempDir()
+	userPath := filepath.Join(home, ".simple-harness", "config.json")
+	if err := os.MkdirAll(filepath.Dir(userPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(userPath, []byte(`{"model":{"model":"from-user"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(home, "work", "proj")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := findProjectConfig(project, userPath); ok {
+		t.Fatalf("findProjectConfig returned %q; the user config must not double as the project config", got)
+	}
+	// A real project config above the project root is still found.
+	projPath := filepath.Join(home, "work", ".simple-harness", "config.json")
+	if err := os.MkdirAll(filepath.Dir(projPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(projPath, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := findProjectConfig(project, userPath); !ok || got != projPath {
+		t.Fatalf("findProjectConfig = %q,%v want %q,true", got, ok, projPath)
+	}
+}

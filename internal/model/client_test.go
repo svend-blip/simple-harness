@@ -800,3 +800,152 @@ func TestMessage_PlainOmitsToolFields(t *testing.T) {
 }
 
 func ptrString(s string) *string { return &s }
+
+// TestStreamParsing_MultipleToolCallsInOneChunk — an endpoint that
+// emits every parallel tool call in a single delta (llama.cpp, Ollama
+// and vLLM all do this for non-incremental tool calls) must surface
+// EVERY entry, not only tool_calls[0]. Dropping the rest silently
+// executes fewer calls than the model made, and the model then sees a
+// history that lacks the results for calls it remembers issuing.
+func TestStreamParsing_MultipleToolCallsInOneChunk(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"tool_calls":[`+
+			`{"index":0,"id":"call_a","function":{"name":"read_file","arguments":"{\"path\":\"a\"}"}},`+
+			`{"index":1,"id":"call_b","function":{"name":"read_file","arguments":"{\"path\":\"b\"}"}}`+
+			`]}}]}`+"\n\n")
+		fmt.Fprint(w, `data: {"choices":[{"finish_reason":"tool_calls"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+	c := NewClient(Options{BaseURL: srv.URL, Model: "qwen", RequestTimeout: 2 * time.Second})
+	accum := map[int]*ToolCall{}
+	err := c.ChatStream(context.Background(), ChatRequest{}, func(ev StreamEvent) error {
+		if ev.ToolCallDelta != nil {
+			return AccumulateToolCallFragment(accum, ev.ToolCallDelta)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+	if err := FinalizeToolCalls(accum); err != nil {
+		t.Fatalf("FinalizeToolCalls: %v", err)
+	}
+	if len(accum) != 2 {
+		t.Fatalf("accumulated %d tool calls, want 2: %+v", len(accum), accum)
+	}
+	if accum[0].ID != "call_a" || accum[0].Arguments["path"] != "a" {
+		t.Errorf("index 0 = %+v, want call_a/path=a", accum[0])
+	}
+	if accum[1].ID != "call_b" || accum[1].Arguments["path"] != "b" {
+		t.Errorf("index 1 = %+v, want call_b/path=b", accum[1])
+	}
+}
+
+// TestStreamParsing_MultipleToolCallsWithoutIndex — some runtimes omit
+// the per-entry index on a single-chunk tool_calls array. Position in
+// the array is then the only identity the entries have; collapsing
+// them all onto index 0 would merge two calls into one.
+func TestStreamParsing_MultipleToolCallsWithoutIndex(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"tool_calls":[`+
+			`{"id":"call_a","function":{"name":"read_file","arguments":"{\"path\":\"a\"}"}},`+
+			`{"id":"call_b","function":{"name":"grep","arguments":"{\"pattern\":\"b\"}"}}`+
+			`]}}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+	c := NewClient(Options{BaseURL: srv.URL, Model: "qwen", RequestTimeout: 2 * time.Second})
+	accum := map[int]*ToolCall{}
+	if err := c.ChatStream(context.Background(), ChatRequest{}, func(ev StreamEvent) error {
+		if ev.ToolCallDelta != nil {
+			return AccumulateToolCallFragment(accum, ev.ToolCallDelta)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+	if len(accum) != 2 || accum[0] == nil || accum[1] == nil {
+		t.Fatalf("accumulated %d tool calls, want 2 at indexes 0 and 1: %+v", len(accum), accum)
+	}
+	if accum[0].Name != "read_file" || accum[1].Name != "grep" {
+		t.Errorf("names = %q,%q want read_file,grep", accum[0].Name, accum[1].Name)
+	}
+}
+
+// TestTransportError_MessageNamesTheCause — a connection failure is an
+// ErrHTTP with no status code; its Error() must carry the underlying
+// cause, not read "HTTP 0: " with nothing after the colon.
+func TestTransportError_MessageNamesTheCause(t *testing.T) {
+	c := NewClient(Options{BaseURL: "http://127.0.0.1:1", Model: "qwen", RequestTimeout: 2 * time.Second})
+	err := c.ChatStream(context.Background(), ChatRequest{}, func(StreamEvent) error { return nil })
+	var me *ModelError
+	if !errors.As(err, &me) || me.Kind != ErrHTTP {
+		t.Fatalf("err = %v (%T), want *ModelError{ErrHTTP}", err, err)
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "HTTP 0") || !strings.Contains(msg, "connect") {
+		t.Errorf("Error() = %q, want the connection failure named and no fake status", msg)
+	}
+}
+
+// TestStreamParsing_EmptyStreamIsAnError — a 2xx body with no SSE data
+// at all (a proxy page, a JSON error body served as 200, a connection
+// that closed before the first chunk) is not a completed model turn.
+// Returning nil here made the loop report COMPLETED / exit 0 with an
+// empty response.
+func TestStreamParsing_EmptyStreamIsAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, "<html>gateway</html>\n")
+	}))
+	defer srv.Close()
+	c := NewClient(Options{BaseURL: srv.URL, Model: "qwen", RequestTimeout: 2 * time.Second})
+	err := c.ChatStream(context.Background(), ChatRequest{}, func(StreamEvent) error { return nil })
+	var me *ModelError
+	if !errors.As(err, &me) || me.Kind != ErrParse {
+		t.Fatalf("err = %v, want *ModelError{ErrParse} for a stream with no data events", err)
+	}
+}
+
+// TestStreamParsing_TruncatedStreamAfterContentIsAnError — the stream
+// ended without [DONE] and without a finish_reason: the connection was
+// cut mid-response. The partial text is still delivered through
+// onDelta, but the turn must not be reported as complete.
+func TestStreamParsing_TruncatedStreamAfterContentIsAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"partial"}}]}`+"\n\n")
+	}))
+	defer srv.Close()
+	c := NewClient(Options{BaseURL: srv.URL, Model: "qwen", RequestTimeout: 2 * time.Second})
+	var got string
+	err := c.ChatStream(context.Background(), ChatRequest{}, func(ev StreamEvent) error {
+		got += ev.Delta
+		return nil
+	})
+	if got != "partial" {
+		t.Errorf("delivered text = %q, want the partial text delivered before the cut", got)
+	}
+	var me *ModelError
+	if !errors.As(err, &me) || me.Kind != ErrParse {
+		t.Fatalf("err = %v, want *ModelError{ErrParse} for a stream cut before finish", err)
+	}
+}
+
+// TestStreamParsing_FinishWithoutDoneIsComplete — a finish_reason with
+// no trailing [DONE] sentinel is a complete turn: several local
+// runtimes end the stream that way.
+func TestStreamParsing_FinishWithoutDoneIsComplete(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}`+"\n\n")
+	}))
+	defer srv.Close()
+	c := NewClient(Options{BaseURL: srv.URL, Model: "qwen", RequestTimeout: 2 * time.Second})
+	if err := c.ChatStream(context.Background(), ChatRequest{}, func(StreamEvent) error { return nil }); err != nil {
+		t.Fatalf("ChatStream: %v, want nil for finish_reason without [DONE]", err)
+	}
+}

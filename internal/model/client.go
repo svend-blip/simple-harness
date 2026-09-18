@@ -395,6 +395,12 @@ func (e *ModelError) Error() string {
 	}
 	switch e.Kind {
 	case ErrHTTP:
+		if e.StatusCode == 0 {
+			// No response at all: connection refused, DNS failure,
+			// TLS failure. "HTTP 0:" would name a status that never
+			// existed and drop the one fact that diagnoses it.
+			return fmt.Sprintf("model: request failed: %v", e.Err)
+		}
 		return fmt.Sprintf("model: HTTP %d: %s", e.StatusCode, e.Body)
 	case ErrParse:
 		if e.Line > 0 {
@@ -517,6 +523,13 @@ func (c *Client) parseSSE(ctx context.Context, body io.Reader, onDelta func(Stre
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	lineNum := 0
+	// A turn is complete when the upstream said so: either the
+	// [DONE] sentinel or a non-empty finish_reason. A body that
+	// ends with neither was cut short (or was never an SSE stream),
+	// and reporting it as a clean completion would turn a dropped
+	// connection into exit 0 with a partial or empty response.
+	sawData := false
+	sawFinish := false
 	for scanner.Scan() {
 		if err := ctx.Err(); err != nil {
 			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
@@ -537,6 +550,7 @@ func (c *Client) parseSSE(ctx context.Context, body io.Reader, onDelta func(Stre
 		if payload == "[DONE]" {
 			return nil
 		}
+		sawData = true
 
 		var raw struct {
 			Choices []struct {
@@ -564,21 +578,45 @@ func (c *Client) parseSSE(ctx context.Context, body io.Reader, onDelta func(Stre
 		}
 
 		for _, ch := range raw.Choices {
+			if ch.FinishReason != "" {
+				sawFinish = true
+			}
 			ev := StreamEvent{FinishReason: ch.FinishReason}
 			if ch.Delta.Content != "" {
 				ev.Delta = ch.Delta.Content
 			}
-			if len(ch.Delta.ToolCalls) > 0 {
-				tc := ch.Delta.ToolCalls[0]
-				ev.ToolCallDelta = &ToolCallFragment{
-					Index:     tc.Index,
+			// One StreamEvent per tool-call entry. An endpoint that
+			// emits all of a turn's parallel calls in one chunk
+			// (llama.cpp, Ollama, vLLM) puts them in one array;
+			// taking only [0] silently dropped the rest. An entry
+			// without an index is identified by its position in
+			// the array, which is the only identity it has.
+			if len(ch.Delta.ToolCalls) == 0 {
+				if err := onDelta(ev); err != nil {
+					return err
+				}
+				continue
+			}
+			for i, tc := range ch.Delta.ToolCalls {
+				idx := i
+				if tc.Index != nil {
+					idx = *tc.Index
+				}
+				tev := ev
+				if i > 0 {
+					// The text delta and finish_reason belong to
+					// the chunk, not to each call; deliver them once.
+					tev = StreamEvent{}
+				}
+				tev.ToolCallDelta = &ToolCallFragment{
+					Index:     idx,
 					ID:        tc.ID,
 					Name:      tc.Function.Name,
 					ArgsDelta: tc.Function.Arguments,
 				}
-			}
-			if err := onDelta(ev); err != nil {
-				return err
+				if err := onDelta(tev); err != nil {
+					return err
+				}
 			}
 		}
 		if raw.Usage != nil {
@@ -593,6 +631,12 @@ func (c *Client) parseSSE(ctx context.Context, body io.Reader, onDelta func(Stre
 		}
 		return &ModelError{Kind: ErrParse, Line: lineNum, Err: err}
 	}
+	if !sawData {
+		return &ModelError{Kind: ErrParse, Line: lineNum, Err: errors.New("response body carried no SSE data events (not an event stream?)")}
+	}
+	if !sawFinish {
+		return &ModelError{Kind: ErrParse, Line: lineNum, Err: errors.New("stream ended before finish_reason or [DONE]")}
+	}
 	return nil
 }
 
@@ -601,7 +645,9 @@ func (c *Client) parseSSE(ctx context.Context, body io.Reader, onDelta func(Stre
 // ToolCallFragment type. Keeping it private keeps the public
 // surface small and the wire-shape decoding self-contained.
 type toolCallRaw struct {
-	Index    int    `json:"index"`
+	// Index is a pointer so an absent index (some runtimes omit it
+	// on single-chunk arrays) can be told apart from an explicit 0.
+	Index    *int   `json:"index"`
 	ID       string `json:"id,omitempty"`
 	Function struct {
 		Name      string `json:"name,omitempty"`

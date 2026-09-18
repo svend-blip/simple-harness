@@ -294,19 +294,30 @@ func (Shell) Execute(ctx context.Context, call tools.Call) (tools.Result, error)
 		s := r
 		reason.CompareAndSwap(nil, &s)
 	}
+	// termSent closes once SIGTERM has gone out; exited closes once
+	// cmd.Wait has returned. Every helper goroutine below selects on
+	// exited so none of them outlives the call: the earlier version
+	// parked one on ctx.Done() for the life of the context and had
+	// another poll a flag every 5 ms for up to 30 s.
+	termSent := make(chan struct{})
+	exited := make(chan struct{})
 	var signalOnce sync.Once
 	signalTerm := func() {
 		signalOnce.Do(func() {
 			_ = procgroup.Signal(pid, syscall.SIGTERM)
+			close(termSent)
 		})
 	}
 
 	ctxDone := ctx.Done()
 	if ctxDone != nil {
 		go func() {
-			<-ctxDone
-			setReason("cancelled")
-			signalTerm()
+			select {
+			case <-ctxDone:
+				setReason("cancelled")
+				signalTerm()
+			case <-exited:
+			}
 		}()
 	}
 	var timer *time.Timer
@@ -317,50 +328,38 @@ func (Shell) Execute(ctx context.Context, call tools.Call) (tools.Result, error)
 		})
 	}
 
-	// Grace-escalation goroutine: once a SIGTERM has been sent,
-	// wait terminateGrace; if the child is still alive, send
-	// SIGKILL. Runs in parallel with cmd.Wait below.
 	waitDone := make(chan error, 1)
 	go func() { waitDone <- cmd.Wait() }()
 
-	var escalated bool
-	if ctxDone != nil || timer != nil {
-		// We have a signal source. Watch for the grace window.
-		go func() {
-			// Wait until a reason has been set (i.e. SIGTERM
-			// sent). Poll because there's no clean channel to
-			// "wait for first signal". Defensive ceiling: if
-			// neither ctx nor timeout ever fires, exit after 30s
-			// having done nothing.
-			deadline := time.Now().Add(30 * time.Second)
-			for reason.Load() == nil && time.Now().Before(deadline) {
-				time.Sleep(5 * time.Millisecond)
-			}
-			if reason.Load() == nil {
-				// No signal fired during the run; nothing to
-				// escalate. Exit silently.
-				return
-			}
-			time.Sleep(terminateGrace)
-			// If the child has exited, cmd.Wait has returned
-			// and waitDone is buffered; cmd.Process is reused
-			// internally so we can't probe it directly. Send
-			// SIGKILL — if the child is dead, the syscall
-			// errors with ESRCH, which we ignore. The
-			// TerminationReason becomes "escalated" only if
-			// SIGKILL actually killed the child (i.e.
-			// waitDone has NOT yet received a value when we
-			// get here).
-			if err := procgroup.Signal(pid, syscall.SIGKILL); err == nil {
-				// SIGKILL was sent (not ESRCH) — child was
-				// still alive after the grace. This is the
-				// escalation path.
-				escalated = true
-			}
-		}()
-	}
+	// Grace escalation: once SIGTERM has been sent, wait
+	// terminateGrace; if the child is still alive, send SIGKILL.
+	// escalated is written by this goroutine and read by the caller
+	// after escDone closes, which is the happens-before edge that
+	// makes the read race-free (the previous plain bool was not).
+	var escalated atomic.Bool
+	escDone := make(chan struct{})
+	go func() {
+		defer close(escDone)
+		select {
+		case <-termSent:
+		case <-exited:
+			return
+		}
+		select {
+		case <-time.After(terminateGrace):
+		case <-exited:
+			return
+		}
+		// Still running after the grace. SIGKILL the group; ESRCH
+		// means it died in the meantime and nothing was escalated.
+		if err := procgroup.Signal(pid, syscall.SIGKILL); err == nil {
+			escalated.Store(true)
+		}
+	}()
 
 	waitErr := <-waitDone
+	close(exited)
+	<-escDone
 	if timer != nil {
 		timer.Stop()
 	}
@@ -380,7 +379,7 @@ func (Shell) Execute(ctx context.Context, call tools.Call) (tools.Result, error)
 	term := ""
 	if r := reason.Load(); r != nil {
 		term = *r
-		if escalated {
+		if escalated.Load() {
 			term = "escalated"
 		}
 	}

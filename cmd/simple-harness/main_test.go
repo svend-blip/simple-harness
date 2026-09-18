@@ -1395,10 +1395,7 @@ func TestRun_SIGTERM_Headless_EmitsInterruptedAndExits6(t *testing.T) {
 		t.Skip("requires spawned harness process; skipped in -short mode")
 	}
 
-	binPath, err := filepath.Abs(filepath.Join("..", "..", "bin", "simple-harness-runtime"))
-	if err != nil {
-		t.Fatalf("abs binPath: %v", err)
-	}
+	binPath := testBinary
 	if _, err := os.Stat(binPath); err != nil {
 		t.Fatalf("rebuilt binary missing at %s — run `go build -o bin/simple-harness-runtime ./cmd/simple-harness` first: %v", binPath, err)
 	}
@@ -1484,10 +1481,7 @@ func TestRun_StateDir_PersistsSessionLayout(t *testing.T) {
 		t.Skip("requires spawned harness process; skipped in -short mode")
 	}
 
-	binPath, err := filepath.Abs(filepath.Join("..", "..", "bin", "simple-harness-runtime"))
-	if err != nil {
-		t.Fatalf("abs binPath: %v", err)
-	}
+	binPath := testBinary
 	if _, err := os.Stat(binPath); err != nil {
 		t.Fatalf("rebuilt binary missing at %s — run `go build -o bin/simple-harness-runtime ./cmd/simple-harness` first: %v", binPath, err)
 	}
@@ -1561,10 +1555,7 @@ func TestRun_SessionID_MatchesDirectory(t *testing.T) {
 		t.Skip("requires spawned harness process; skipped in -short mode")
 	}
 
-	binPath, err := filepath.Abs(filepath.Join("..", "..", "bin", "simple-harness-runtime"))
-	if err != nil {
-		t.Fatalf("abs binPath: %v", err)
-	}
+	binPath := testBinary
 	if _, err := os.Stat(binPath); err != nil {
 		t.Fatalf("rebuilt binary missing at %s: %v", binPath, err)
 	}
@@ -1653,10 +1644,7 @@ func TestRun_SessionJSON_HasFinalStatus(t *testing.T) {
 		t.Skip("requires spawned harness process; skipped in -short mode")
 	}
 
-	binPath, err := filepath.Abs(filepath.Join("..", "..", "bin", "simple-harness-runtime"))
-	if err != nil {
-		t.Fatalf("abs binPath: %v", err)
-	}
+	binPath := testBinary
 	if _, err := os.Stat(binPath); err != nil {
 		t.Fatalf("rebuilt binary missing at %s: %v", binPath, err)
 	}
@@ -1809,10 +1797,7 @@ func TestRun_SessionJSON_NoSecrets(t *testing.T) {
 		t.Skip("requires spawned harness process; skipped in -short mode")
 	}
 
-	binPath, err := filepath.Abs(filepath.Join("..", "..", "bin", "simple-harness-runtime"))
-	if err != nil {
-		t.Fatalf("abs binPath: %v", err)
-	}
+	binPath := testBinary
 	if _, err := os.Stat(binPath); err != nil {
 		t.Fatalf("rebuilt binary missing at %s: %v", binPath, err)
 	}
@@ -1885,10 +1870,7 @@ func TestRun_InterruptedRun_Diagnosable(t *testing.T) {
 		t.Skip("requires spawned harness process; skipped in -short mode")
 	}
 
-	binPath, err := filepath.Abs(filepath.Join("..", "..", "bin", "simple-harness-runtime"))
-	if err != nil {
-		t.Fatalf("abs binPath: %v", err)
-	}
+	binPath := testBinary
 	if _, err := os.Stat(binPath); err != nil {
 		t.Fatalf("rebuilt binary missing at %s: %v", binPath, err)
 	}
@@ -1990,10 +1972,7 @@ func TestInteractive_SessionJSON_PersistsAcrossExchanges(t *testing.T) {
 		t.Skip("requires spawned harness process; skipped in -short mode")
 	}
 
-	binPath, err := filepath.Abs(filepath.Join("..", "..", "bin", "simple-harness-runtime"))
-	if err != nil {
-		t.Fatalf("abs binPath: %v", err)
-	}
+	binPath := testBinary
 	if _, err := os.Stat(binPath); err != nil {
 		t.Fatalf("rebuilt binary missing at %s: %v", binPath, err)
 	}
@@ -2502,10 +2481,7 @@ func TestInteractiveMode_ExitCommand_StillExits0(t *testing.T) {
 // correctly). Under `go test`, os.Getwd() == cmd/simple-harness;
 // the project root is two parents up.
 func TestE2E_AcceptanceRunner_RequiresArgs_Exits1(t *testing.T) {
-	projectRoot, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatalf("abs projectRoot: %v", err)
-	}
+	projectRoot := repoRoot
 	cmd := exec.Command("./scripts/e2e-coding.sh")
 	cmd.Dir = projectRoot
 	var stderr bytes.Buffer
@@ -3011,10 +2987,7 @@ func TestE2E_AcceptanceRunner_HappyPath_HarnessDrivesPatch(t *testing.T) {
 	builtins.RegisterBuiltins(freshReg)
 	globalRegistry = freshReg
 
-	projectRoot, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatalf("abs projectRoot: %v", err)
-	}
+	projectRoot := repoRoot
 	workspaceDir := t.TempDir()
 	stateDir := t.TempDir()
 	// Seed the workspace with the Run 011 / SCOPE §40 fixture
@@ -3171,10 +3144,7 @@ func TestE2E_AcceptanceRunner_HappyPath_HarnessDrivesPatch(t *testing.T) {
 // exists when the script's `cp -r example-project/. $WORKSPACE/`
 // pre-populates it).
 func TestE2E_AcceptanceRunner_HappyPath_ScriptInvokesHarness(t *testing.T) {
-	projectRoot, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatalf("abs projectRoot: %v", err)
-	}
+	projectRoot := repoRoot
 
 	overrideWorkspace := filepath.Join(t.TempDir(), "ws")
 	if err := os.MkdirAll(overrideWorkspace, 0o755); err != nil {
@@ -3262,10 +3232,7 @@ func TestE2E_AcceptanceRunner_HappyPath_ScriptInvokesHarness(t *testing.T) {
 // os.Getwd() == cmd/simple-harness; the project root is two
 // parents up.
 func TestE2E_ReviewRunner_RequiresArgs_Exits1(t *testing.T) {
-	projectRoot, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatalf("abs projectRoot: %v", err)
-	}
+	projectRoot := repoRoot
 	cmd := exec.Command("./scripts/e2e-review.sh")
 	cmd.Dir = projectRoot
 	var stderr bytes.Buffer
@@ -3326,10 +3293,7 @@ func TestE2E_ReviewRunner_HappyPath_HarnessDrivesPatch(t *testing.T) {
 	builtins.RegisterBuiltins(freshReg)
 	globalRegistry = freshReg
 
-	projectRoot, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatalf("abs projectRoot: %v", err)
-	}
+	projectRoot := repoRoot
 	workspaceDir := t.TempDir()
 	stateDir := t.TempDir()
 	// Seed the workspace with the Run 011 / SCOPE §40 fixture
@@ -3388,19 +3352,17 @@ func TestE2E_ReviewRunner_HappyPath_HarnessDrivesPatch(t *testing.T) {
 		// Second turn: apply_patch tool-call (rejected by
 		// READ_ONLY perm layer — status:FAILED +
 		// completed(exit_code: 4) + harness returns
-		// *loop.PermissionError). No [DONE] follows — the
-		// harness is in a permission-violation terminal
-		// state.
+		// *loop.PermissionError).
 		payload := fmt.Sprintf(
 			`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_review_patch","function":{"name":"apply_patch","arguments":%q}}]}}]}`+"\n\n",
 			string(patchArgs),
 		)
 		fmt.Fprint(w, payload)
-		// No [DONE] — the harness's permission-violation path
-		// breaks out of the loop after the rejected dispatch
-		// (see internal/loop/loop.go:707). The stream ends
-		// without [DONE]; that's expected for the permission-
-		// violation binding surface.
+		// The endpoint cannot know what the harness will do with
+		// the call; like any real server it terminates the turn.
+		// (An earlier version of this stub omitted [DONE] here,
+		// which the client now correctly reports as a cut stream.)
+		fmt.Fprint(w, "data: [DONE]\n\n")
 	}))
 	defer srv.Close()
 
@@ -3577,10 +3539,7 @@ func TestE2E_ReviewRunner_HappyPath_HarnessDrivesPatch(t *testing.T) {
 // workspace survives the script exit (the binding pin owns
 // the dir's lifecycle, not the script).
 func TestE2E_ReviewRunner_HappyPath_ScriptInvokesHarness(t *testing.T) {
-	projectRoot, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatalf("abs projectRoot: %v", err)
-	}
+	projectRoot := repoRoot
 
 	overrideWorkspace := filepath.Join(t.TempDir(), "ws")
 	if err := os.MkdirAll(overrideWorkspace, 0o755); err != nil {
@@ -3915,6 +3874,13 @@ func TestMCPLight_GetGovernanceIndex(t *testing.T) {
 	t.Cleanup(func() {
 		_ = os.Chdir(origCwd)
 	})
+	// The loader also reads ~/.simple-harness/config.json. On a
+	// machine whose user config declares a real MCP server, the
+	// real server's tools registered ahead of the stub's and the
+	// call went there — the failure looked like a missing session
+	// header. Isolate HOME so the pinned project config is the only
+	// declaration in play.
+	t.Setenv("HOME", t.TempDir())
 
 	stateDir := t.TempDir()
 

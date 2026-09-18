@@ -224,7 +224,7 @@ func loadFrom(homeDir, projectRoot string, env []string) (Config, error) {
 	// Project config — search upward from projectRoot for
 	// .simple-harness/config.json. First match wins; missing at every
 	// level is not an error.
-	if projectPath, ok := findProjectConfig(projectRoot); ok {
+	if projectPath, ok := findProjectConfig(projectRoot, userPath); ok {
 		if err := applyFile(&cfg, projectPath); err != nil {
 			return cfg, err
 		}
@@ -345,11 +345,18 @@ func presenceForTopKey(data []byte, key string) (bool, error) {
 // Permission errors at upper levels are treated as "stop walking, no
 // project config" rather than as loader errors: the loader must be
 // robust against unreadable ancestor directories on shared systems.
-func findProjectConfig(projectRoot string) (string, bool) {
+func findProjectConfig(projectRoot, userPath string) (string, bool) {
 	dir := projectRoot
 	for {
 		candidate := filepath.Join(dir, ".simple-harness", "config.json")
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+		// The user config is its own layer, applied before this
+		// walk. For a project under HOME with no config of its own
+		// the walk reaches ~/.simple-harness/config.json and used to
+		// apply it a second time as the "project" config.
+		if candidate == userPath {
+			candidate = ""
+		}
+		if info, err := os.Stat(candidate); candidate != "" && err == nil && !info.IsDir() {
 			return candidate, true
 		}
 		parent := filepath.Dir(dir)

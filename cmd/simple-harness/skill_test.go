@@ -305,11 +305,7 @@ func TestSkill_NoStartupNamesInRuntime(t *testing.T) {
 	// (the cmd/simple-harness package directory). The test runs
 	// with the package directory as PWD; the project root is two
 	// levels up.
-	pwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	projectRoot := filepath.Clean(filepath.Join(pwd, "..", ".."))
+	projectRoot := repoRoot
 
 	// cmdFiles: every .go file in cmd/simple-harness/ EXCEPT the
 	// skill-integration files (the new package's tests are out of
@@ -371,7 +367,7 @@ func TestSkill_NoStartupNamesInRuntime(t *testing.T) {
 
 	allFiles := append(cmdFiles, internalFiles...)
 	if len(allFiles) == 0 {
-		t.Fatalf("scan discovered no runtime source files (cwd=%s, root=%s)", pwd, projectRoot)
+		t.Fatalf("scan discovered no runtime source files (root=%s)", projectRoot)
 	}
 
 	for _, path := range allFiles {
@@ -487,11 +483,7 @@ func runWithCapturingServer(t *testing.T, args []string, out *capturedChatReques
 // violation: skill loader imports %q" message so the failure
 // output names the offending import path explicitly.
 func TestSkill_NoPluginCreep(t *testing.T) {
-	pwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	projectRoot := filepath.Clean(filepath.Join(pwd, "..", ".."))
+	projectRoot := repoRoot
 	skillPath := filepath.Join(projectRoot, "internal", "skill", "skill.go")
 
 	fset := token.NewFileSet()
@@ -561,19 +553,31 @@ func TestRun_Skill_ContentInjectedIntoModelContext(t *testing.T) {
 
 	// Defaults: the harness-system text is loop.HarnessSystem;
 	// the marker is the skill content; the prompt is the user
-	// task. The capture should yield exactly 3 messages:
-	// system (harness), system (skill), user (prompt).
-	if len(captured.Messages) != 3 {
-		t.Fatalf("captured %d messages, want 3 (messages=%+v)", len(captured.Messages), captured.Messages)
+	// task. The composition keeps one system message per slot,
+	// but the wire carries ONE system message (the client joins
+	// the leading system run — local runtimes reject a second
+	// system message, measured 2026-09-03), so the capture
+	// yields exactly 2 messages: system (harness + skill, in
+	// that order) and user (prompt).
+	if len(captured.Messages) != 2 {
+		t.Fatalf("captured %d messages, want 2 (messages=%+v)", len(captured.Messages), captured.Messages)
 	}
-	if captured.Messages[0].Role != "system" || !strings.Contains(captured.Messages[0].Content, loop.HarnessSystem) {
-		t.Errorf("messages[0] = %+v, want {system, contains loop.HarnessSystem}", captured.Messages[0])
+	sys := captured.Messages[0]
+	if sys.Role != "system" {
+		t.Errorf("messages[0].Role = %q, want system", sys.Role)
 	}
-	if captured.Messages[1].Role != "system" || !strings.Contains(captured.Messages[1].Content, marker) {
-		t.Errorf("messages[1] = %+v, want {system, contains %q}", captured.Messages[1], marker)
+	harnessAt := strings.Index(sys.Content, loop.HarnessSystem)
+	markerAt := strings.Index(sys.Content, marker)
+	if harnessAt < 0 || markerAt < 0 {
+		t.Errorf("messages[0] = %+v, want the harness system text AND the skill marker in one system message", sys)
+	} else if harnessAt > markerAt {
+		t.Errorf("messages[0]: skill marker precedes the harness system text; SCOPE §14 order is harness -> skill")
 	}
-	if captured.Messages[2].Role != "user" || captured.Messages[2].Content != prompt {
-		t.Errorf("messages[2] = %+v, want {user, %q}", captured.Messages[2], prompt)
+	if strings.Count(sys.Content, marker) != 1 {
+		t.Errorf("messages[0]: skill marker appears %d times, want exactly once", strings.Count(sys.Content, marker))
+	}
+	if captured.Messages[1].Role != "user" || captured.Messages[1].Content != prompt {
+		t.Errorf("messages[1] = %+v, want {user, %q}", captured.Messages[1], prompt)
 	}
 }
 
