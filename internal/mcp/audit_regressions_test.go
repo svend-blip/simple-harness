@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -420,5 +421,39 @@ func TestWireSchemaKeepsWhatTheModelNeeds(t *testing.T) {
 	}
 	if wireSchemaFromMap(nil) != nil {
 		t.Error("nil schema must stay nil so the caller falls back")
+	}
+}
+
+// pwdStub answers tools/list with its own working directory as the
+// tool description, so the test can see where the child was started.
+const pwdStub = `while IFS= read -r line; do
+  id=$(echo "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*) echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{}}";;
+    *'"method":"notifications/initialized"'*) ;;
+    *) echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"tools\":[{\"name\":\"t\",\"description\":\"$(pwd -P)\",\"inputSchema\":{\"type\":\"object\"}}]}}";;
+  esac
+done`
+
+// TestStdioTransportStartsTheChildInTheGivenDirectory — a stdio server
+// inherited the harness's cwd. A server that keeps state under its cwd
+// (scope-mcp: .scope-mcp/state.db) wrote it wherever the harness
+// happened to be started, not in the workspace.
+func TestStdioTransportStartsTheChildInTheGivenDirectory(t *testing.T) {
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr, err := NewStdioTransport(context.Background(), []string{"sh", "-c", pwdStub}, WithDir(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tr.Close()
+	listing, err := tr.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(listing) != 1 || listing[0].Description != dir {
+		t.Errorf("child cwd = %+v, want %s", listing, dir)
 	}
 }

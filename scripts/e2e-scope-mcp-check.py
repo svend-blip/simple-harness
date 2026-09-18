@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Assertions for scripts/e2e-scope-mcp.sh, read from the run directory."""
 import json
+import os
 import sys
 
 tmp = sys.argv[1]
@@ -52,5 +53,9 @@ r2 = [e for e in events("r2") if e.get("event") == "tool_result"]
 check("6 a new harness process reads the state the first one wrote",
       len(r2) == 1 and "Round-trip proof" in r2[0].get("content", "") and "g1" in r2[0].get("content", ""))
 
-print(f"\n{6 - len(failures)}/6 passed")
+check("7 the server ran in the workspace, not where the harness was launched",
+      os.path.exists(f"{tmp}/ws/.scope-mcp/state.db") and not os.path.exists(f"{tmp}/elsewhere/.scope-mcp"),
+      f"ws={os.path.exists(tmp + '/ws/.scope-mcp')} elsewhere={os.path.exists(tmp + '/elsewhere/.scope-mcp')}")
+
+print(f"\n{7 - len(failures)}/7 passed")
 sys.exit(1 if failures else 0)

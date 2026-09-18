@@ -131,10 +131,15 @@ func (c ContextConfig) CompactionEnabled() bool {
 // startup output / JSONL events / session logs / context
 // diagnostics / HTTP diagnostic dumps").
 type MCPServerConfig struct {
-	Name       string            `json:"name"`
-	Transport  string            `json:"transport"`
-	Endpoint   string            `json:"endpoint,omitempty"`
-	Command    []string          `json:"command,omitempty"`
+	Name      string   `json:"name"`
+	Transport string   `json:"transport"`
+	Endpoint  string   `json:"endpoint,omitempty"`
+	Command   []string `json:"command,omitempty"`
+	// Cwd is the directory a stdio server is started in. Empty means
+	// the workspace; a relative value is relative to the workspace.
+	// A server that keeps state under its cwd (scope-mcp) otherwise
+	// wrote it wherever the harness happened to be launched from.
+	Cwd        string            `json:"cwd,omitempty"`
 	Permission string            `json:"permission,omitempty"`
 	Allowlist  []string          `json:"allowlist,omitempty"`
 	APIKey     string            `json:"api_key,omitempty"`
@@ -534,6 +539,9 @@ func validateMCPServers(servers []MCPServerConfig) error {
 			if len(srv.Command) > 0 {
 				return fmt.Errorf("mcp_servers[%d] %q: %w", idx, srv.Name, errMCPServersHTTPNoCommand)
 			}
+			if srv.Cwd != "" {
+				return fmt.Errorf("mcp_servers[%d] %q: %w", idx, srv.Name, errMCPServersHTTPNoCwd)
+			}
 		case "stdio":
 			if len(srv.Command) == 0 {
 				return fmt.Errorf("mcp_servers[%d] %q: %w", idx, srv.Name, errMCPServersCommandRequired)
@@ -573,6 +581,7 @@ var (
 	errMCPServersTransportInvalid  = fmt.Errorf("transport must be \"http\" or \"stdio\"")
 	errMCPServersEndpointRequired  = fmt.Errorf("endpoint is required for transport \"http\"")
 	errMCPServersHTTPNoCommand     = fmt.Errorf("command must be empty for transport \"http\"")
+	errMCPServersHTTPNoCwd         = fmt.Errorf("cwd must be empty for transport \"http\" (it is the directory a stdio server is started in)")
 	errMCPServersCommandRequired   = fmt.Errorf("command is required for transport \"stdio\" (non-empty)")
 	errMCPServersStdioNoEndpoint   = fmt.Errorf("endpoint must be empty for transport \"stdio\"")
 	errMCPServersPermissionInvalid = fmt.Errorf("permission must be \"read_only\", \"workspace_write\", or \"full_access\" (empty inherits harness default)")
@@ -610,6 +619,7 @@ func (c Config) Render(w io.Writer) error {
 			Transport:  srv.Transport,
 			Endpoint:   srv.Endpoint,
 			Command:    srv.Command,
+			Cwd:        srv.Cwd,
 			Permission: srv.Permission,
 			Allowlist:  srv.Allowlist,
 		}
@@ -702,6 +712,7 @@ type renderMCPView struct {
 	Transport  string            `json:"transport"`
 	Endpoint   string            `json:"endpoint,omitempty"`
 	Command    []string          `json:"command,omitempty"`
+	Cwd        string            `json:"cwd,omitempty"`
 	Permission string            `json:"permission,omitempty"`
 	Allowlist  []string          `json:"allowlist,omitempty"`
 	APIKey     string            `json:"api_key,omitempty"`
@@ -762,6 +773,7 @@ type mcpServerOverlay struct {
 	Transport  *string            `json:"transport"`
 	Endpoint   *string            `json:"endpoint"`
 	Command    *[]string          `json:"command"`
+	Cwd        *string            `json:"cwd"`
 	Permission *string            `json:"permission"`
 	Allowlist  *[]string          `json:"allowlist"`
 	APIKey     *string            `json:"api_key"`
@@ -939,6 +951,9 @@ func applyMCPServerOverlay(ovr mcpServerOverlay) MCPServerConfig {
 	}
 	if ovr.Command != nil {
 		s.Command = append([]string(nil), (*ovr.Command)...)
+	}
+	if ovr.Cwd != nil {
+		s.Cwd = *ovr.Cwd
 	}
 	if ovr.Permission != nil {
 		s.Permission = *ovr.Permission

@@ -206,12 +206,12 @@ declaration is `read_only` and is unaffected. `run` still requires
   SDK-modelled stubs had not, both corrected with regression tests —
   see "Addendum: live scope-mcp round trip" below. scope-mcp is a stdio
   server; "not running" was never the obstacle.
-- A stdio MCP server inherits the harness's cwd, not `--workspace`.
-  scope-mcp keeps its state under its cwd, so a harness started outside
-  the workspace puts `.scope-mcp/state.db` there. Not changed: which
-  directory a server should run in is the declaration's business, and
-  the config has no field for it yet. Recommendation: an optional `cwd`
-  on the stdio declaration, defaulting to the workspace.
+- A stdio MCP server inherited the harness's cwd, not `--workspace`, so
+  scope-mcp put `.scope-mcp/state.db` wherever the harness was launched
+  from. Corrected after the report: the server starts in the workspace,
+  and an optional `cwd` on the stdio declaration overrides it (relative
+  to the workspace). `scripts/e2e-scope-mcp.sh` criterion 7 launches
+  the harness from elsewhere and is red against the code before it.
 - MCP http: no re-initialize after a server restart (404 "Session not
   found" ends the session's MCP use); no `DELETE` on close.
 - Config: lenient env parsing (`0.7abc` → 0.7), negative

@@ -13,6 +13,8 @@
 #   4. a server-side error (isError) reaches the model as a tool failure
 #   5. a schema violation is rejected by the harness before the server
 #   6. state written in one harness process is read back by the next
+#   7. the server runs in the workspace even though the harness is
+#      launched from elsewhere (scope-mcp keeps its state under its cwd)
 #
 # Not part of scripts/test.sh: it needs node and a scope-mcp checkout.
 set -euo pipefail
@@ -34,8 +36,11 @@ BIN="$TMP/simple-harness"
 go build -o "$BIN" ./cmd/simple-harness
 
 WS="$TMP/ws"
-mkdir -p "$WS/.simple-harness" "$TMP/home"
-python3 - "$SERVER" >"$WS/.simple-harness/config.json" <<'PY'
+# The declaration lives in the user config: the project config is found
+# upward from the harness's cwd, and the harness is launched from
+# $TMP/elsewhere on purpose.
+mkdir -p "$WS" "$TMP/home/.simple-harness" "$TMP/elsewhere"
+python3 - "$SERVER" >"$TMP/home/.simple-harness/config.json" <<'PY'
 import json, sys
 print(json.dumps({"mcp_servers": [{"name": "scope-mcp", "transport": "stdio",
       "command": ["node", sys.argv[1]], "permission": "workspace_write"}]}))
@@ -47,9 +52,7 @@ run() { # run <label> <script.json>
     python3 -u "$ROOT/scripts/scripted-model.py" "$TMP/$label.port" "$TMP/$label.req" "$script" &
     MOCK_PID=$!
     for _ in $(seq 1 25); do [ -f "$TMP/$label.port" ] && break; sleep 0.2; done
-    # cwd is the workspace: scope-mcp keeps its state under its own cwd,
-    # and a stdio server inherits the harness's.
-    (cd "$WS" && HOME="$TMP/home" "$BIN" run \
+    (cd "$TMP/elsewhere" && HOME="$TMP/home" "$BIN" run \
         --base-url "http://127.0.0.1:$(cat "$TMP/$label.port")/v1" --model scripted \
         --workspace "$WS" --permission workspace_write \
         --prompt-file "$WS/prompt.md" --output jsonl --max-turns 10 \

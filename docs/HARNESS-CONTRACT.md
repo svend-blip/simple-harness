@@ -94,6 +94,7 @@ declaration has this shape:
   "transport":  "http" | "stdio",                // required
   "endpoint":   "<http URL>",                    // transport=http only
   "command":    ["<argv0>", "<argv1>", ...],     // transport=stdio only
+  "cwd":        "<directory>",                   // transport=stdio only, optional
   "permission": "read_only" | "workspace_write"  // optional
                 | "full_access",                 // (empty inherits harness default)
   "allowlist":  ["<tool-name>", ...],            // optional
@@ -108,6 +109,15 @@ exclusive `endpoint` vs `command`; allowlist entries non-empty;
 permission triplet or empty for default inheritance) are enforced
 by `internal/config/config.go`'s `validateMCPServers` and surface as
 `config error: mcp_servers[%d] %q: ...` on stderr with exit 2.
+
+A stdio server is started in the **workspace**, not in the directory
+the harness was launched from. `cwd` overrides that: an absolute path
+stands, a relative one is relative to the workspace. It follows that a
+relative path inside `command` resolves against that directory too. A
+`cwd` that does not exist fails the spawn and surfaces as a structured
+startup error; `cwd` on an http declaration is a configuration error.
+A server that keeps state under its cwd (scope-mcp's
+`.scope-mcp/state.db`) therefore keeps it with the project.
 
 #### Session-start wiring
 

@@ -46,6 +46,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/svend-blip/simple-harness/internal/config"
@@ -163,7 +164,8 @@ func cmdMcpInit(ctx context.Context, cfg *config.Config, mode perm.Mode, registr
 				mcp.WithBearerToken(srvCfg.APIKey), mcp.WithHeaders(srvCfg.Headers))
 		case "stdio":
 			var err error
-			transport, err = mcp.NewStdioTransport(ctx, srvCfg.Command, mcp.WithStderr(os.Stderr))
+			transport, err = mcp.NewStdioTransport(ctx, srvCfg.Command,
+				mcp.WithStderr(os.Stderr), mcp.WithDir(mcpServerDir(srvCfg.Cwd, ws.Root())))
 			if err != nil {
 				manager.Close()
 				return nil, totalRegistered, fmt.Errorf("mcp: server %q: %w", srvCfg.Name, err)
@@ -227,4 +229,19 @@ func newNames(before, after []string) []string {
 		}
 	}
 	return out
+}
+
+// mcpServerDir is the directory a stdio MCP server is started in: the
+// workspace unless the declaration names a "cwd", and a relative "cwd"
+// is relative to the workspace. The child used to inherit the
+// harness's cwd, so a server keeping state under its cwd put it
+// wherever the harness was launched from rather than with the project.
+func mcpServerDir(cwd, workspaceRoot string) string {
+	if cwd == "" {
+		return workspaceRoot
+	}
+	if filepath.IsAbs(cwd) {
+		return cwd
+	}
+	return filepath.Join(workspaceRoot, cwd)
 }

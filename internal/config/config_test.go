@@ -533,3 +533,32 @@ func TestTheContextSectionIsLoadedFromAFile(t *testing.T) {
 		t.Errorf("config show does not render the context section:\n%s", out.String())
 	}
 }
+
+// TestMCP_StdioCwd_IsLoadedRenderedAndStdioOnly — the stdio
+// declaration's optional "cwd": the directory the server is started
+// in. It belongs to a child process, so an http declaration carrying
+// one is a configuration error rather than a silently ignored field.
+func TestMCP_StdioCwd_IsLoadedRenderedAndStdioOnly(t *testing.T) {
+	home := t.TempDir()
+	proj := t.TempDir()
+	writeConfig(t, proj, `{"mcp_servers":[{"name":"s","transport":"stdio","command":["srv"],"cwd":"state"}]}`)
+	cfg, err := loadFrom(home, proj, nil)
+	if err != nil {
+		t.Fatalf("loadFrom: %v", err)
+	}
+	if len(cfg.MCPServers) != 1 || cfg.MCPServers[0].Cwd != "state" {
+		t.Fatalf("cwd not loaded: %+v", cfg.MCPServers)
+	}
+	var buf bytes.Buffer
+	if err := cfg.Render(&buf); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), `"cwd": "state"`) {
+		t.Errorf("config show omits cwd:\n%s", buf.String())
+	}
+
+	writeConfig(t, proj, `{"mcp_servers":[{"name":"h","transport":"http","endpoint":"http://x/mcp","cwd":"state"}]}`)
+	if _, err := loadFrom(home, proj, nil); err == nil || !strings.Contains(err.Error(), "cwd") {
+		t.Errorf("http declaration with cwd: err = %v, want a cwd error", err)
+	}
+}

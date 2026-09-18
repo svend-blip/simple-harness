@@ -82,6 +82,12 @@ func WithStderr(w io.Writer) StdioOption {
 	return func(cmd *exec.Cmd) { cmd.Stderr = w }
 }
 
+// WithDir starts the child in dir instead of the harness's own cwd.
+// An empty dir leaves the inherited cwd in place.
+func WithDir(dir string) StdioOption {
+	return func(cmd *exec.Cmd) { cmd.Dir = dir }
+}
+
 // NewStdioTransport spawns the child process and wires its stdio
 // pipes to the transport. The child is created with
 // SysProcAttr{Setpgid: true} (SCOPE §27 + Run 005's process-group
