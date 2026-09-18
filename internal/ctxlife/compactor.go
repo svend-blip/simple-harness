@@ -24,13 +24,16 @@ type ModelCompactor struct {
 	// Instruction overrides the default prompt. Empty uses
 	// CompactionInstruction.
 	Instruction string
-	// MaxTokens bounds the summary. A compactor with no bound can
-	// return something larger than what it replaces, which Fit
-	// then refuses — better to ask for less in the first place.
-	MaxTokens int
 	// Ctx is the context for the compaction request. Nil means
 	// context.Background().
 	Ctx context.Context
+	// OnRequest is called before each compaction inference and
+	// OnUsage with the usage the model reported, when it did. A
+	// compaction is an inference like any other; without these the
+	// harness emitted no model_request or usage event for it and a
+	// measurement counting those undercounted.
+	OnRequest func()
+	OnUsage   func(*model.Usage)
 }
 
 // CompactionInstruction is §11's list, as an instruction. It names
@@ -83,9 +86,15 @@ func (c *ModelCompactor) Compact(messages []model.Message) (string, error) {
 		{Role: "user", Content: renderForCompaction(messages)},
 	}}
 
+	if c.OnRequest != nil {
+		c.OnRequest()
+	}
 	var out strings.Builder
 	err := c.Client.ChatStream(ctx, req, func(ev model.StreamEvent) error {
 		out.WriteString(ev.Delta)
+		if ev.Usage != nil && c.OnUsage != nil {
+			c.OnUsage(ev.Usage)
+		}
 		return nil
 	})
 	if err != nil {

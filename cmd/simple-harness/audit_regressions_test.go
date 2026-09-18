@@ -288,3 +288,48 @@ func TestUnknownSubcommandIsRejected(t *testing.T) {
 		t.Errorf("a session directory was created for an unknown subcommand")
 	}
 }
+
+// TestContextShow_ReflectsWhatRunSends — `context show` reported 0
+// tool-schema tokens (the surface was never accounted), left an
+// inline --system out of the lifecycle section, and printed no model
+// context limit for --context-limit because --limit 0 overwrote it.
+func TestContextShow_ReflectsWhatRunSends(t *testing.T) {
+	withBuiltins(t)
+	promptFile := filepath.Join(t.TempDir(), "p.md")
+	if err := os.WriteFile(promptFile, []byte("task"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	base := []string{"context", "show",
+		"--base-url", "http://127.0.0.1:1",
+		"--model", "m",
+		"--workspace", t.TempDir(),
+		"--prompt-file", promptFile,
+		"--context-limit", "32768",
+	}
+	code, out, errOut := captureContext(t, base)
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+	if !strings.Contains(out, "Model context limit:") || !strings.Contains(out, "32768") {
+		t.Errorf("--context-limit not reported:\n%s", out)
+	}
+	if strings.Contains(out, "tool schemas:                       0 tokens") {
+		t.Errorf("tool schemas reported as 0 tokens with nine builtins registered:\n%s", out)
+	}
+	pinned := func(report string) int {
+		for _, line := range strings.Split(report, "\n") {
+			if strings.HasPrefix(line, "Pinned:") {
+				var n int
+				fmt.Sscanf(strings.TrimSpace(strings.TrimPrefix(line, "Pinned:")), "%d", &n)
+				return n
+			}
+		}
+		t.Fatalf("no Pinned line in:\n%s", report)
+		return 0
+	}
+	withSystem := append(append([]string{}, base...), "--system", strings.Repeat("governance ", 200))
+	_, out2, _ := captureContext(t, withSystem)
+	if pinned(out2) <= pinned(out) {
+		t.Errorf("an inline --system did not raise the pinned figure (%d -> %d)", pinned(out), pinned(out2))
+	}
+}

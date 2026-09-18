@@ -693,7 +693,9 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir,
 	// existing Ledger.Overflow() semantics at
 	// internal/context/context.go:196-197). Setting Limit here is
 	// the cmd-side binding seam (no loop.Config field added).
-	r.Ledger().Limit = limit
+	if limit > 0 {
+		r.Ledger().Limit = limit
+	}
 
 	// Run 008 (handoff 030): record the user message in
 	// messages.jsonl before the model call.

@@ -744,11 +744,14 @@ func TestRun_Ledger_SkillsPreserveOrder_AcrossRunOneCalls(t *testing.T) {
 		t.Fatalf("RunOne #2: %v", err)
 	}
 
+	// Each prompt's composition replaces the previous one (the
+	// ledger describes the current request, not the sum of every
+	// request so far), and the order within it is preserved.
 	led := r.Ledger()
-	if len(led.Entries) != 8 {
-		t.Fatalf("len(Entries) = %d, want 8 (got=%+v)", len(led.Entries), led.Entries)
+	if len(led.Entries) != 4 {
+		t.Fatalf("len(Entries) = %d, want 4 (got=%+v)", len(led.Entries), led.Entries)
 	}
-	want := []string{"harness", "external", "s", "task", "harness", "external", "s", "task"}
+	want := []string{"harness", "external", "s", "task"}
 	for i, nm := range want {
 		if led.Entries[i].Name != nm {
 			t.Errorf("Entries[%d].Name = %q, want %q", i, led.Entries[i].Name, nm)

@@ -367,6 +367,11 @@ func runContextShow(args []string) int {
 	// timeout fires fast and the test surface catches the
 	// regression via a non-zero exit code or a "context deadline
 	// exceeded" stderr line.
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
+		return 2
+	}
 	client := model.NewClient(model.Options{
 		BaseURL:        loop.NormalizeBaseURL(*baseURL),
 		Model:          *modelName,
@@ -388,7 +393,8 @@ func runContextShow(args []string) int {
 		System:         loop.HarnessSystem,
 		SystemExternal: *systemText + systemFileContent,
 		Skills:         skills,
-		ContextPolicy:  contextPolicyFrom(config.ContextConfig{}, *contextLimit),
+		Tools:          globalRegistry,
+		ContextPolicy:  contextPolicyFrom(cfg.Context, *contextLimit),
 	}, client, em, io.Discard)
 
 	// Run 010 / handoff 038: --limit <n> overflow wiring on the
@@ -398,7 +404,9 @@ func runContextShow(args []string) int {
 	// Ledger.Overflow() semantics at
 	// internal/context/context.go:196-197). Setting Limit here
 	// is the cmd-side binding seam (no loop.Config field added).
-	r.Ledger().Limit = *limit
+	if *limit > 0 {
+		r.Ledger().Limit = *limit
+	}
 
 	r.PopulateLedger(promptText)
 
@@ -423,7 +431,7 @@ func runContextShow(args []string) int {
 	if m := r.ContextManager(); m != nil {
 		messages := loop.ComposeMessages(loop.Config{
 			System:         loop.HarnessSystem,
-			SystemExternal: systemFileContent,
+			SystemExternal: *systemText + systemFileContent,
 			Skills:         skillsFor(loadedSkill),
 		}, promptText)
 		fmt.Print("\n" + m.Report(m.Account(messages)))
@@ -592,6 +600,11 @@ func runContextDoctor(args []string) int {
 	}
 	promptText := string(promptData)
 
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
+		return 2
+	}
 	client := model.NewClient(model.Options{
 		BaseURL:        loop.NormalizeBaseURL(*baseURL),
 		Model:          *modelName,
@@ -613,7 +626,8 @@ func runContextDoctor(args []string) int {
 		System:         loop.HarnessSystem,
 		SystemExternal: *systemText + systemFileContent,
 		Skills:         skills,
-		ContextPolicy:  contextPolicyFrom(config.ContextConfig{}, *contextLimit),
+		Tools:          globalRegistry,
+		ContextPolicy:  contextPolicyFrom(cfg.Context, *contextLimit),
 	}, client, em, io.Discard)
 
 	// Run 010 / handoff 038: --limit <n> overflow wiring on the
@@ -621,7 +635,9 @@ func runContextDoctor(args []string) int {
 	// runContextShow: set Limit immediately after loop.New
 	// returns so PopulateLedger + Overflow see the configured
 	// value.
-	r.Ledger().Limit = *limit
+	if *limit > 0 {
+		r.Ledger().Limit = *limit
+	}
 
 	r.PopulateLedger(promptText)
 

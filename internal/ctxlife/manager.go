@@ -184,6 +184,10 @@ func (m *Manager) Classify(messages []model.Message) []Priority {
 		switch {
 		case msg.Role == "system":
 			out[i] = Pinned
+		case IsCompacted(msg):
+			// A summary of what was already compacted: reducing
+			// it again would summarise a summary.
+			out[i] = Pinned
 		case i == lastUser:
 			out[i] = Pinned
 		case i >= recentFrom:
@@ -344,12 +348,23 @@ func (m *Manager) Fit(messages []model.Message) ([]model.Message, Accounting, er
 			Pinned: acct.Pinned, ToolSchemas: acct.ToolSchemas, Budget: acct.Budget}
 	}
 
-	m.Stats.Reductions++
+	// A reduction is counted when one was applied, not when one
+	// was attempted: a Fit that failed with nothing reduced used
+	// to report one.
+	reduced := false
+	defer func() {
+		if reduced {
+			m.Stats.Reductions++
+		}
+		m.Stats.LastActiveTokens = acct.Total
+		m.trackPeak(acct.Total)
+	}()
 	working := messages
 
 	if m.PruneToolResults {
 		pruned, n, tokens := m.pruneToolResults(working)
 		if n > 0 {
+			reduced = true
 			working = pruned
 			m.Stats.ToolResultsPruned += n
 			m.Stats.TokensPruned += tokens
@@ -371,6 +386,7 @@ func (m *Manager) Fit(messages []model.Message) ([]model.Message, Accounting, er
 			// reason to stop, but it is a reason the final
 			// failure below must be able to name.
 		case n > 0:
+			reduced = true
 			working = compacted
 			m.Stats.Compactions++
 			m.Stats.TokensCompacted += tokens
@@ -399,6 +415,7 @@ func (m *Manager) Fit(messages []model.Message) ([]model.Message, Accounting, er
 	// still not fitting is a real failure, and is reported as one.
 	if m.PruneToolResults && m.KeepRecentTurns > m.minRecent() {
 		if narrowed, n, tokens, ok := m.narrowAndPrune(working, &acct); ok {
+			reduced = true
 			working = narrowed
 			m.Stats.RecentWindowNarrowings++
 			m.Stats.ToolResultsPruned += n
@@ -430,7 +447,11 @@ func (m *Manager) narrowAndPrune(messages []model.Message, acct *Accounting,
 	defer func() { m.KeepRecentTurns = original }()
 
 	totalPruned, totalTokens := 0, 0
-	for width := original / 2; width >= m.minRecent(); width /= 2 {
+	floor := m.minRecent()
+	// Halve the window down to the floor, and try the floor itself:
+	// halving past it used to skip it (6 -> 3 -> 1, floor 2), so a
+	// run that fitted at the floor failed "will not narrow below 2".
+	for width := original / 2; width >= floor; {
 		m.KeepRecentTurns = width
 		pruned, n, tokens := m.pruneToolResults(messages)
 		totalPruned += n
@@ -443,8 +464,13 @@ func (m *Manager) narrowAndPrune(messages []model.Message, acct *Accounting,
 			*acct = got
 			return messages, totalPruned, totalTokens, true
 		}
-		if width == m.minRecent() {
+		if width == floor {
 			break
+		}
+		if width/2 < floor {
+			width = floor
+		} else {
+			width /= 2
 		}
 	}
 	return messages, totalPruned, totalTokens, false
@@ -462,8 +488,8 @@ func (m *Manager) cannotFit(a Accounting) error {
 	var why []string
 	if !m.PruneToolResults {
 		why = append(why, "tool-result pruning is disabled")
-	} else if a.ToolResults == 0 {
-		why = append(why, "there are no reducible tool results left to prune")
+	} else if a.Reducible == 0 {
+		why = append(why, "there is no reducible history left to prune")
 	}
 	if m.Compactor == nil {
 		why = append(why, "no compactor is configured")
@@ -566,7 +592,11 @@ func (m *Manager) compact(messages []model.Message) ([]model.Message, int, int, 
 	for _, msg := range span {
 		before += MessageTokens(msg)
 	}
-	replacement := model.Message{Role: "system",
+	// A user-role message, not a system one: it sits after the
+	// task, and a system message that is not at the beginning is
+	// rejected by runtimes that apply the model's chat template
+	// (FreeToken: HTTP 400). Classify pins it by its header.
+	replacement := model.Message{Role: "user",
 		Content: compactedHeader + "\n" + strings.TrimSpace(summary)}
 	after := MessageTokens(replacement)
 	if after >= before {
@@ -598,7 +628,7 @@ func (m *Manager) compact(messages []model.Message) ([]model.Message, int, int, 
 // summaries, which a caller needs in order to avoid compacting a
 // summary of a summary.
 func IsCompacted(msg model.Message) bool {
-	return msg.Role == "system" && strings.HasPrefix(msg.Content, compactedHeader)
+	return strings.HasPrefix(msg.Content, compactedHeader)
 }
 
 // ToolSchemaTokens estimates what an advertised tool surface costs on

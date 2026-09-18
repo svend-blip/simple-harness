@@ -190,7 +190,7 @@ func New(cfg Config, client *model.Client, em *event.Emitter, out io.Writer) *Ru
 		out:    out,
 		ledger: &contextpkg.Ledger{},
 	}
-	r.ctxmgr = newContextManager(cfg, client)
+	r.ctxmgr = newContextManager(cfg, client, em)
 	if r.ctxmgr != nil {
 		r.ledger.Limit = r.ctxmgr.Budget.ModelLimit
 	}
@@ -202,7 +202,7 @@ func New(cfg Config, client *model.Client, em *event.Emitter, out io.Writer) *Ru
 // manager means RunAgent behaves exactly as it did before this
 // addendum — which is what makes Disabled a real escape hatch rather
 // than a differently-configured version of the same code path.
-func newContextManager(cfg Config, client *model.Client) *ctxlife.Manager {
+func newContextManager(cfg Config, client *model.Client, em *event.Emitter) *ctxlife.Manager {
 	p := cfg.ContextPolicy
 	if p.Disabled {
 		return nil
@@ -219,7 +219,23 @@ func newContextManager(cfg Config, client *model.Client) *ctxlife.Manager {
 	}
 	m.PruneToolResults = !p.DisableToolResultPruning
 	if !p.DisableCompaction && client != nil {
-		m.Compactor = &ctxlife.ModelCompactor{Client: client}
+		c := &ctxlife.ModelCompactor{Client: client}
+		if em != nil {
+			// A compaction is an inference; it shows up in the
+			// event stream as one.
+			c.OnRequest = func() {
+				_ = em.Status("COMPACTING")
+				_ = em.ModelRequest()
+			}
+			c.OnUsage = func(u *model.Usage) {
+				_ = em.Usage(event.UsageBlock{
+					PromptTokens:     u.PromptTokens,
+					CompletionTokens: u.CompletionTokens,
+					ReasoningTokens:  u.ReasoningTokens(),
+				})
+			}
+		}
+		m.Compactor = c
 	}
 	return m
 }
@@ -306,6 +322,11 @@ func (r *Run) Ledger() *contextpkg.Ledger {
 // The interactive REPL is single-goroutine; no locking
 // required.
 func (r *Run) PopulateLedger(prompt string) {
+	// The ledger describes the request about to be composed. It
+	// used to accumulate across calls, so an interactive session
+	// listed the harness system once per prompt and --limit tripped
+	// on the sum of every composition so far.
+	r.ledger.Entries = r.ledger.Entries[:0]
 	if r.cfg.System != "" {
 		r.ledger.Add(contextpkg.HarnessSystem, "harness", r.cfg.System)
 	}
@@ -319,6 +340,16 @@ func (r *Run) PopulateLedger(prompt string) {
 		r.ledger.Add(contextpkg.Skill, s.Name, s.Content)
 	}
 	r.ledger.Add(contextpkg.Task, "task", prompt)
+	// The tool surface goes on every request; it was never
+	// accounted, so `context show` reported 0 tokens of schemas.
+	defs, _ := toolsToChatRequestTools(r.cfg.Tools)
+	for _, def := range defs {
+		r.ledger.Add(contextpkg.ToolSchemas, def.Function.Name,
+			def.Function.Description+string(def.Function.Parameters))
+	}
+	if r.ctxmgr != nil {
+		r.ctxmgr.ToolSchemaTokens = ctxlife.ToolSchemaTokens(defs)
+	}
 }
 
 // RunOne executes one turn: emits started, calls

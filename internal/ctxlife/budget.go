@@ -107,7 +107,8 @@ func (b Budget) Known() bool { return b.Active() > 0 }
 func (b Budget) Validate() error {
 	if b.ModelLimit <= 0 {
 		return fmt.Errorf("ctxlife: model context limit is unknown; set one " +
-			"in configuration or through --limit so the context can be bounded")
+			"in configuration (context.model_limit) or through --context-limit " +
+			"so the context can be bounded")
 	}
 	if b.GenerationReserve < 0 || b.SafetyReserve < 0 {
 		return fmt.Errorf("ctxlife: reserves must not be negative "+

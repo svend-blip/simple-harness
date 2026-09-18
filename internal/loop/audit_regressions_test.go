@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -178,5 +179,120 @@ func TestRunOne_DoesNotAdvertiseToolsItCannotDispatch(t *testing.T) {
 	}
 	if len((*captured)[0].Tools) != 0 {
 		t.Errorf("RunOne advertised %d tools; it cannot dispatch any", len((*captured)[0].Tools))
+	}
+}
+
+// TestRunAgent_DoesNotRedoReductionsEveryTurn — Fit was given the raw
+// history each turn, so once over budget every turn re-pruned and
+// re-compacted from scratch: one extra inference per turn, and stats
+// that double-counted. The loop now fits the previously fitted view
+// plus the new messages.
+func TestRunAgent_DoesNotRedoReductionsEveryTurn(t *testing.T) {
+	var compactions int32
+	srv, _ := toolCallingServerWithCompactionCount(t, 12, &compactions)
+	reg := tools.NewRegistry()
+	reg.Register(&echoTool{size: 900})
+	client := model.NewClient(model.Options{BaseURL: srv.URL, Model: "qwen", RequestTimeout: 10 * time.Second})
+	var sidecar, stdout bytes.Buffer
+	r := New(Config{
+		Model:         model.Options{BaseURL: srv.URL, Model: "qwen"},
+		Workspace:     t.TempDir(),
+		Permission:    "READ_ONLY",
+		System:        HarnessSystem,
+		Tools:         reg,
+		MaxTurns:      20,
+		ContextPolicy: ContextPolicy{ModelLimit: 8192, KeepRecentTurns: 4},
+	}, client, event.NewEmitter(&sidecar, "memo"), &stdout)
+	if _, err := r.RunAgent(context.Background(), "work"); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	st := r.ContextManager().Stats
+	if st.Reductions == 0 {
+		t.Fatal("nothing was reduced; the fixture proves nothing")
+	}
+	if n := atomic.LoadInt32(&compactions); n > 2 {
+		t.Errorf("%d compaction requests over 12 tool turns; the fitted view should carry forward", n)
+	}
+	if st.ToolResultsPruned > 12 {
+		t.Errorf("ToolResultsPruned = %d with only 12 tool results ever produced", st.ToolResultsPruned)
+	}
+}
+
+// toolCallingServerWithCompactionCount is toolCallingServer, also
+// counting the requests that carry the compaction instruction.
+func toolCallingServerWithCompactionCount(t *testing.T, turns int, compactions *int32) (*httptest.Server, func() []int) {
+	t.Helper()
+	var n int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Messages []model.Message `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "text/event-stream")
+		if len(req.Messages) > 0 && strings.HasPrefix(req.Messages[0].Content, "You are compacting") {
+			atomic.AddInt32(compactions, 1)
+			fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"compact summary"},"finish_reason":"stop"}]}`+"\n\n")
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
+		turn := atomic.AddInt32(&n, 1)
+		if int(turn) <= turns {
+			fmt.Fprintf(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-%d","function":{"name":"echo","arguments":"{\"n\":\"%d\"}"}}]}}]}`+"\n\n", turn, turn)
+			fmt.Fprint(w, `data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`+"\n\n")
+		} else {
+			fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"finished"},"finish_reason":"stop"}]}`+"\n\n")
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	t.Cleanup(srv.Close)
+	return srv, nil
+}
+
+// TestPopulateLedger_ReplacesThePreviousComposition — the ledger
+// accumulated across prompts, so in an interactive session /context
+// listed the harness system N times after N prompts and --limit
+// tripped on the sum of every prompt's composition.
+func TestPopulateLedger_ReplacesThePreviousComposition(t *testing.T) {
+	srv, _ := twoTurnServer(t, `data: {"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}`+"\n\n")
+	r, _ := newAgentRun(t, srv, Config{System: HarnessSystem})
+	r.PopulateLedger("first")
+	r.PopulateLedger("second")
+	led := r.Ledger()
+	var tasks, harness int
+	for _, e := range led.Entries {
+		switch e.Name {
+		case "task":
+			tasks++
+			if e.Content != "second" {
+				t.Errorf("task entry = %q, want the current prompt", e.Content)
+			}
+		case "harness":
+			harness++
+		}
+	}
+	if tasks != 1 || harness != 1 {
+		t.Errorf("entries after two compositions: %d task, %d harness; want one of each", tasks, harness)
+	}
+}
+
+// TestPopulateLedger_AccountsTheToolSurface — tool schemas are part
+// of every request, but the ledger never carried them, so `context
+// show` reported 0 tokens of tool schemas and the doctor's schema
+// finding could never fire.
+func TestPopulateLedger_AccountsTheToolSurface(t *testing.T) {
+	srv, _ := twoTurnServer(t, `data: {"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}`+"\n\n")
+	r, _ := newAgentRun(t, srv, Config{System: HarnessSystem})
+	r.PopulateLedger("p")
+	var schemaTokens int
+	for _, e := range r.Ledger().Entries {
+		if e.Category == "tool schemas" {
+			schemaTokens += e.TokenEstimate
+		}
+	}
+	if schemaTokens == 0 {
+		t.Error("no tool-schema entries in the ledger although a tool is registered")
+	}
+	if r.ContextManager() != nil && r.ContextManager().ToolSchemaTokens == 0 {
+		t.Error("the lifecycle manager was not told what the tool surface costs")
 	}
 }
