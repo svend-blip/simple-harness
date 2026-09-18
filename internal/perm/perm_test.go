@@ -336,3 +336,24 @@ func TestAuthorize_ShellCwdIsPathShaped(t *testing.T) {
 		t.Errorf("cwd after Authorize = %v, want %q", got, ws.Root())
 	}
 }
+
+// TestReadOnlyDeniesRegisteredMutationTools — the mutation set was
+// the three builtins by name, so every MCP tool (a server's
+// write_file among them) ran under read_only. Tools an MCP server
+// provides are registered as mutations unless the server is declared
+// read_only, and the policy honours the registration.
+func TestReadOnlyDeniesRegisteredMutationTools(t *testing.T) {
+	RegisterMutationTool("srv__write_file")
+	t.Cleanup(func() { UnregisterMutationTool("srv__write_file") })
+	ws := tempWorkspace(t)
+	call := tools.Call{Name: "srv__write_file", Arguments: map[string]any{"path": "x"}}
+	if d := NewPolicy(READ_ONLY).Decide(context.Background(), call, ws); d.Allowed {
+		t.Errorf("read_only allowed a registered mutation tool: %+v", d)
+	}
+	if d := NewPolicy(WORKSPACE_WRITE).Decide(context.Background(), call, ws); !d.Allowed {
+		t.Errorf("workspace_write denied an in-workspace mutation: %+v", d)
+	}
+	if !IsMutationTool("srv__write_file") {
+		t.Error("IsMutationTool does not see the registration")
+	}
+}

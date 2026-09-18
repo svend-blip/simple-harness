@@ -18,6 +18,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -443,6 +444,14 @@ func setEnvField(cfg *Config, field, val string) error {
 			return fmt.Errorf("invalid request_timeout %q: %w", val, err)
 		}
 		mc.RequestTimeout = d
+	case "context_policy":
+		cfg.Context.Policy = val
+	case "context_model_limit":
+		n, err := strconv.Atoi(val)
+		if err != nil || n < 0 {
+			return fmt.Errorf("invalid context_model_limit %q: want a non-negative integer", val)
+		}
+		cfg.Context.ModelLimit = n
 	case "shell_timeout":
 		d, err := time.ParseDuration(val)
 		if err != nil {
@@ -609,6 +618,7 @@ func (c Config) Render(w io.Writer) error {
 		},
 		MCPServers:   mcpView,
 		ShellTimeout: shadow.ShellTimeout.String(),
+		Context:      shadow.Context,
 		Position: renderPositionView{
 			RunID:     os.Getenv("SIMPLE_HARNESS_RUN_ID"),
 			HandoffID: os.Getenv("SIMPLE_HARNESS_HANDOFF_ID"),
@@ -632,6 +642,7 @@ type renderView struct {
 	Model        renderModelView    `json:"model"`
 	MCPServers   []renderMCPView    `json:"mcp_servers"`
 	ShellTimeout string             `json:"shell_timeout"`
+	Context      ContextConfig      `json:"context"`
 	Position     renderPositionView `json:"position"`
 }
 
@@ -686,6 +697,21 @@ type configOverlay struct {
 	Model        *modelOverlay       `json:"model"`
 	MCPServers   *[]mcpServerOverlay `json:"mcp_servers"`
 	ShellTimeout *string             `json:"shell_timeout"`
+	Context      *contextOverlay     `json:"context"`
+}
+
+// contextOverlay is the pointer-overlay shape of the `context`
+// block. It was documented and rendered in tests but never read by
+// the loader, so a file setting `policy: unbounded` or a model limit
+// loaded as the zero value.
+type contextOverlay struct {
+	Policy            *string `json:"policy"`
+	ModelLimit        *int    `json:"model_limit"`
+	GenerationReserve *int    `json:"generation_reserve"`
+	SafetyReserve     *int    `json:"safety_reserve"`
+	KeepRecentTurns   *int    `json:"keep_recent_turns"`
+	ToolResultPruning *bool   `json:"tool_result_pruning"`
+	Compaction        *bool   `json:"compaction"`
 }
 
 type modelOverlay struct {
@@ -753,6 +779,35 @@ func applyOverlay(cfg *Config, overlay configOverlay, modelPresent map[string]st
 			return fmt.Errorf("invalid shell_timeout %q: must not be negative", *overlay.ShellTimeout)
 		}
 		cfg.ShellTimeout = d
+	}
+	if overlay.Context != nil {
+		c := overlay.Context
+		if c.Policy != nil {
+			cfg.Context.Policy = *c.Policy
+		}
+		if c.ModelLimit != nil {
+			if *c.ModelLimit < 0 {
+				return fmt.Errorf("invalid context.model_limit %d: must not be negative", *c.ModelLimit)
+			}
+			cfg.Context.ModelLimit = *c.ModelLimit
+		}
+		if c.GenerationReserve != nil {
+			cfg.Context.GenerationReserve = *c.GenerationReserve
+		}
+		if c.SafetyReserve != nil {
+			cfg.Context.SafetyReserve = *c.SafetyReserve
+		}
+		if c.KeepRecentTurns != nil {
+			cfg.Context.KeepRecentTurns = *c.KeepRecentTurns
+		}
+		if c.ToolResultPruning != nil {
+			v := *c.ToolResultPruning
+			cfg.Context.ToolResultPruning = &v
+		}
+		if c.Compaction != nil {
+			v := *c.Compaction
+			cfg.Context.Compaction = &v
+		}
 	}
 	if overlay.Model == nil && overlay.MCPServers == nil && !mcpServersPresent {
 		return nil

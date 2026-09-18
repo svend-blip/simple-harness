@@ -82,17 +82,21 @@ func TestMCP_BuildToolListing_Happy(t *testing.T) {
 	// conversion via schemaFromMap pins the contract). We pull the
 	// adapter via r.Get and check its Schema() against the expected
 	// shape.
+	// A schema that says nothing about additionalProperties is open
+	// (the JSON Schema default); only an explicit false is strict.
 	for name, wantSchema := range map[string]tools.Schema{
 		"tool_alpha": {
 			Required: []string{"path"},
 			Properties: map[string]tools.PropertyType{
 				"path": tools.TypeString,
 			},
+			AdditionalProperties: true,
 		},
 		"tool_beta": {
 			Properties: map[string]tools.PropertyType{
 				"count": tools.TypeInt,
 			},
+			AdditionalProperties: true,
 		},
 		"tool_gamma": {
 			AdditionalProperties: true,

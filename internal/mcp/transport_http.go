@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
-	"time"
+	"sync/atomic"
 )
 
 // httpTransport is the streamable-http Transport implementation
@@ -91,9 +91,47 @@ import (
 type httpTransport struct {
 	endpoint    string
 	client      *http.Client
+	headers     map[string]string
 	sessionID   string
 	sessionOnce sync.Once
 	sessionErr  error
+	nextID      int64
+}
+
+// HTTPOption configures an httpTransport.
+type HTTPOption func(*httpTransport)
+
+// WithBearerToken sends `Authorization: Bearer <token>` on every
+// request (the config's per-server api_key).
+func WithBearerToken(token string) HTTPOption {
+	return func(t *httpTransport) {
+		if token != "" {
+			t.headers["Authorization"] = "Bearer " + token
+		}
+	}
+}
+
+// WithHeaders sends the given headers verbatim on every request (the
+// config's per-server headers; an explicit Authorization here wins
+// over WithBearerToken).
+func WithHeaders(h map[string]string) HTTPOption {
+	return func(t *httpTransport) {
+		for k, v := range h {
+			t.headers[k] = v
+		}
+	}
+}
+
+// applyHeaders sets the standard and configured headers on req.
+func (t *httpTransport) applyHeaders(req *http.Request) {
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	for k, v := range t.headers {
+		req.Header.Set(k, v)
+	}
+	if t.sessionID != "" {
+		req.Header.Set("Mcp-Session-Id", t.sessionID)
+	}
 }
 
 // Version is the clientInfo name + version the httpTransport's
@@ -122,13 +160,20 @@ const httpTransportClientVersion = "0.1.0-dev"
 //
 // The endpoint is stored verbatim and is NOT logged in error messages
 // (per SCOPE §30 — the endpoint may embed credentials in the URL).
-func NewHTTPTransport(endpoint string) *httpTransport {
-	return &httpTransport{
+func NewHTTPTransport(endpoint string, opts ...HTTPOption) *httpTransport {
+	t := &httpTransport{
 		endpoint: endpoint,
-		client: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		// No client-wide timeout: a tool call may legitimately run
+		// longer than any fixed figure, and every request carries a
+		// context with the caller's deadline (the adapter applies
+		// the manager's CallTimeout; startup listing gets its own).
+		client:  &http.Client{},
+		headers: map[string]string{},
 	}
+	for _, o := range opts {
+		o(t)
+	}
+	return t
 }
 
 // Compile-time assertion that httpTransport satisfies Transport.
@@ -244,8 +289,7 @@ func (t *httpTransport) ensureSession(ctx context.Context) error {
 			t.sessionErr = fmt.Errorf("mcp: build initialize: %w", err)
 			return
 		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "application/json, text/event-stream")
+		t.applyHeaders(req)
 
 		resp, err := t.client.Do(req)
 		if err != nil {
@@ -254,7 +298,7 @@ func (t *httpTransport) ensureSession(ctx context.Context) error {
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			t.sessionErr = fmt.Errorf("mcp: http initialize: %s", resp.Status)
+			t.sessionErr = fmt.Errorf("mcp: http initialize: %s%s", resp.Status, bodySnippet(resp.Body))
 			return
 		}
 		// The wire shape only requires the Mcp-Session-Id
@@ -274,8 +318,48 @@ func (t *httpTransport) ensureSession(ctx context.Context) error {
 		if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" {
 			t.sessionID = sid
 		}
+		// The spec requires the client to confirm initialization
+		// before any other request. Best effort: a server that
+		// does not implement the notification answers 4xx, and
+		// the requests that follow decide whether the session is
+		// usable.
+		t.notify(ctx, "notifications/initialized")
 	})
 	return t.sessionErr
+}
+
+// notify sends a JSON-RPC notification (no id, no response expected).
+func (t *httpTransport) notify(ctx context.Context, method string) {
+	bs, err := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  method,
+	})
+	if err != nil {
+		return
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", t.endpoint, bytes.NewReader(bs))
+	if err != nil {
+		return
+	}
+	t.applyHeaders(req)
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+}
+
+// bodySnippet reads up to 512 bytes of an error response so the
+// operator sees what the server said ("Session not found"), not only
+// the status line.
+func bodySnippet(r io.Reader) string {
+	b, _ := io.ReadAll(io.LimitReader(r, 512))
+	s := strings.TrimSpace(string(b))
+	if s == "" {
+		return ""
+	}
+	return ": " + s
 }
 
 // roundtrip sends a single JSON-RPC 2.0 POST and returns the parsed
@@ -296,9 +380,10 @@ func (t *httpTransport) roundtrip(ctx context.Context, method string, params int
 	if err := t.ensureSession(ctx); err != nil {
 		return nil, err
 	}
+	id := atomic.AddInt64(&t.nextID, 1)
 	reqBody := map[string]interface{}{
 		"jsonrpc": "2.0",
-		"id":      1,
+		"id":      id,
 		"method":  method,
 		"params":  params,
 	}
@@ -310,11 +395,7 @@ func (t *httpTransport) roundtrip(ctx context.Context, method string, params int
 	if err != nil {
 		return nil, fmt.Errorf("mcp: build request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
-	if t.sessionID != "" {
-		req.Header.Set("Mcp-Session-Id", t.sessionID)
-	}
+	t.applyHeaders(req)
 
 	resp, err := t.client.Do(req)
 	if err != nil {
@@ -322,7 +403,7 @@ func (t *httpTransport) roundtrip(ctx context.Context, method string, params int
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("mcp: http %s", resp.Status)
+		return nil, fmt.Errorf("mcp: http %s%s", resp.Status, bodySnippet(resp.Body))
 	}
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -336,7 +417,7 @@ func (t *httpTransport) roundtrip(ctx context.Context, method string, params int
 	// any spec-compliant MCP server. stripSSEWrapper returns the
 	// raw JSON payload regardless of which form the server used.
 	if isSSEResponse(resp.Header.Get("Content-Type")) {
-		raw = stripSSEWrapper(raw)
+		raw = selectSSEResponse(raw, id)
 	}
 	parsed, err := parseJSONRPC(raw)
 	if err != nil {
@@ -434,33 +515,73 @@ func isSSEResponse(contentType string) bool {
 // server-pushed events or hold the stream open — it reads to EOF
 // and parses one response.
 func stripSSEWrapper(raw []byte) []byte {
-	var out []byte
-	for {
-		i := bytes.IndexByte(raw, '\n')
-		var line []byte
-		if i < 0 {
-			line = raw
-			raw = nil
-		} else {
-			line = raw[:i]
-			raw = raw[i+1:]
-		}
-		// Trim the trailing \r (CRLF line endings are common
-		// over HTTP).
-		line = bytes.TrimRight(line, "\r")
-		if bytes.HasPrefix(line, []byte("data:")) {
-			data := bytes.TrimSpace(line[len("data:"):])
-			if len(out) > 0 {
-				out = append(out, '\n')
-			}
-			out = append(out, data...)
-		}
-		if i < 0 {
-			break
-		}
-	}
-	if len(out) == 0 {
+	events := sseEvents(raw)
+	if len(events) == 0 {
 		return raw
 	}
-	return out
+	return bytes.Join(events, []byte("\n"))
+}
+
+// sseEvents splits an SSE body into its events' data payloads: the
+// `data:` lines of one event (separated by blank lines) are joined
+// with '\n', and each event yields one payload.
+func sseEvents(raw []byte) [][]byte {
+	var events [][]byte
+	var cur []byte
+	flush := func() {
+		if len(cur) > 0 {
+			events = append(events, cur)
+		}
+		cur = nil
+	}
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		line = bytes.TrimRight(line, "\r")
+		if len(line) == 0 {
+			flush()
+			continue
+		}
+		if bytes.HasPrefix(line, []byte("data:")) {
+			data := bytes.TrimSpace(line[len("data:"):])
+			if len(cur) > 0 {
+				cur = append(cur, '\n')
+			}
+			cur = append(cur, data...)
+		}
+	}
+	flush()
+	return events
+}
+
+// selectSSEResponse returns the event whose JSON-RPC id matches the
+// request. A server may stream notifications (progress, log
+// messages) before the response in the same body; joining every
+// event into one document made such a body unparseable. When no
+// event carries the id, the last event with a result or error is
+// used, and a body with no events at all is returned unchanged.
+func selectSSEResponse(raw []byte, id int64) []byte {
+	events := sseEvents(raw)
+	if len(events) == 0 {
+		return raw
+	}
+	var fallback []byte
+	for _, ev := range events {
+		var probe struct {
+			ID     *int64          `json:"id"`
+			Result json.RawMessage `json:"result"`
+			Error  json.RawMessage `json:"error"`
+		}
+		if err := json.Unmarshal(ev, &probe); err != nil {
+			continue
+		}
+		if probe.ID != nil && *probe.ID == id {
+			return ev
+		}
+		if len(probe.Result) > 0 || len(probe.Error) > 0 {
+			fallback = ev
+		}
+	}
+	if fallback != nil {
+		return fallback
+	}
+	return events[len(events)-1]
 }

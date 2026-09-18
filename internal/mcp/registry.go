@@ -2,8 +2,11 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/svend-blip/simple-harness/internal/tools"
 )
@@ -76,6 +79,7 @@ func (m *Manager) AddServer(ctx context.Context, srv Server, transport Transport
 			Description:  lt.Description,
 			Schema:       schema,
 			Transport:    transport,
+			CallTimeout:  m.CallTimeout,
 		})
 		// A server that lists the same tool name twice (or two tools that
 		// resolve to the same final name) must not crash the harness: the
@@ -192,15 +196,19 @@ func schemaFromMap(in map[string]interface{}) (tools.Schema, error) {
 		}
 	}
 
+	// JSON Schema's default is open (additionalProperties: true).
+	// Defaulting to false rejected any argument the conversion below
+	// could not type, including ones the schema lists as required.
+	out.AdditionalProperties = true
 	if addRaw, ok := in["additionalProperties"]; ok {
 		switch v := addRaw.(type) {
 		case bool:
 			out.AdditionalProperties = v
 		default:
-			// Object form (JSON Schema's "additionalProperties": { ... })
-			// is not represented in tools.Schema. Treat it as false
-			// (the strict default) so unknown fields are rejected.
-			out.AdditionalProperties = false
+			// Object form ("additionalProperties": {schema}) allows
+			// extra properties of that shape; open is the honest
+			// approximation.
+			out.AdditionalProperties = true
 		}
 	}
 
@@ -219,19 +227,11 @@ func schemaFromMap(in map[string]interface{}) (tools.Schema, error) {
 				// string in shorthand). Skip silently.
 				continue
 			}
-			tRaw, ok := propMap["type"]
-			if !ok {
-				// No "type" field. Skip silently — the
-				// validator would reject this anyway at
-				// use time.
-				continue
-			}
-			tStr, ok := tRaw.(string)
-			if !ok {
-				continue
-			}
-			pt := jsonTypeToPropertyType(tStr)
+			pt := propertyType(propMap)
 			if pt == "" {
+				// Untyped ($ref, allOf, ...): left out of the
+				// typed set; additionalProperties (open unless
+				// the server said otherwise) lets it through.
 				continue
 			}
 			out.Properties[name] = pt
@@ -249,6 +249,42 @@ func schemaFromMap(in map[string]interface{}) (tools.Schema, error) {
 // "array", "object". The "integer"/"int" and "boolean"/"bool" aliases
 // cover the JSON Schema strict-variant names + the shorthand some MCP
 // servers use.
+// propertyType resolves a property definition to a tools.PropertyType:
+// a plain "type", a type array ("type": ["string","null"]), or an
+// anyOf/oneOf of which the first non-null member is used — FastMCP
+// emits the anyOf form for every Optional[T] parameter, and those
+// were dropped.
+func propertyType(propMap map[string]interface{}) tools.PropertyType {
+	switch tv := propMap["type"].(type) {
+	case string:
+		return jsonTypeToPropertyType(tv)
+	case []interface{}:
+		for _, alt := range tv {
+			if s, ok := alt.(string); ok && s != "null" {
+				if pt := jsonTypeToPropertyType(s); pt != "" {
+					return pt
+				}
+			}
+		}
+	}
+	for _, key := range []string{"anyOf", "oneOf"} {
+		alts, _ := propMap[key].([]interface{})
+		for _, alt := range alts {
+			m, _ := alt.(map[string]interface{})
+			if m == nil {
+				continue
+			}
+			if s, _ := m["type"].(string); s == "null" {
+				continue
+			}
+			if pt := propertyType(m); pt != "" {
+				return pt
+			}
+		}
+	}
+	return ""
+}
+
 func jsonTypeToPropertyType(t string) tools.PropertyType {
 	switch t {
 	case "string":
@@ -282,6 +318,7 @@ type adapterConfig struct {
 	Description  string
 	Schema       tools.Schema
 	Transport    Transport
+	CallTimeout  time.Duration
 }
 
 // mcpAdapter is a tools.Tool implementation that wraps a single MCP
@@ -326,14 +363,15 @@ type adapterConfig struct {
 // source of truth. The new test TestMCP_SingleAuthPass pins exactly
 // one Authorize call per Dispatch for MCP tools.
 type mcpAdapter struct {
-	server    Server
-	origName  string
-	meta      tools.ToolMeta
-	schema    tools.Schema
-	transport Transport
-	auth      tools.AuthorizeFunc
-	policy    tools.Policy
-	ws        tools.Workspace
+	server      Server
+	origName    string
+	meta        tools.ToolMeta
+	schema      tools.Schema
+	transport   Transport
+	auth        tools.AuthorizeFunc
+	policy      tools.Policy
+	ws          tools.Workspace
+	callTimeout time.Duration
 }
 
 // Compile-time assertion that mcpAdapter satisfies tools.Tool.
@@ -346,14 +384,15 @@ var _ tools.Tool = (*mcpAdapter)(nil)
 // prefix).
 func newAdapter(cfg adapterConfig) *mcpAdapter {
 	return &mcpAdapter{
-		server:    cfg.Server,
-		origName:  cfg.OriginalName,
-		meta:      tools.ToolMeta{Name: cfg.FinalName, Description: cfg.Description},
-		schema:    cfg.Schema,
-		transport: cfg.Transport,
-		auth:      cfg.Auth,
-		policy:    cfg.Policy,
-		ws:        cfg.Workspace,
+		server:      cfg.Server,
+		origName:    cfg.OriginalName,
+		meta:        tools.ToolMeta{Name: cfg.FinalName, Description: cfg.Description},
+		schema:      cfg.Schema,
+		transport:   cfg.Transport,
+		auth:        cfg.Auth,
+		policy:      cfg.Policy,
+		ws:          cfg.Workspace,
+		callTimeout: cfg.CallTimeout,
 	}
 }
 
@@ -393,6 +432,11 @@ func (a *mcpAdapter) Schema() tools.Schema { return a.schema }
 // implementations but are not consumed by Execute directly.
 func (a *mcpAdapter) Execute(ctx context.Context, call tools.Call) (tools.Result, error) {
 	args := applyPositionDefaults(a.schema, call.Arguments, os.Getenv)
+	if a.callTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, a.callTimeout)
+		defer cancel()
+	}
 	out, err := a.transport.Call(ctx, a.origName, args)
 	if err != nil {
 		return tools.Result{Status: "error", Error: &tools.ToolError{
@@ -401,7 +445,34 @@ func (a *mcpAdapter) Execute(ctx context.Context, call tools.Call) (tools.Result
 			Call:    call,
 		}}, nil
 	}
+	// The MCP result's isError flag is the server saying the tool
+	// failed. It was returned as status ok; the contract says a
+	// tool failure reaches the model as an error result.
+	if isErr, _ := out["isError"].(bool); isErr {
+		return tools.Result{Status: "error", Error: &tools.ToolError{
+			Kind:    "execution_failed",
+			Message: fmt.Sprintf("mcp: server %q tool %q reported an error: %s", a.server.Name, a.origName, resultText(out)),
+			Call:    call,
+		}}, nil
+	}
 	return tools.Result{Status: "ok", Content: out}, nil
+}
+
+// resultText joins the text parts of an MCP result's content array.
+func resultText(out map[string]interface{}) string {
+	items, _ := out["content"].([]interface{})
+	var parts []string
+	for _, it := range items {
+		m, _ := it.(map[string]interface{})
+		if s, ok := m["text"].(string); ok && s != "" {
+			parts = append(parts, s)
+		}
+	}
+	if len(parts) == 0 {
+		b, _ := json.Marshal(out)
+		return string(b)
+	}
+	return strings.Join(parts, "\n")
 }
 
 // stageToKind maps an internal DecisionError's (Stage, Reason) to the

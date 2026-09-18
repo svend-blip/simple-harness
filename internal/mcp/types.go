@@ -43,6 +43,7 @@ package mcp
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/svend-blip/simple-harness/internal/tools"
 )
@@ -69,6 +70,12 @@ type Server struct {
 	Command    []string // command + args for transport=stdio (empty for http)
 	Permission string   // permission mode the server's tools map into (e.g., "read_only")
 	Allowlist  []string // optional subset of server-offered tools; empty = all
+	// APIKey is sent as `Authorization: Bearer <key>` and Headers
+	// verbatim on every request of the http transport. Both were
+	// accepted, validated and redacted by the config layer and then
+	// never sent.
+	APIKey  string
+	Headers map[string]string
 }
 
 // ListedTool is a tool the server reports at session-start listing.
@@ -164,6 +171,9 @@ type Manager struct {
 	auth     tools.AuthorizeFunc
 	policy   tools.Policy
 	ws       tools.Workspace
+	// CallTimeout bounds every tool call made through this manager's
+	// adapters. Zero means the caller's context alone bounds it.
+	CallTimeout time.Duration
 }
 
 // NewManager constructs a Manager that registers MCP tools into the

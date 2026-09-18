@@ -465,12 +465,18 @@ func TestMCP_TransportHTTP_SessionRequiredStub(t *testing.T) {
 	reqs := append([]recordedSessionRequest(nil), stub.requests...)
 	stub.mu.Unlock()
 
-	if len(reqs) != 2 {
-		t.Fatalf("stub.requests len = %d, want 2 (initialize preflight + tools/list)", len(reqs))
+	// initialize, then the notifications/initialized the spec
+	// requires before any other request, then tools/list.
+	if len(reqs) != 3 {
+		t.Fatalf("stub.requests len = %d, want 3 (initialize + initialized notification + tools/list)", len(reqs))
 	}
 	if reqs[0].Method != "initialize" {
 		t.Fatalf("reqs[0].Method = %q, want %q", reqs[0].Method, "initialize")
 	}
+	if reqs[1].Method != "notifications/initialized" || !reqs[1].HasSession {
+		t.Fatalf("reqs[1] = %+v, want the initialized notification carrying the session header", reqs[1])
+	}
+	reqs = append(reqs[:1], reqs[2:]...)
 	if reqs[0].HasSession {
 		t.Fatalf("reqs[0].HasSession = true, want false (the initialize preflight MUST NOT carry the session header)")
 	}
@@ -505,17 +511,18 @@ func TestMCP_TransportHTTP_SessionRequiredStub(t *testing.T) {
 	stub.mu.Lock()
 	reqsAfterCall := append([]recordedSessionRequest(nil), stub.requests...)
 	stub.mu.Unlock()
-	if len(reqsAfterCall) != 3 {
-		t.Fatalf("stub.requests len after Call = %d, want 3 (initialize + tools/list + tools/call)", len(reqsAfterCall))
+	if len(reqsAfterCall) != 4 {
+		t.Fatalf("stub.requests len after Call = %d, want 4 (initialize + initialized notification + tools/list + tools/call)", len(reqsAfterCall))
 	}
-	if reqsAfterCall[2].Method != "tools/call" {
-		t.Fatalf("reqsAfterCall[2].Method = %q, want %q", reqsAfterCall[2].Method, "tools/call")
+	last := reqsAfterCall[3]
+	if last.Method != "tools/call" {
+		t.Fatalf("reqsAfterCall[3].Method = %q, want %q", last.Method, "tools/call")
 	}
-	if !reqsAfterCall[2].HasSession {
-		t.Fatalf("reqsAfterCall[2].HasSession = false, want true (tools/call MUST carry the cached session header)")
+	if !last.HasSession {
+		t.Fatalf("reqsAfterCall[3].HasSession = false, want true (tools/call MUST carry the cached session header)")
 	}
-	if reqsAfterCall[2].SessionID != reqsAfterCall[1].SessionID {
-		t.Fatalf("reqsAfterCall[2].SessionID = %q, want %q (cached session id must be reused across calls)", reqsAfterCall[2].SessionID, reqsAfterCall[1].SessionID)
+	if last.SessionID != reqsAfterCall[2].SessionID {
+		t.Fatalf("reqsAfterCall[3].SessionID = %q, want %q (cached session id must be reused across calls)", last.SessionID, reqsAfterCall[2].SessionID)
 	}
 
 	// ---- (3) Sub-call after a pre-flight failure surfaces the

@@ -1099,6 +1099,32 @@ func newSessionID() (string, error) {
 func runTools(args []string) int {
 	_ = args // future: filter / json / etc.
 
+	// The listing includes the declared MCP servers' tools, as the
+	// contract says; it used to list the builtins only.
+	if cfg, err := config.Load(); err != nil {
+		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
+		return 2
+	} else if len(cfg.MCPServers) > 0 {
+		cwd, err := os.Getwd()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "config error: cannot determine cwd: %v\n", err)
+			return 2
+		}
+		ws, err := path.New(cwd)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "config error: workspace %q: %v\n", cwd, err)
+			return 2
+		}
+		mgr, _, mcpErr := cmdMcpInit(context.Background(), &cfg, activePermissionMode, globalRegistry, ws)
+		if mcpErr != nil {
+			fmt.Fprintf(os.Stderr, "simple-harness: mcp server unreachable: %v\n", mcpErr)
+			return 2
+		}
+		if mgr != nil {
+			defer mgr.Close()
+		}
+	}
+
 	names := globalRegistry.Names()
 	if len(names) == 0 {
 		// Empty registry — exit 0 with no output. The choice (vs the

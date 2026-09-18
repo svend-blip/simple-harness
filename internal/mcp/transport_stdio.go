@@ -2,13 +2,16 @@ package mcp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/svend-blip/simple-harness/internal/procgroup"
 	"io"
+	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -55,10 +58,27 @@ import (
 type stdioTransport struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
-	stdout *bufio.Scanner
+	stdout *bufio.Reader
 	mu     sync.Mutex
 	nextID int64
 	closed atomic.Bool
+	// initialized records that the `initialize` request and the
+	// `notifications/initialized` notification have been exchanged
+	// on this pipe. Guarded by mu.
+	initialized bool
+	// terminated closes when terminate has reaped the child, so a
+	// Close that lost the race to a cancellation path still returns
+	// only once the child is gone.
+	terminated chan struct{}
+}
+
+// StdioOption configures a stdio transport.
+type StdioOption func(*exec.Cmd)
+
+// WithStderr forwards the child's stderr to w. It was discarded, so
+// the warning that explained a failing handshake was invisible.
+func WithStderr(w io.Writer) StdioOption {
+	return func(cmd *exec.Cmd) { cmd.Stderr = w }
 }
 
 // NewStdioTransport spawns the child process and wires its stdio
@@ -77,12 +97,24 @@ type stdioTransport struct {
 // the roundtrip surfaces the EOF as a structured error (per
 // GOAL §2 bound decision 4 — declared-but-unreachable becomes a
 // structured startup error at the caller).
-func NewStdioTransport(ctx context.Context, command []string) (*stdioTransport, error) {
+func NewStdioTransport(ctx context.Context, command []string, opts ...StdioOption) (*stdioTransport, error) {
 	if len(command) == 0 {
 		return nil, fmt.Errorf("mcp: stdio: command must be non-empty")
 	}
 	cmd := exec.Command(command[0], command[1:]...)
 	cmd.SysProcAttr = procgroup.Attr()
+	// The child inherits the environment minus the harness's own
+	// model credential (SCOPE §30: a secret goes where it is needed
+	// and nowhere else).
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "SIMPLE_HARNESS_API_KEY=") {
+			continue
+		}
+		cmd.Env = append(cmd.Env, kv)
+	}
+	for _, o := range opts {
+		o(cmd)
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("mcp: stdio: stdin pipe: %w", err)
@@ -99,12 +131,14 @@ func NewStdioTransport(ctx context.Context, command []string) (*stdioTransport, 
 		_ = cmd.Wait()
 		return nil, err
 	}
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	// A bufio.Reader, not a Scanner: the Scanner's line cap (1 MiB)
+	// turned any larger response into "token too long" and left the
+	// scanner failed for the rest of the session.
 	return &stdioTransport{
-		cmd:    cmd,
-		stdin:  stdin,
-		stdout: scanner,
+		cmd:        cmd,
+		stdin:      stdin,
+		stdout:     bufio.NewReaderSize(stdout, 64*1024),
+		terminated: make(chan struct{}),
 	}, nil
 }
 
@@ -170,13 +204,28 @@ func (t *stdioTransport) Call(ctx context.Context, name string, args map[string]
 // once; the second Close does not race against it.
 func (t *stdioTransport) Close() error {
 	if !t.closed.CompareAndSwap(false, true) {
+		// Already closing (a cancelled call started it): wait for
+		// the child to be reaped before reporting Close done.
+		if t.terminated != nil {
+			<-t.terminated
+		}
 		return nil
+	}
+	t.terminate()
+	return nil
+}
+
+// terminate closes stdin and reaps the child with the SCOPE §27
+// escalation. Callers must have set closed first.
+func (t *stdioTransport) terminate() {
+	if t.terminated != nil {
+		defer close(t.terminated)
 	}
 	if t.stdin != nil {
 		_ = t.stdin.Close()
 	}
 	if t.cmd == nil || t.cmd.Process == nil {
-		return nil
+		return
 	}
 	pgid := t.cmd.Process.Pid
 	done := make(chan struct{})
@@ -185,15 +234,14 @@ func (t *stdioTransport) Close() error {
 		close(done)
 	}()
 	if waitDone(done, 2*time.Second) {
-		return nil
+		return
 	}
 	_ = procgroup.Signal(pgid, syscall.SIGTERM)
 	if waitDone(done, 2*time.Second) {
-		return nil
+		return
 	}
 	_ = procgroup.Signal(pgid, syscall.SIGKILL)
 	<-done
-	return nil
 }
 
 // waitDone returns true if done is signalled within d, false
@@ -231,6 +279,32 @@ func (t *stdioTransport) roundtrip(ctx context.Context, method string, params in
 	if t.closed.Load() {
 		return fmt.Errorf("mcp: stdio: transport is closed")
 	}
+	if !t.initialized && method != "initialize" {
+		// The MCP handshake: every server built on the reference SDK
+		// refuses requests before it, with -32602 "Received request
+		// before initialization was complete". The transport went
+		// straight to tools/list.
+		if err := t.exchange(ctx, "initialize", map[string]interface{}{
+			"protocolVersion": "2025-03-26",
+			"capabilities":    map[string]interface{}{},
+			"clientInfo": map[string]interface{}{
+				"name":    httpTransportClientName,
+				"version": httpTransportClientVersion,
+			},
+		}, nil); err != nil {
+			return fmt.Errorf("mcp: stdio: initialize: %w", err)
+		}
+		note, _ := json.Marshal(map[string]interface{}{"jsonrpc": "2.0", "method": "notifications/initialized"})
+		if _, err := t.stdin.Write(append(note, '\n')); err != nil {
+			return fmt.Errorf("mcp: stdio: write initialized notification: %w", err)
+		}
+		t.initialized = true
+	}
+	return t.exchange(ctx, method, params, out)
+}
+
+// exchange writes one request and reads its response. Callers hold mu.
+func (t *stdioTransport) exchange(ctx context.Context, method string, params interface{}, out interface{}) error {
 	id := atomic.AddInt64(&t.nextID, 1)
 	reqBody := map[string]interface{}{
 		"jsonrpc": "2.0",
@@ -298,15 +372,16 @@ func (t *stdioTransport) roundtrip(ctx context.Context, method string, params in
 func (t *stdioTransport) readLine(ctx context.Context) ([]byte, error) {
 	out := make(chan readLineResult, 1)
 	go func() {
-		if t.stdout.Scan() {
-			out <- readLineResult{line: append([]byte(nil), t.stdout.Bytes()...)}
+		line, err := t.stdout.ReadBytes('\n')
+		if len(line) > 0 && (err == nil || err == io.EOF) {
+			out <- readLineResult{line: bytes.TrimRight(line, "\r\n")}
 			return
 		}
-		if err := t.stdout.Err(); err != nil {
-			out <- readLineResult{err: err}
+		if err == io.EOF {
+			out <- readLineResult{eof: true}
 			return
 		}
-		out <- readLineResult{eof: true}
+		out <- readLineResult{err: err}
 	}()
 	select {
 	case r := <-out:
@@ -318,12 +393,15 @@ func (t *stdioTransport) readLine(ctx context.Context) ([]byte, error) {
 		}
 		return r.line, nil
 	case <-ctx.Done():
-		// Signal the child to exit by closing stdin. The
-		// goroutine will eventually return (with EOF or an
-		// error). We don't wait for it — we return ctx.Err()
-		// to the caller; the bufio.Scanner goroutine exits
-		// when the child's stdout pipe closes.
-		_ = t.stdin.Close()
+		// The pipe is now out of sync (a response may still
+		// arrive for a request nobody waits for), so the
+		// transport is closed and the child reaped. It used to
+		// close stdin only, leaving a transport that failed every
+		// later call with "file already closed" and a child that
+		// lived until session end.
+		if t.closed.CompareAndSwap(false, true) {
+			go t.terminate()
+		}
 		return nil, ctx.Err()
 	}
 }

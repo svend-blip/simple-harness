@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/svend-blip/simple-harness/internal/tools"
 )
@@ -80,10 +81,38 @@ var mutationTools = map[string]bool{
 	"shell":       true,
 }
 
+// mutationMu guards mutationTools: registrations happen at session
+// start (MCP wiring), decisions happen on every dispatch.
+var mutationMu sync.RWMutex
+
+// RegisterMutationTool marks a tool as a mutation for the policy. The
+// set used to be the three builtins by name, so every tool an MCP
+// server provided — its own write_file among them — passed read_only.
+// The MCP wiring registers a server's tools unless the server is
+// declared read_only.
+func RegisterMutationTool(name string) {
+	mutationMu.Lock()
+	defer mutationMu.Unlock()
+	mutationTools[name] = true
+}
+
+// UnregisterMutationTool removes a registration (tests, or a registry
+// rebuilt within one process).
+func UnregisterMutationTool(name string) {
+	mutationMu.Lock()
+	defer mutationMu.Unlock()
+	if name == "write_file" || name == "apply_patch" || name == "shell" {
+		return
+	}
+	delete(mutationTools, name)
+}
+
 // IsMutationTool reports whether the named tool is on the mutationTools
 // list. Used by tests and by future Run-time tools that need to know
 // whether their mutation will pass the policy step.
 func IsMutationTool(name string) bool {
+	mutationMu.RLock()
+	defer mutationMu.RUnlock()
 	return mutationTools[name]
 }
 
@@ -141,7 +170,7 @@ func NewPolicy(mode Mode) Policy {
 // Normalize because the seam's interface is just Decision; the
 // duplication is small, deterministic, and tested).
 func (p Policy) Decide(_ context.Context, call tools.Call, ws tools.Workspace) tools.Decision {
-	isMutation := mutationTools[call.Name]
+	isMutation := IsMutationTool(call.Name)
 
 	switch p.Mode {
 	case READ_ONLY:

@@ -45,6 +45,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
+	"time"
 
 	"github.com/svend-blip/simple-harness/internal/config"
 	"github.com/svend-blip/simple-harness/internal/mcp"
@@ -114,6 +116,15 @@ func cmdMcpInit(ctx context.Context, cfg *config.Config, mode perm.Mode, registr
 
 	policy := perm.NewPolicy(mode)
 	manager := mcp.NewManager(registry, perm.Authorize, policy, ws)
+	// A tool call gets the deadline a shell command gets; the http
+	// transport had a fixed 30 s client timeout that ignored
+	// configuration, and stdio had none.
+	manager.CallTimeout = cfg.ShellTimeout
+	// Startup listing is bounded on its own: a server that hangs on
+	// initialize used to hang the harness before any signal handler
+	// was installed.
+	listCtx, cancelList := context.WithTimeout(ctx, mcpStartupTimeout)
+	defer cancelList()
 
 	totalRegistered := 0
 	for _, srvCfg := range cfg.MCPServers {
@@ -134,6 +145,8 @@ func cmdMcpInit(ctx context.Context, cfg *config.Config, mode perm.Mode, registr
 			Command:    srvCfg.Command,
 			Permission: srvCfg.Permission,
 			Allowlist:  srvCfg.Allowlist,
+			APIKey:     srvCfg.APIKey,
+			Headers:    srvCfg.Headers,
 		}
 
 		// Per-server transport factory. httpTransport is created
@@ -146,10 +159,11 @@ func cmdMcpInit(ctx context.Context, cfg *config.Config, mode perm.Mode, registr
 		var transport mcp.Transport
 		switch srvCfg.Transport {
 		case "http":
-			transport = mcp.NewHTTPTransport(srvCfg.Endpoint)
+			transport = mcp.NewHTTPTransport(srvCfg.Endpoint,
+				mcp.WithBearerToken(srvCfg.APIKey), mcp.WithHeaders(srvCfg.Headers))
 		case "stdio":
 			var err error
-			transport, err = mcp.NewStdioTransport(ctx, srvCfg.Command)
+			transport, err = mcp.NewStdioTransport(ctx, srvCfg.Command, mcp.WithStderr(os.Stderr))
 			if err != nil {
 				manager.Close()
 				return nil, totalRegistered, fmt.Errorf("mcp: server %q: %w", srvCfg.Name, err)
@@ -176,12 +190,41 @@ func cmdMcpInit(ctx context.Context, cfg *config.Config, mode perm.Mode, registr
 		// wire-shape pin). On listing failure, release the
 		// transports wired so far (they are about to be leaked
 		// anyway since the harness will exit 2).
-		before := len(registry.Names())
-		if err := manager.AddServer(ctx, mcpSrv, transport); err != nil {
+		before := registry.Names()
+		if err := manager.AddServer(listCtx, mcpSrv, transport); err != nil {
 			manager.Close()
 			return nil, totalRegistered, err
 		}
-		totalRegistered += len(registry.Names()) - before
+		added := newNames(before, registry.Names())
+		totalRegistered += len(added)
+		// A server's tools are mutations for the permission policy
+		// unless the server is declared read_only: the policy knew
+		// only the three builtins by name, so a server's write_file
+		// ran under read_only.
+		if srvCfg.Permission != "read_only" {
+			for _, name := range added {
+				perm.RegisterMutationTool(name)
+			}
+		}
 	}
 	return manager, totalRegistered, nil
+}
+
+// mcpStartupTimeout bounds the initialize + tools/list exchange with
+// each declared server at session start.
+const mcpStartupTimeout = 30 * time.Second
+
+// newNames returns the names in after that are not in before.
+func newNames(before, after []string) []string {
+	seen := make(map[string]bool, len(before))
+	for _, n := range before {
+		seen[n] = true
+	}
+	var out []string
+	for _, n := range after {
+		if !seen[n] {
+			out = append(out, n)
+		}
+	}
+	return out
 }

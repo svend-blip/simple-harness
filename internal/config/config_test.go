@@ -474,3 +474,62 @@ func TestUserConfigIsNotAlsoTheProjectConfig(t *testing.T) {
 		t.Fatalf("findProjectConfig = %q,%v want %q,true", got, ok, projPath)
 	}
 }
+
+// TestTheContextSectionIsLoadedFromAFile — the `context` block was
+// documented, validated in unit tests that unmarshalled straight into
+// Config, and never read by the loader: a file saying
+// `policy: unbounded` or `model_limit: 131072` loaded as the zero
+// value, and the only working knob was `run --context-limit`.
+func TestTheContextSectionIsLoadedFromAFile(t *testing.T) {
+	home := t.TempDir()
+	userPath := filepath.Join(home, ".simple-harness", "config.json")
+	if err := os.MkdirAll(filepath.Dir(userPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(userPath, []byte(`{"context":{"policy":"unbounded","model_limit":131072,"keep_recent_turns":12,"compaction":false}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadFrom(home, t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("loadFrom: %v", err)
+	}
+	if cfg.Context.Bounded() {
+		t.Error("policy: unbounded was not loaded")
+	}
+	if cfg.Context.ModelLimit != 131072 || cfg.Context.KeepRecentTurns != 12 {
+		t.Errorf("context = %+v", cfg.Context)
+	}
+	if cfg.Context.CompactionEnabled() || !cfg.Context.PruningEnabled() {
+		t.Errorf("compaction=false / pruning absent not honoured: %+v", cfg.Context)
+	}
+	// The project layer overrides a field without clearing the rest.
+	project := filepath.Join(t.TempDir(), "proj")
+	if err := os.MkdirAll(filepath.Join(project, ".simple-harness"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, ".simple-harness", "config.json"), []byte(`{"context":{"model_limit":8192}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = loadFrom(home, project, nil)
+	if err != nil {
+		t.Fatalf("loadFrom: %v", err)
+	}
+	if cfg.Context.ModelLimit != 8192 || cfg.Context.Bounded() || cfg.Context.KeepRecentTurns != 12 {
+		t.Errorf("project overlay: %+v", cfg.Context)
+	}
+	// Environment beats the files for the two knobs it exposes.
+	cfg, err = loadFrom(home, project, []string{"SIMPLE_HARNESS_CONTEXT_MODEL_LIMIT=4096", "SIMPLE_HARNESS_CONTEXT_POLICY=bounded"})
+	if err != nil {
+		t.Fatalf("loadFrom: %v", err)
+	}
+	if cfg.Context.ModelLimit != 4096 || !cfg.Context.Bounded() {
+		t.Errorf("env overlay: %+v", cfg.Context)
+	}
+	var out bytes.Buffer
+	if err := cfg.Render(&out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"model_limit": 4096`) {
+		t.Errorf("config show does not render the context section:\n%s", out.String())
+	}
+}

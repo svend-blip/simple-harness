@@ -123,9 +123,10 @@ func TestSchemaFromMap_AdditionalPropertiesTrue(t *testing.T) {
 }
 
 // TestSchemaFromMap_AdditionalPropertiesObjectForm: JSON Schema's
-// object form (additionalProperties: { ... }) is not represented in
-// tools.Schema. The conversion treats any non-boolean as false (the
-// strict default). This pins the conversion's documented leniency.
+// object form (additionalProperties: { ... }) allows extra properties
+// of that shape. tools.Schema cannot express the shape, so the
+// honest approximation is open: treating it as strict rejected
+// arguments the server would have accepted.
 func TestSchemaFromMap_AdditionalPropertiesObjectForm(t *testing.T) {
 	in := map[string]interface{}{
 		"additionalProperties": map[string]interface{}{"type": "string"},
@@ -134,8 +135,8 @@ func TestSchemaFromMap_AdditionalPropertiesObjectForm(t *testing.T) {
 	if err != nil {
 		t.Fatalf("schemaFromMap(...) error = %v, want nil", err)
 	}
-	if s.AdditionalProperties {
-		t.Fatalf("AdditionalProperties = true, want false (object form is treated as strict-default)")
+	if !s.AdditionalProperties {
+		t.Fatalf("AdditionalProperties = false, want true (object form allows extra properties)")
 	}
 }
 
