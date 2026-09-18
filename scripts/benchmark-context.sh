@@ -52,6 +52,14 @@ run_arm() { # run_arm <label> <extra-flags...>
     end=$(date +%s.%N)
     python3 scripts/benchmark-report.py "$label" "$sidecar" "$rc" \
         "$(python3 -c "print(f'{$end-$start:.1f}')")" "$LIMIT"
+    if [ "$rc" -ne 0 ]; then
+        # A failed arm names its cause: the harness's stderr and the
+        # last status it emitted, so the failure is a finding rather
+        # than a number.
+        printf '  %s stderr: %s\n' "$label" "$(tail -c 400 "$TMP/$label.err" | tr '\n' ' ')"
+        printf '  %s last status: %s\n' "$label" \
+            "$(grep '"event":"status"' "$sidecar" | tail -1 | cut -c1-300)"
+    fi
 }
 
 echo "§25 benchmark — $(date '+%Y-%m-%d %H:%M:%S')"

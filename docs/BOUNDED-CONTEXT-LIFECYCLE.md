@@ -202,24 +202,55 @@ code, all read out of the harness's own JSONL sidecar.
 The figure that matters is the largest single prompt: with the lifecycle it
 stays under the budget, and without it, it does not.
 
-Measured 2026-09-17 against `qwen3.6-27b-64k` through Ollama, a 16 384-token
-limit, twelve turns, the task being to read this repository one file at a time:
+Measured 2026-09-18 against `qwen3.6-27b-64k` through Ollama (served window
+65 536, RTX 5090), a 16 384-token limit, twelve turns, the task being to read
+this repository one file at a time. `calls` counts every model request,
+compaction inferences included; `compact` is how many of them were
+compactions:
 
-| arm | model calls | input tokens | largest prompt | reductions |
-|---|---:|---:|---:|---:|
-| bounded | 8 | 62 047 | 10 853 | 2 |
-| baseline | 10 | 171 634 | **46 079** | 0 |
+| arm | calls | compact | input tokens | largest prompt | reductions | runtime | exit |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| bounded | 17 | 4 | 90 903 | 12 315 | 5 | 149.5 s | 1 (max turns) |
+| baseline | 11 | 0 | 419 451 | **64 766** | 0 | 59.6 s | 0 |
 
-The baseline's largest prompt was 2.8x the stated limit and it completed
-anyway, because that model's real window is 64k. That is the failure this
-addendum is about: an unbounded harness works until the day the numbers line
-up differently, and then it does not.
+What the numbers say:
 
-The bounded arm used 64% fewer input tokens and never exceeded its budget. It
-also failed at turn 8 on the first measurement, which is how the
-window-narrowing reduction came to exist — see §14 step 12 and
-`RecentWindowNarrowings`. The re-measurement after that fix is outstanding:
-the GPU on the benchmark host stopped responding partway through it.
+- The bounded arm never left its limit: 12 315 is the largest prompt the
+  runtime counted, against a 16 384 limit and an 11 264 active budget. The
+  runtime's count exceeds the harness's estimate by about 9 % on Go source
+  (the estimator is four characters per token; code tokenizes denser),
+  which is what the safety and generation reserves are for — they
+  absorbed it. The baseline's largest prompt was 64 766 tokens against a
+  65 536-token served window: one more file and the runtime would have
+  refused it. That is the failure this addendum is about.
+- 78 % fewer input tokens in the bounded arm.
+- Compaction overhead: four of seventeen model calls were compaction
+  inferences; the bounded arm took 2.5x the baseline's wall time, part of
+  it compaction, part of it the extra turns below.
+- The bounded arm did not finish the task within twelve turns: with large
+  files cut to excerpts it re-read them in ranges, which costs turns. The
+  baseline finished in ten. Bounding trades turns for staying inside the
+  window; a task that needs whole large files needs a turn budget sized
+  for that.
+- The first bounded run of the day failed at its second call with
+  "cannot fit": one 15k-token file read into the 11k budget. That is the
+  measurement that produced step 7 (oversized results are cut to
+  excerpts); the table above is the run after it.
+
+A second measurement with twenty-four turns was aborted by the benchmark
+host: the GPU stopped responding partway through ("Unable to determine
+the device handle for GPU0"), for the second time on this workload in two
+days; Ollama reloaded the model on the CPU and the baseline arm ran into
+its request timeout. The bounded arm had made six calls inside its budget
+when the runtime failed. The turn-completion question therefore remains
+measured only at twelve turns.
+
+Not measured: the same workload through DeepSeek Harness (§25's optional
+behavioural reference — DSH here is an interactive web harness driven
+through dsh-bridge, not a headless run comparable to this script), and
+resume/continue across invocations, which the harness does not implement
+(a new session is a new composition; durable history is persisted, not
+replayed).
 
 `scripts/smoketest-context.sh` is the faster check — twelve acceptance
 criteria against the built binary, using a stub endpoint, needing no model.
