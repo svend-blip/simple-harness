@@ -237,13 +237,25 @@ What the numbers say:
   measurement that produced step 7 (oversized results are cut to
   excerpts); the table above is the run after it.
 
-A second measurement with twenty-four turns was aborted by the benchmark
-host: the GPU stopped responding partway through ("Unable to determine
-the device handle for GPU0"), for the second time on this workload in two
-days; Ollama reloaded the model on the CPU and the baseline arm ran into
-its request timeout. The bounded arm had made six calls inside its budget
-when the runtime failed. The turn-completion question therefore remains
-measured only at twelve turns.
+A first attempt at twenty-four turns was aborted by the benchmark host:
+the GPU stopped responding partway through ("Unable to determine the
+device handle for GPU0"), for the second time on this workload in two
+days. After a reboot the measurement ran to completion the same evening
+(2026-09-18, same model, runtime and limit; GPU telemetry alongside:
+peak 566 W of a 575 W limit, 80 °C, no fault):
+
+| arm | calls | compact | input tokens | largest prompt | reductions | runtime | exit |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| bounded | 19 | 4 | 127 299 | 12 321 | 6 | 163.0 s | **0** |
+| baseline | 10 | 0 | 378 493 | **62 526** | 0 | 56.4 s | 0 |
+
+With a turn budget sized for it, the bounded arm finishes the task: exit
+0 after fifteen working turns and four compactions, largest prompt
+12 321 — the same ceiling as at twelve turns, so more turns did not
+grow the context. 66 % fewer input tokens than the baseline, at 2.9x its
+wall time. The baseline again ended within 3 010 tokens of the served
+window. The twelve-turn exit 1 above was the turn budget, not the
+lifecycle.
 
 Not measured: the same workload through DeepSeek Harness (§25's optional
 behavioural reference — DSH here is an interactive web harness driven
