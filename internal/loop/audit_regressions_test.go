@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/svend-blip/simple-harness/internal/ctxlife"
 	"github.com/svend-blip/simple-harness/internal/event"
 	"github.com/svend-blip/simple-harness/internal/mcp"
 	"github.com/svend-blip/simple-harness/internal/model"
@@ -413,3 +414,34 @@ func (r renamed) Call(ctx context.Context, name string, args map[string]interfac
 	return r.inner.Call(ctx, name, args)
 }
 func (r renamed) Close() error { return nil }
+
+// TestARunWhoseToolResultsExceedTheBudgetStillCompletes — §24.12 with
+// results bigger than the budget: every request stays within budget
+// and the run completes, instead of failing at the first oversized
+// read (the §25 benchmark failed at call 2 on exactly this).
+func TestARunWhoseToolResultsExceedTheBudgetStillCompletes(t *testing.T) {
+	const limit = 8192
+	srv, sizes := toolCallingServer(t, 6)
+	t.Cleanup(srv.Close)
+	reg := tools.NewRegistry()
+	reg.Register(&echoTool{size: 7000})
+	client := model.NewClient(model.Options{BaseURL: srv.URL, Model: "qwen", RequestTimeout: 10 * time.Second})
+	var sidecar, stdout bytes.Buffer
+	r := New(Config{
+		Model: model.Options{BaseURL: srv.URL, Model: "qwen"}, Workspace: t.TempDir(),
+		Permission: "READ_ONLY", System: HarnessSystem, Tools: reg, MaxTurns: 8,
+		ContextPolicy: ContextPolicy{ModelLimit: limit},
+	}, client, event.NewEmitter(&sidecar, "oversized"), &stdout)
+	if _, err := r.RunAgent(context.Background(), "read big things"); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	budget := ctxlife.DefaultBudget(limit).Active()
+	for i, n := range sizes() {
+		if n > budget {
+			t.Errorf("request %d sent %d tokens against %d", i+1, n, budget)
+		}
+	}
+	if r.ContextManager().Stats.ToolResultsTruncated == 0 {
+		t.Error("no result was truncated; the fixture proves nothing")
+	}
+}

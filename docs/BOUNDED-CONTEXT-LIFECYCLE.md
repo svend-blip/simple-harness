@@ -32,9 +32,15 @@ Before each model call:
 6. Otherwise narrow the recent verbatim window, halving it down to a floor
    of two messages and pruning at each step, when the alternative is
    failing a run that could continue.
-7. Otherwise fail explicitly, naming what could not be reduced.
+7. Otherwise cut any single tool result larger than a quarter of the
+   budget to an excerpt — its head and tail around a marker naming how
+   much was cut and that the full result is in the session history. A
+   15k-token file read into an 11k-token budget sits in the window's
+   floor where nothing above can touch it; the model reads it again in
+   ranges instead of the run ending.
+8. Otherwise fail explicitly, naming what could not be reduced.
 
-Steps 4 to 6 never touch pinned context. The view fitted for one call is
+Steps 4 to 7 never touch pinned context. The view fitted for one call is
 carried forward to the next, so a reduction is made once, not redone every
 turn.
 

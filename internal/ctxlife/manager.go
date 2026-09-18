@@ -57,6 +57,7 @@ type Stats struct {
 	Inferences             int
 	Reductions             int
 	ToolResultsPruned      int
+	ToolResultsTruncated   int
 	TokensPruned           int
 	Compactions            int
 	TokensCompacted        int
@@ -434,7 +435,97 @@ func (m *Manager) Fit(messages []model.Message) ([]model.Message, Accounting, er
 		}
 	}
 
+	// §14 step 12, the last safe reduction: a single tool result can
+	// be larger than the whole budget (a 15k-token file read into a
+	// 11k-token budget, measured 2026-09-18), and the recent window's
+	// floor keeps it verbatim, so nothing above could touch it. The
+	// oversized result is cut to an excerpt — head and tail, with a
+	// marker saying what was cut and that the full result is in the
+	// session history — rather than failing a run that can continue
+	// by reading the file again in ranges.
+	if m.PruneToolResults {
+		if truncated, n, tokens := m.truncateOversized(working); n > 0 {
+			reduced = true
+			working = truncated
+			m.Stats.ToolResultsTruncated += n
+			m.Stats.TokensPruned += tokens
+			acct = m.Account(working)
+			if acct.WithinBudget() {
+				return working, acct, nil
+			}
+		}
+	}
+
 	return nil, acct, m.cannotFit(acct)
+}
+
+// truncatedMarker is the note left in the middle of a cut tool result.
+const truncatedMarker = "[... tool result truncated from ~%d tokens to fit the active context; " +
+	"the full result is in the session history — read it again in smaller ranges ...]"
+
+// oversizedCap is the largest a single tool result may be in the
+// active context before the last-resort truncation applies: a quarter
+// of the active budget, never below 256 tokens.
+func (m *Manager) oversizedCap() int {
+	cap := m.Budget.Active() / 4
+	if cap < 256 {
+		cap = 256
+	}
+	return cap
+}
+
+// truncateOversized cuts every non-pinned tool result larger than the
+// cap to a head-and-tail excerpt. Deterministic, no inference. Returns
+// the new list, the number of results cut and the tokens saved.
+func (m *Manager) truncateOversized(messages []model.Message) ([]model.Message, int, int) {
+	cap := m.oversizedCap()
+	prios := m.Classify(messages)
+	var out []model.Message
+	count, saved := 0, 0
+	for i, msg := range messages {
+		n := MessageTokens(msg)
+		if prios[i] == Pinned || msg.Role != "tool" || n <= cap ||
+			isPruned(msg.Content) || isTruncated(msg.Content) {
+			if out != nil {
+				out = append(out, msg)
+			}
+			continue
+		}
+		if out == nil {
+			out = make([]model.Message, 0, len(messages))
+			out = append(out, messages[:i]...)
+		}
+		replacement := msg
+		replacement.Content = excerpt(msg.Content, cap, contextpkg.Estimate(msg.Content))
+		out = append(out, replacement)
+		count++
+		saved += n - MessageTokens(replacement)
+	}
+	if out == nil {
+		return messages, 0, 0
+	}
+	return out, count, saved
+}
+
+// excerpt keeps the first ~60% and the last ~30% of what the cap
+// allows, in characters (four per estimated token), around the marker.
+func excerpt(content string, capTokens, originalTokens int) string {
+	budgetChars := capTokens * 4
+	marker := fmt.Sprintf(truncatedMarker, originalTokens)
+	budgetChars -= len(marker) + 2
+	if budgetChars < 200 {
+		budgetChars = 200
+	}
+	head := budgetChars * 6 / 10
+	tail := budgetChars * 3 / 10
+	if head+tail >= len(content) {
+		return content
+	}
+	return content[:head] + "\n" + marker + "\n" + content[len(content)-tail:]
+}
+
+func isTruncated(content string) bool {
+	return strings.Contains(content, "[... tool result truncated from ~")
 }
 
 // minRecent is the floor the recent window will not go below.

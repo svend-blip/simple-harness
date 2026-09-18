@@ -879,9 +879,12 @@ func TestNarrowingLeavesTheConfiguredWindowUnchangedForTheNextInference(t *testi
 
 func TestTheWindowIsNeverNarrowedBelowItsFloor(t *testing.T) {
 	// Every message is enormous, so no width fits and the floor is
-	// reached. A model that cannot see what it just did cannot
-	// continue doing it, so this must fail rather than empty the
-	// window.
+	// reached. The floor is not emptied: a model that cannot see what
+	// it just did cannot continue doing it. Before §14 step 12's last
+	// reduction existed this had to fail; now the floor's results are
+	// cut to excerpts (head, marker, tail) — the model still sees what
+	// it just did, in part, and the full results stay in the session
+	// history — and the run continues.
 	c := &fixedCompactor{summary: "x"}
 	m := New(4096)
 	m.KeepRecentTurns = 8
@@ -892,12 +895,27 @@ func TestTheWindowIsNeverNarrowedBelowItsFloor(t *testing.T) {
 		in = append(in, callAndResult(fmt.Sprintf("c%d", i), 4000)...)
 	}
 	in = append(in, user("task"))
-	_, _, err := m.Fit(in)
-	if err == nil {
-		t.Fatal("the window was narrowed past its floor")
+	out, acct, err := m.Fit(in)
+	if err != nil {
+		t.Fatalf("Fit failed although the floor's results could be cut to excerpts: %v", err)
 	}
-	if !strings.Contains(err.Error(), "will not narrow below 2") {
-		t.Fatalf("the diagnostic does not say where it stopped: %v", err)
+	if !acct.WithinBudget() {
+		t.Fatalf("%d tokens against %d", acct.Total, acct.Budget)
+	}
+	if m.Stats.ToolResultsTruncated == 0 {
+		t.Fatal("nothing was truncated")
+	}
+	// The floor's most recent result is an excerpt of itself, not a
+	// pruned placeholder: the window was narrowed to the floor and no
+	// further.
+	var lastTool model.Message
+	for _, msg := range out {
+		if msg.Role == "tool" {
+			lastTool = msg
+		}
+	}
+	if isPruned(lastTool.Content) || !isTruncated(lastTool.Content) {
+		t.Fatalf("the floor's last result is %.60q, want an excerpt", lastTool.Content)
 	}
 }
 

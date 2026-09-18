@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -150,5 +151,44 @@ func TestModelCompactorReportsItsRequests(t *testing.T) {
 	}
 	if usage == nil || usage.PromptTokens != 40 {
 		t.Errorf("OnUsage got %+v, want the reported usage", usage)
+	}
+}
+
+// TestAnOversizedRecentToolResultIsTruncatedRatherThanFatal — a tool
+// result larger than the whole budget sits in the recent window's
+// floor, where pruning, compaction and narrowing cannot touch it; the
+// run used to fail with "cannot fit". The last-resort reduction cuts
+// it to an excerpt that names what was cut. The caller's list is
+// untouched.
+func TestAnOversizedRecentToolResultIsTruncatedRatherThanFatal(t *testing.T) {
+	m := New(1000)
+	m.Budget = Budget{ModelLimit: 1000, GenerationReserve: 100, SafetyReserve: 100} // active 800
+	msgs := []model.Message{sys(filler(20)), user(filler(10)),
+		{Role: "assistant", ToolCalls: []model.ToolCall{{ID: "c1", Name: "read_file", Arguments: map[string]any{"path": "big"}}}},
+		toolResult("c1", "HEAD-"+filler(2000)+"-TAIL"),
+	}
+	out, acct, err := m.Fit(msgs)
+	if err != nil {
+		t.Fatalf("Fit: %v", err)
+	}
+	if !acct.WithinBudget() {
+		t.Fatalf("%d tokens against %d", acct.Total, acct.Budget)
+	}
+	if m.Stats.ToolResultsTruncated != 1 {
+		t.Errorf("truncated = %d, want 1", m.Stats.ToolResultsTruncated)
+	}
+	last := out[len(out)-1]
+	if !strings.HasPrefix(last.Content, "HEAD-") || !strings.HasSuffix(last.Content, "-TAIL") || !isTruncated(last.Content) {
+		t.Errorf("excerpt lost its head, tail or marker: %.60s ... %.40s", last.Content, last.Content[len(last.Content)-40:])
+	}
+	if last.ToolCallID != "c1" {
+		t.Error("the tool_call_id must survive truncation")
+	}
+	if isTruncated(msgs[3].Content) {
+		t.Error("the caller's message was modified")
+	}
+	// Refitting the fitted view does not cut again.
+	if _, _, err := m.Fit(out); err != nil || m.Stats.ToolResultsTruncated != 1 {
+		t.Errorf("second Fit: err=%v truncated=%d", err, m.Stats.ToolResultsTruncated)
 	}
 }

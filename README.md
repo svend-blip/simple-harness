@@ -183,7 +183,8 @@ model's context limit, so a long session does not grow until the runtime
 refuses it. Older tool results are replaced with placeholders, then older
 conversation is compacted into a pinned working summary; instructions,
 skills and the current task are never touched to make room. The recent
-verbatim window is narrowed, down to a floor of two messages, only when
+verbatim window is narrowed, down to a floor of two messages, and a single
+tool result larger than the budget allows is cut to an excerpt, only when
 the alternative is failing a run that could continue — and if the budget
 still cannot be met the run fails and says why.
 

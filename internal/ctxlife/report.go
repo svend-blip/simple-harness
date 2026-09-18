@@ -54,6 +54,7 @@ func (m *Manager) Report(a Accounting) string {
 	w("Inferences", m.Stats.Inferences)
 	w("Reductions", m.Stats.Reductions)
 	w("Tool results pruned", m.Stats.ToolResultsPruned)
+	w("Tool results truncated", m.Stats.ToolResultsTruncated)
 	w("Tokens pruned", m.Stats.TokensPruned)
 	w("Compactions", m.Stats.Compactions)
 	w("Tokens compacted", m.Stats.TokensCompacted)
@@ -77,6 +78,10 @@ func (m *Manager) Summary(a Accounting) string {
 	if m.Stats.ToolResultsPruned > 0 {
 		did = append(did, fmt.Sprintf("%d tool results pruned (~%d tokens)",
 			m.Stats.ToolResultsPruned, m.Stats.TokensPruned))
+	}
+	if m.Stats.ToolResultsTruncated > 0 {
+		did = append(did, fmt.Sprintf("%d oversized tool results truncated",
+			m.Stats.ToolResultsTruncated))
 	}
 	if m.Stats.Compactions > 0 {
 		did = append(did, fmt.Sprintf("%d compactions (~%d tokens)",
