@@ -257,12 +257,55 @@ wall time. The baseline again ended within 3 010 tokens of the served
 window. The twelve-turn exit 1 above was the turn budget, not the
 lifecycle.
 
-Not measured: the same workload through DeepSeek Harness (§25's optional
-behavioural reference — DSH here is an interactive web harness driven
-through dsh-bridge, not a headless run comparable to this script), and
-resume/continue across invocations, which the harness does not implement
-(a new session is a new composition; durable history is persisted, not
-replayed).
+### DeepSeek Harness as the behavioural reference (§25, optional)
+
+Measured 2026-09-18, the same task and the same workspace through DSH
+0.1.5-rc.1, driven over dsh-bridge, and through both arms of this
+benchmark — all three against the model DSH is configured for
+(`Qwen3.8-Flash-Next-Abliterated-NVFP4` on FreeToken, served window
+131 072), twenty-four turns:
+
+| harness | model calls | input tokens | largest prompt | bound | reductions | runtime | task |
+|---|---:|---:|---:|---|---|---:|---|
+| simple-harness, bounded | 22 | 220 477 | 12 629 | 16 384 (flag) | 5 prunings, 0 compactions | 144.0 s | completed |
+| simple-harness, unbounded | 16 | 765 766 | 69 901 | none | 0 | 124.3 s | completed |
+| DSH | 18 | 1 066 462 | 97 838 | 131 072 (window) | 8 prunings (61 981 tokens shadowed), 0 summaries | 192.0 s | completed |
+
+DSH writes no token counts to its session log, so its prompt sizes were
+read from the runtime: FreeToken's scheduler journal logs every prefill
+with its new and cached tokens (`scripts/freetoken-journal-prompts.py`).
+The instrument was calibrated first against the two simple-harness arms,
+whose own sidecar carries the runtime's usage: 38 calls, 986 243 input
+tokens, largest prompt 69 901 — the journal reproduced all three figures
+exactly. DSH's step, tool-call and pruning counts are from its own log;
+its 19th request, a 239-token session-title call, is left out.
+
+What the reference shows:
+
+- **Same mechanism, different bound.** DSH let the prompt grow to 97 838
+  tokens — 75 % of the served window — and then shadowed old tool
+  results in one step, down to 35 696, and grew again. No summary
+  compaction was needed in eighteen steps. That is this lifecycle's
+  pruning stage, triggered relative to the model's window rather than to
+  a declared limit. The bounded arm here did the same five times under a
+  16 384 limit and also needed no compaction on this model.
+- **The bound is what the tokens cost.** All three finished the task.
+  DSH spent 4.8x the bounded arm's input tokens, the unbounded harness
+  3.5x. DSH's floor is also higher: its first prompt is 16 617 tokens
+  (system prompt, tool set, scope-mcp) against 3 730 here — more than
+  the bounded arm's whole limit, so DSH could not have run under it.
+- **Not like for like on the limit.** DSH takes its bound from the
+  configured context window (131 072 in `~/.dsh/settings.yaml`), which
+  was left as the operator has it. The comparison is of behaviour at each
+  harness's own bound, not of two harnesses at 16 384.
+- Wall time: on FreeToken the bounded arm took 1.16x the unbounded
+  arm's time, with no compaction inferences; on Ollama with
+  `qwen3.6-27b` (above) it took 2.9x, four of its calls being
+  compactions. The cause of the difference was not isolated.
+
+Not measured: resume/continue across invocations, which the harness does
+not implement (a new session is a new composition; durable history is
+persisted, not replayed).
 
 `scripts/smoketest-context.sh` is the faster check — twelve acceptance
 criteria against the built binary, using a stub endpoint, needing no model.
