@@ -77,4 +77,19 @@ type Message struct {
 	Timestamp time.Time `json:"timestamp"`
 	Role      string    `json:"role"`
 	Content   string    `json:"content"`
+	// ToolCalls is present on an assistant message that called
+	// tools; ToolCallID on a tool message, naming the call it
+	// answers. Both are omitted on plain messages, so the shape of
+	// a user/assistant line is unchanged.
+	ToolCalls  []ToolCallRecord `json:"tool_calls,omitempty"`
+	ToolCallID string           `json:"tool_call_id,omitempty"`
+}
+
+// ToolCallRecord is one tool call as persisted on an assistant
+// message: the id the follow-up tool message refers to, the tool
+// name, and the decoded arguments.
+type ToolCallRecord struct {
+	ID        string         `json:"id"`
+	Name      string         `json:"name"`
+	Arguments map[string]any `json:"arguments"`
 }

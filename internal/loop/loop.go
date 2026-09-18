@@ -124,6 +124,16 @@ type Config struct {
 	// no configuration at all therefore still bounds its
 	// context, which is what §17 asks for.
 	ContextPolicy ContextPolicy
+
+	// OnMessage, when set, is called for every message RunAgent
+	// appends to the conversation after the initial composition:
+	// each assistant message (with its tool calls and the text
+	// streamed alongside them), each tool result, and the final
+	// assistant text. It is the seam through which the cmd persists
+	// the execution history — the durable session record has to be
+	// what was actually exchanged, not the user prompt and a
+	// concatenation of the assistant's text.
+	OnMessage func(model.Message)
 }
 
 // ContextPolicy is the addendum §17 configuration surface. Every
@@ -382,11 +392,12 @@ func (r *Run) RunOne(ctx context.Context, prompt string) (string, error) {
 	// (handoff 036); RunOne calls it once per RunOne invocation.
 	r.PopulateLedger(prompt)
 
-	advertisedTools, advertisedToolChoice := toolsToChatRequestTools(r.cfg.Tools)
+	// RunOne is single-turn and never dispatches a tool call, so it
+	// advertises no tools. It used to advertise the registry, and a
+	// model that answered with a tool call had that answer silently
+	// dropped: the turn completed with empty output and exit 0.
 	err := r.client.ChatStream(ctx, model.ChatRequest{
-		Messages:   ComposeMessages(r.cfg, prompt),
-		Tools:      advertisedTools,
-		ToolChoice: advertisedToolChoice,
+		Messages: ComposeMessages(r.cfg, prompt),
 	}, onDelta)
 
 	if err != nil {
@@ -755,6 +766,19 @@ func (r *Run) RunAgent(ctx context.Context, prompt string) (string, error) {
 		accumulatedText strings.Builder
 		streamed        bool
 	)
+	// active is the view of history the manager last fitted. Later
+	// messages are appended to both, and Fit works from active, so
+	// a reduction made on one turn is not redone from scratch on
+	// the next (which re-pruned, and re-compacted at the cost of an
+	// extra inference, on every turn once over budget).
+	active := history
+	record := func(m model.Message) {
+		history = append(history, m)
+		active = append(active, m)
+		if r.cfg.OnMessage != nil {
+			r.cfg.OnMessage(m)
+		}
+	}
 
 	// Pre-build the workspace + policy once per RunAgent (the
 	// workspace path is stable; the policy is stable for the
@@ -808,6 +832,10 @@ func (r *Run) RunAgent(ctx context.Context, prompt string) (string, error) {
 
 		var perIndexAccum map[int]*model.ToolCall
 		var firstNonEmpty bool
+		// The text streamed in THIS turn: it goes on the assistant
+		// message with the turn's tool calls (or is the final
+		// response), while accumulatedText is what the caller gets.
+		var turnText strings.Builder
 
 		onDelta := func(ev model.StreamEvent) error {
 			if !firstNonEmpty && (ev.Delta != "" || ev.FinishReason != "" ||
@@ -823,6 +851,7 @@ func (r *Run) RunAgent(ctx context.Context, prompt string) (string, error) {
 					return err
 				}
 				accumulatedText.WriteString(ev.Delta)
+				turnText.WriteString(ev.Delta)
 				if err := r.em.AssistantStream(ev.Delta); err != nil {
 					return err
 				}
@@ -860,9 +889,8 @@ func (r *Run) RunAgent(ctx context.Context, prompt string) (string, error) {
 		// wire; the durable history the caller accumulates, and
 		// whatever the session log persists, are untouched
 		// (addendum §3, §20).
-		active := history
 		if r.ctxmgr != nil {
-			fitted, acct, err := r.ctxmgr.Fit(history)
+			fitted, acct, err := r.ctxmgr.Fit(active)
 			if err != nil {
 				// §21: the budget cannot be met by any allowed
 				// reduction. Fail explicitly and say why, rather
@@ -907,6 +935,7 @@ func (r *Run) RunAgent(ctx context.Context, prompt string) (string, error) {
 				// sidecar carries the documented sequence.
 				_ = r.em.Status("STREAMING")
 			}
+			record(model.Message{Role: "assistant", Content: turnText.String()})
 			if err := r.em.Status("COMPLETED"); err != nil {
 				return accumulatedText.String(), err
 			}
@@ -951,16 +980,27 @@ func (r *Run) RunAgent(ctx context.Context, prompt string) (string, error) {
 			if !ok || call == nil {
 				continue
 			}
+			if call.ID == "" {
+				// Some runtimes omit the id. The follow-up needs
+				// one on both sides of the pair, or the endpoint
+				// rejects the history the harness built.
+				call.ID = fmt.Sprintf("call_%d_%d", turn, idx)
+			}
 			toolCalls = append(toolCalls, model.ToolCall{
-				Index:     call.Index,
-				ID:        call.ID,
-				Type:      "function",
-				Name:      call.Name,
-				Arguments: call.Arguments,
+				Index:        call.Index,
+				ID:           call.ID,
+				Type:         "function",
+				Name:         call.Name,
+				Arguments:    call.Arguments,
+				ArgumentsRaw: call.ArgumentsRaw,
 			})
 		}
-		history = append(history, model.Message{
+		// The text the model streamed before or between its tool
+		// calls belongs to this message; dropping it left the model
+		// a history in which it had said nothing.
+		record(model.Message{
 			Role:      "assistant",
+			Content:   turnText.String(),
 			ToolCalls: toolCalls,
 		})
 
@@ -1028,7 +1068,7 @@ func (r *Run) RunAgent(ctx context.Context, prompt string) (string, error) {
 				_ = r.em.Completed(1)
 				return accumulatedText.String(), fmt.Errorf("loop: encode tool result for %s: %w", call.Name, encErr)
 			}
-			history = append(history, model.Message{
+			record(model.Message{
 				Role:       "tool",
 				Content:    encoded,
 				ToolCallID: call.ID,

@@ -43,12 +43,14 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/svend-blip/simple-harness/internal/config"
 	"github.com/svend-blip/simple-harness/internal/event"
 	"github.com/svend-blip/simple-harness/internal/loop"
 	"github.com/svend-blip/simple-harness/internal/model"
+	"github.com/svend-blip/simple-harness/internal/path"
 	"github.com/svend-blip/simple-harness/internal/session"
 	"github.com/svend-blip/simple-harness/internal/skill"
 	"github.com/svend-blip/simple-harness/internal/tools/builtins"
@@ -65,10 +67,10 @@ import (
 // controller can decide which mode to invoke.
 const runUsage = `Usage: simple-harness run [flags]
 
-Execute one turn non-interactively and exit. The V1 surface
-is the flag-driven config-error path: the run executes against
-the local model endpoint with no stdin REPL, no multi-turn,
-no tools. Each of those is a future Run per the architecture.
+Execute one task non-interactively and exit: the prompt is sent
+to the model, tool calls are dispatched against the workspace
+under the active permission mode, and the loop continues until
+the model answers without a tool call or --max-turns is reached.
 
 Flags:
   --base-url <url>        base URL of the OpenAI-compatible endpoint
@@ -88,9 +90,7 @@ Flags:
                           at the SCOPE §14 step-3 position. SCOPE §15,
                           SCOPE §16.
   --prompt-file <path>    path to the prompt file; use "-" to read
-                          from stdin (required; the "-" value is
-                          accepted but stdin handling is a future
-                          handoff)
+                          the prompt from stdin (required)
   --system <text>         inline external system/governance prompt
                           (mutually exclusive with --system-file;
                           the resolved value is composed into the
@@ -122,11 +122,8 @@ Flags:
                           Exceeding the limit emits an explicit
                           overflow reason and a completed event
                           with a non-zero exit code (SCOPE §3).
-                          The flag is required because the
-                          run-mode surface dispatches tool calls
-                          via loop.RunAgent (handoff 041);
-                          without it the loop could recurse
-                          unbounded.
+                          0 means the default; a negative value
+                          is a configuration error (exit 2).
 
 Exit codes (SCOPE §28):
   0  clean exit (run-mode validation passed; also returned on a
@@ -231,7 +228,7 @@ func runRun(args []string) int {
 	// run-mode surface (the flag's default value is 8 per
 	// the flag declaration; an explicit --max-turns 0 is
 	// rejected with exit 2).
-	maxTurns := fs.Int("max-turns", 8, "upper bound on the agent's model-request/tool-execution cycles (default: 8 per GOAL §2 deliverable 6). Exceeding the limit emits an explicit overflow reason and completed(exit_code: 1) per SCOPE §3 'exceeding a limit must produce an explicit observable result'. 0 is a configuration error.")
+	maxTurns := fs.Int("max-turns", 8, "upper bound on the agent's model-request/tool-execution cycles (default: 8). Exceeding the limit emits an explicit overflow reason and completed(exit_code: 1) per SCOPE §3 'exceeding a limit must produce an explicit observable result'. 0 means the default; a negative value is a configuration error.")
 
 	if err := fs.Parse(args); err != nil {
 		// flag.ContinueOnError already printed the parse error to
@@ -402,43 +399,33 @@ func runRun(args []string) int {
 		fmt.Fprintf(os.Stderr, "config error: --prompt-file is required\n")
 		return 2
 	}
+	var prompt []byte
 	if *promptFile == "-" {
-		// Stdin prompt handling is a future handoff. For
-		// handoff 024 the flag-parsed config is valid; we
-		// return 0 without reading from stdin so the test
-		// surface (TestRun_StdinPolicy_NonDashSentinel_Returns0)
-		// is not bound to a specific stdin policy. The
-		// decomposition choice is also recorded in the
-		// handoff 022 result file's "Public-surface choices"
-		// subsection. The --system-file check above has already
-		// run, so a missing system file still exits 2 even with
-		// --prompt-file -.
-		return 0
-	}
-	if err := validateReadableFile(*promptFile); err != nil {
-		fmt.Fprintf(os.Stderr, "config error: cannot read prompt-file %q: %v\n", *promptFile, err)
-		return 2
+		// The prompt comes from stdin (SCOPE §5: `cat task.md |
+		// simple-harness run ...`). This used to return 0 without
+		// reading anything — a documented no-op reported as success.
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "internal error: read prompt from stdin: %v\n", err)
+			return 1
+		}
+		prompt = data
+	} else {
+		if err := validateReadableFile(*promptFile); err != nil {
+			fmt.Fprintf(os.Stderr, "config error: cannot read prompt-file %q: %v\n", *promptFile, err)
+			return 2
+		}
+		// Errors that escape the validateReadableFile check (a
+		// TOCTOU race where the file disappears between validation
+		// and read) are exit 1: the config WAS valid at parse time.
+		data, err := os.ReadFile(*promptFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "internal error: read prompt-file: %v\n", err)
+			return 1
+		}
+		prompt = data
 	}
 
-	// Handoff 024's run-execution path: the flag-parsed config
-	// is valid, the prompt file is readable, the system file
-	// (if given) is readable, the workspace is resolved, and
-	// the output mode is one of the two allowed values. Read
-	// the prompt file's full contents into memory and hand off
-	// to runModeExecute for the model-client wiring + loop
-	// invocation + error mapping.
-	//
-	// Errors that escape the existing validateReadableFile
-	// check (e.g. a TOCTOU race where the file disappears
-	// between validation and read) fall through to exit 1
-	// with a SCOPE §28 generic-failure stderr message — the
-	// config WAS valid at parse time, so this is not a config
-	// error.
-	prompt, err := os.ReadFile(*promptFile)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "internal error: read prompt-file: %v\n", err)
-		return 1
-	}
 	return runModeExecute(
 		string(prompt),
 		*baseURL,
@@ -505,7 +492,7 @@ func runRun(args []string) int {
 //  8. Checks r.Ledger().Overflow() if limit > 0 (handoff 038).
 //
 // The function returns the SCOPE §28 exit code.
-func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir, systemText, systemFileContent string, loadedSkill *skill.Skill, limit, maxTurns, contextLimit int) int {
+func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir, systemText, systemFileContent string, loadedSkill *skill.Skill, limit, maxTurns, contextLimit int) (exitCode int) {
 	// Defensive double-check on the mutual-exclusion of --system
 	// and --system-file. runRun already rejects this with exit 2
 	// before this function is reached; the inner check covers any
@@ -530,6 +517,22 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir,
 	// because the tool registry is process-global and config is loaded
 	// per subcommand.
 	builtins.DefaultTimeout = cfg.ShellTimeout
+
+	// MCP servers are wired here, after the flags are parsed and the
+	// workspace is known: doing it before flag parsing made
+	// `run --help` fail with exit 2 when a declared server was down,
+	// and gave the adapters an empty workspace to authorize against.
+	ws, err := path.New(workspace)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config error: workspace %q: %v\n", workspace, err)
+		return 2
+	}
+	if mgr, _, mcpErr := cmdMcpInit(context.Background(), &cfg, activePermissionMode, globalRegistry, ws); mcpErr != nil {
+		fmt.Fprintf(os.Stderr, "simple-harness: mcp server unreachable: %v\n", mcpErr)
+		return 2
+	} else if mgr != nil {
+		defer mgr.Close()
+	}
 
 	sessionID, err := newSessionID()
 	if err != nil {
@@ -595,13 +598,15 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir,
 	// from model-timeout cancellation (the SCOPE §28 path; the
 	// existing handoff-024 mapping — emit `completed(6)` + exit 6).
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	interrupted := false
+	var interrupted atomic.Bool
 	go func() {
-		<-sigCh
-		interrupted = true
-		cancel()
+		if _, ok := <-sigCh; ok {
+			interrupted.Store(true)
+			cancel()
+		}
 	}()
 
 	normalizedBase := loop.NormalizeBaseURL(baseURL)
@@ -628,35 +633,21 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir,
 		fmt.Fprintf(os.Stderr, "internal error: cannot open session writer: %v\n", err)
 		return 1
 	}
+	// session.json records the exit code the process actually
+	// returns. It used to re-derive one from the error, and said 1
+	// for a permission violation the process exited 4 on, and
+	// completed/0 for a --limit overflow that exited 2.
 	defer func() {
-		var finalStatus session.Status
-		var finalCode int
-		if interrupted {
+		finalStatus := session.StatusFailed
+		switch {
+		case interrupted.Load():
 			finalStatus = session.StatusInterrupted
-			finalCode = 6
-		} else if err != nil {
-			var me *model.ModelError
-			if errors.As(err, &me) {
-				switch me.Kind {
-				case model.ErrHTTP, model.ErrParse, model.ErrUpstream:
-					finalStatus = session.StatusFailed
-					finalCode = 3
-				case model.ErrTimeout:
-					finalStatus = session.StatusFailed
-					finalCode = 6
-				default:
-					finalStatus = session.StatusFailed
-					finalCode = 1
-				}
-			} else {
-				finalStatus = session.StatusFailed
-				finalCode = 1
-			}
-		} else {
+		case exitCode == 0:
 			finalStatus = session.StatusCompleted
-			finalCode = 0
 		}
-		_ = sessWriter.Write(finalStatus, finalCode)
+		if werr := sessWriter.Write(finalStatus, exitCode); werr != nil {
+			fmt.Fprintf(os.Stderr, "warning: session.json not written: %v\n", werr)
+		}
 	}()
 
 	modelOpts := model.Options{
@@ -692,6 +683,7 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir,
 		Tools:          globalRegistry,
 		MaxTurns:       maxTurns,
 		ContextPolicy:  contextPolicyFrom(cfg.Context, contextLimit),
+		OnMessage:      persistLoopMessage(sessWriter),
 	}, client, em, loopOut)
 
 	// Run 010 / handoff 038: --limit <n> overflow wiring on the
@@ -705,7 +697,9 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir,
 
 	// Run 008 (handoff 030): record the user message in
 	// messages.jsonl before the model call.
-	_ = sessWriter.AppendMessage("user", prompt)
+	if err := sessWriter.AppendMessage("user", prompt); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: messages.jsonl: %v\n", err)
+	}
 
 	// Run 017 / handoff 041: switch the run-mode invocation
 	// from r.RunOne(ctx, prompt) to r.RunAgent(ctx, prompt)
@@ -742,7 +736,7 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir,
 	// The success path (err == nil) and the existing handoff-024
 	// error mapping (errors.As -> SCOPE §28 exit codes) are
 	// unchanged; only the NEW `interrupted` branch is added.
-	if interrupted {
+	if interrupted.Load() {
 		signal.Stop(sigCh)
 		_ = em.Interrupted(sessionID)
 		if sidecar != nil {
@@ -776,14 +770,13 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir,
 		// rather than silently corrupting the conversation."
 		if limit > 0 {
 			if overflowErr := r.Ledger().Overflow(); overflowErr != nil {
-				_ = sessWriter.AppendMessage("assistant", response)
 				fmt.Fprintf(os.Stderr, "config error: %v\n", overflowErr)
 				return 2
 			}
 		}
-		// Run 008 (handoff 030): record the assistant response in
-		// messages.jsonl after a successful turn.
-		_ = sessWriter.AppendMessage("assistant", response)
+		// The assistant messages were persisted by the loop's
+		// OnMessage callback as they were produced.
+		_ = response
 		return 0
 	}
 
@@ -925,5 +918,22 @@ func contextPolicyFrom(cc config.ContextConfig, flagLimit int) loop.ContextPolic
 		KeepRecentTurns:          cc.KeepRecentTurns,
 		DisableToolResultPruning: !cc.PruningEnabled(),
 		DisableCompaction:        !cc.CompactionEnabled(),
+	}
+}
+
+// persistLoopMessage returns the loop.Config.OnMessage callback that
+// appends every message the agent loop produces — assistant messages
+// with their tool calls, tool results, the final answer — to
+// messages.jsonl, so the durable record is the execution history and
+// not only the prompt and a concatenation of the assistant's text.
+func persistLoopMessage(w *session.Writer) func(model.Message) {
+	return func(m model.Message) {
+		rec := session.Message{Role: m.Role, Content: m.Content, ToolCallID: m.ToolCallID}
+		for _, tc := range m.ToolCalls {
+			rec.ToolCalls = append(rec.ToolCalls, session.ToolCallRecord{ID: tc.ID, Name: tc.Name, Arguments: tc.Arguments})
+		}
+		if err := w.AppendRecord(rec); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: messages.jsonl: %v\n", err)
+		}
 	}
 }

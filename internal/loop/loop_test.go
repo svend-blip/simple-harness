@@ -1083,7 +1083,7 @@ func TestRun_PopulateLedger_RunOneCallsHelper(t *testing.T) {
 // model-side TestChatRequest_Tools_AdvertisesRegisteredTools pin
 // in internal/model/client_test.go; together they cover the
 // full construction -> wire contract.
-func TestRunOne_AdvertisesRegisteredTools(t *testing.T) {
+func TestRunAgent_AdvertisesRegisteredTools(t *testing.T) {
 	var gotBody struct {
 		Tools []struct {
 			Function struct {
@@ -1114,13 +1114,13 @@ func TestRunOne_AdvertisesRegisteredTools(t *testing.T) {
 	})
 	r := New(Config{
 		Model:      model.Options{BaseURL: srv.URL, Model: "qwen"},
-		Workspace:  "/tmp/ws",
+		Workspace:  t.TempDir(),
 		Permission: "READ_ONLY",
 		Tools:      reg,
 	}, client, em, &stdout)
 
-	if _, err := r.RunOne(context.Background(), "hi"); err != nil {
-		t.Fatalf("RunOne: %v", err)
+	if _, err := r.RunAgent(context.Background(), "hi"); err != nil {
+		t.Fatalf("RunAgent: %v", err)
 	}
 	if len(gotBody.Tools) != 2 {
 		t.Fatalf("body.tools len = %d, want 2 (got=%+v)", len(gotBody.Tools), gotBody.Tools)

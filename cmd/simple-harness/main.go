@@ -73,6 +73,7 @@ import (
 	"github.com/svend-blip/simple-harness/internal/event"
 	"github.com/svend-blip/simple-harness/internal/loop"
 	"github.com/svend-blip/simple-harness/internal/model"
+	"github.com/svend-blip/simple-harness/internal/path"
 	"github.com/svend-blip/simple-harness/internal/perm"
 	"github.com/svend-blip/simple-harness/internal/session"
 	"github.com/svend-blip/simple-harness/internal/skill"
@@ -141,9 +142,13 @@ Flags:
                         AFTER the model call returns; an overflow
                         exits 2 with the SCOPE §18 overflow error.
                         SCOPE §18.
+  --max-turns <n>       upper bound on model-request/tool-execution
+                        cycles per prompt (default: 8). Exceeding it
+                        reports the overflow and returns to the prompt.
 
 Subcommands:
   config show           print the resolved configuration (secrets redacted)
+  tools                 print the registered tool names (one per line)
   sessions list         enumerate session ids under --state-dir (one per line)
   sessions show <id>    print session.json for <id> (pretty-printed)
   context show          print the SCOPE §19 accounting report (no model call)
@@ -195,7 +200,8 @@ type interactiveOpts struct {
 	workspace string
 	stateDir  string       // Run 008: --state-dir; defaults to ~/.simple-harness/sessions
 	skill     *skill.Skill // resolved at flag-parse time; nil if --skill not set
-	limit     int          // Run 010 / handoff 038: --limit <n> flag; applied to the per-prompt ledger after each RunOne call returns
+	limit     int          // Run 010 / handoff 038: --limit <n> flag; applied to the per-prompt ledger after each prompt returns
+	maxTurns  int          // --max-turns: bound on tool rounds per prompt (0 = loop default)
 }
 
 // run is the testable inner entry point. It returns the process
@@ -236,42 +242,16 @@ func run(args []string) int {
 		return runContext(args[1:])
 	}
 	if len(args) > 0 && args[0] == "run" {
-		// Run 019 / handoff 063: wire MCP servers BEFORE the run
-		// subcommand dispatches. cmdMcpInit reads cfg.MCPServers,
-		// fetches each server's tools/list, and registers the
-		// resulting adapters into globalRegistry so the run-mode
-		// model loop dispatches against them via
-		// tools.Registry.Dispatch. A declared-but-unreachable
-		// server surfaces as a structured startup error mapped
-		// to exit 2 (per SCOPE §43 + GOAL §2 bound decision 4).
-		// The wiring lives at this site because run.go is FROZEN
-		// for the handoff; the per-subcommand call site is the
-		// natural seam per handoff §1 "Call site" prose. The
-		// deferred manager.Close() releases the transports
-		// (stdio children reaped per SCOPE §27 process-group
-		// discipline; http idle-connection release) at session
-		// end — run() returns an int (defers fire) and main()
-		// calls os.Exit(run()) after.
-		//
-		// TG1's "config show includes MCP" path is satisfied by
-		// the config.Render() output of the resolved
-		// configuration (which already surfaces cfg.MCPServers),
-		// not by this run-mode call site — config show does NOT
-		// wire MCP servers; the rendered JSON is the surface.
-		// The `tools` subcommand (which lists globalRegistry
-		// contents) likewise does not require wiring here; the
-		// MCP-aware `tools` listing lives in the supervisor's
-		// canonical MCP-aware R*E*A*D*M*E sync (F1 follow-up run), not
-		// in this handoff.
-		if cfg, err := config.Load(); err == nil {
-			if mgr, _, mcpErr := cmdMcpInit(context.Background(), &cfg, mode, globalRegistry, tools.Workspace{}); mcpErr != nil {
-				fmt.Fprintf(os.Stderr, "simple-harness: mcp server unreachable: %v\n", mcpErr)
-				return 2
-			} else if mgr != nil {
-				defer mgr.Close()
-			}
-		}
+		// MCP servers are wired inside runModeExecute, once the
+		// flags are parsed and the workspace is known.
 		return runRun(args[1:])
+	}
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		// An unknown word used to fall through to interactive
+		// mode: `simple-harness bogus` waited on stdin, exited 0
+		// and left a session directory behind.
+		fmt.Fprintf(os.Stderr, "simple-harness: unknown subcommand %q (see --help)\n", args[0])
+		return 2
 	}
 
 	// No args: enter interactive mode (deliverable 4) — by falling through
@@ -311,6 +291,7 @@ func run(args []string) int {
 	// delivered to stdout and the session exits with exit 2 so
 	// the operator notices the misconfiguration).
 	limitFlag := fs.Int("limit", 0, "configured context limit in tokens (default: 0 = unknown, no overflow check). SCOPE §18.")
+	maxTurnsFlag := fs.Int("max-turns", 8, "upper bound on model-request/tool-execution cycles per prompt (default: 8)")
 
 	if err := fs.Parse(args); err != nil {
 		// flag.ContinueOnError already printed the parse error to
@@ -318,6 +299,15 @@ func run(args []string) int {
 		// unparseable flag, including unknown flags. This is the
 		// behaviour TG4 measures via the wrapper.
 		return 1
+	}
+
+	if fs.NArg() > 0 {
+		fmt.Fprintf(os.Stderr, "simple-harness: unknown subcommand %q (see --help)\n", fs.Arg(0))
+		return 2
+	}
+	if *maxTurnsFlag < 0 {
+		fmt.Fprintf(os.Stderr, "config error: --max-turns must be >= 0, got %d\n", *maxTurnsFlag)
+		return 2
 	}
 
 	if *stateDir == "" {
@@ -385,6 +375,7 @@ func run(args []string) int {
 			stateDir:  *stateDir,
 			skill:     loadedSkill,
 			limit:     *limitFlag,
+			maxTurns:  *maxTurnsFlag,
 		})
 }
 
@@ -581,6 +572,21 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, seams ...any) int
 	}
 	builtins.DefaultTimeout = cfg.ShellTimeout
 
+	// MCP servers join the session here, as in run mode. Interactive
+	// mode never wired them although the documentation promised it "at
+	// session start".
+	ws, err := path.New(o.workspace)
+	if err != nil {
+		fmt.Fprintf(stderr, "config error: workspace %q: %v\n", o.workspace, err)
+		return 2
+	}
+	if mgr, _, mcpErr := cmdMcpInit(context.Background(), &cfg, activePermissionMode, globalRegistry, ws); mcpErr != nil {
+		fmt.Fprintf(stderr, "simple-harness: mcp server unreachable: %v\n", mcpErr)
+		return 2
+	} else if mgr != nil {
+		defer mgr.Close()
+	}
+
 	// Build session identity.
 	sessionID, err := newSessionID()
 	if err != nil {
@@ -758,7 +764,8 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, seams ...any) int
 		SystemExternal: "",
 		Skills:         skills,
 		Tools:          globalRegistry,
-		MaxTurns:       0,
+		MaxTurns:       o.maxTurns,
+		OnMessage:      persistLoopMessage(sessWriter),
 	}, client, em, stdout)
 
 	scanner := bufio.NewScanner(stdin)
@@ -961,10 +968,34 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, seams ...any) int
 
 		// Run 008 (handoff 030): record the user message in
 		// messages.jsonl before the model call.
-		_ = sessWriter.AppendMessage("user", prompt)
+		if err := sessWriter.AppendMessage("user", prompt); err != nil {
+			fmt.Fprintf(stderr, "warning: messages.jsonl: %v\n", err)
+		}
 
-		response, err := r.RunOne(runCtx, prompt)
+		// The agent loop: tool calls are dispatched and the model
+		// continues until it answers without one. The REPL used to
+		// call the single-turn RunOne while advertising the tool
+		// registry, so a model that answered with a tool call had
+		// the answer silently dropped and saw an empty response.
+		_, err := r.RunAgent(runCtx, prompt)
 		if err != nil {
+			// A bound reached on this prompt is reported and the
+			// session continues; the loop has already emitted the
+			// status and completed events for the prompt.
+			var permErr *loop.PermissionError
+			var maxTurnsErr *loop.MaxTurnsError
+			var ctxErr *loop.ContextBudgetError
+			switch {
+			case errors.As(err, &permErr):
+				fmt.Fprintf(stderr, "\npermission denied: %v\n", permErr.Underlying)
+				continue
+			case errors.As(err, &maxTurnsErr):
+				fmt.Fprintf(stderr, "\n%v\n", err)
+				continue
+			case errors.As(err, &ctxErr):
+				fmt.Fprintf(stderr, "\ncontext budget exceeded: %v\n", ctxErr.Underlying)
+				continue
+			}
 			var me *model.ModelError
 			if errors.As(err, &me) {
 				switch me.Kind {
@@ -1015,9 +1046,8 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, seams ...any) int
 				return 2
 			}
 		}
-		// Run 008 (handoff 030): record the assistant response in
-		// messages.jsonl after a successful turn.
-		_ = sessWriter.AppendMessage("assistant", response)
+		// The assistant messages were persisted by the loop's
+		// OnMessage callback as they were produced.
 		fmt.Fprintln(stdout) // newline after the streamed response
 	}
 }

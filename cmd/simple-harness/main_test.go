@@ -1246,28 +1246,6 @@ func TestRun_OutputJSONL_EveryLineIsJSON(t *testing.T) {
 	}
 }
 
-// TestRun_StdinPolicy_NonDashSentinel_Returns0 pins handoff 022's
-// --prompt-file "-" choice: the sentinel value is parseable, validates
-// cleanly, and returns 0 with no events on stdout. A future regression
-// that wires stdin-reading into runModeExecute (or any path that
-// blocks on os.Stdin in the test process) fails this test because
-// driveRun doesn't redirect os.Stdin.
-func TestRun_StdinPolicy_NonDashSentinel_Returns0(t *testing.T) {
-	code, out, errOut := driveRun(t,
-		"--base-url", "http://127.0.0.1:9",
-		"--model", "test-model",
-		"--workspace", t.TempDir(),
-		"--prompt-file", "-",
-		"--output", "jsonl",
-	)
-	if code != 0 {
-		t.Fatalf("run --prompt-file - returned %d, want 0 (no-op sentinel) (stderr=%q)", code, errOut)
-	}
-	if out != "" {
-		t.Errorf("run --prompt-file - stdout = %q, want empty (no events emitted)", out)
-	}
-}
-
 // TestRun_Limit_OverflowExits2 is the binding pin for handoff 038's
 // `--limit <n>` overflow integration on runRun. The test drives a
 // run invocation with a 5000-char prompt file (so Total() = 1250
@@ -1375,6 +1353,40 @@ func TestRun_Version_AdvancesToHandoff024(t *testing.T) {
 	}
 }
 
+// hangingModelServer never answers: the request blocks until the
+// harness gives up or is signalled. It replaces the non-routable
+// 10.255.255.1:9 the signal tests used to dial, whose connect
+// sometimes failed within the fixed 2 s sleep (exit 3, not 6).
+func hangingModelServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Drain the body first: the server only notices a closed
+		// client connection (and cancels the request context) once
+		// the body has been consumed, and Close would otherwise
+		// wait forever for this handler.
+		_, _ = io.Copy(io.Discard, r.Body)
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// waitForJSONLEvent polls path until a line carrying the named event
+// appears, so a signal is sent to a harness that is demonstrably in
+// flight rather than after a guessed delay.
+func waitForJSONLEvent(t *testing.T, path, event string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		data, _ := os.ReadFile(path)
+		if strings.Contains(string(data), `"event":"`+event+`"`) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("no %q event in %s within 10s", event, path)
+}
+
 // TestRun_SIGTERM_Headless_EmitsInterruptedAndExits6 is the TG1 +
 // TG2 path: SIGTERM on a headless run yields exit 6 (SCOPE §28
 // interrupted) AND emits an `interrupted` event with `session_id`
@@ -1406,17 +1418,18 @@ func TestRun_SIGTERM_Headless_EmitsInterruptedAndExits6(t *testing.T) {
 		t.Fatalf("write prompt: %v", err)
 	}
 
-	outPath := "/tmp/sh-tg7-out.jsonl"
-	_ = os.Remove(outPath)
+	outPath := filepath.Join(t.TempDir(), "sh-tg7-out.jsonl")
+	srv := hangingModelServer(t)
 
 	cmd := exec.Command(binPath,
 		"run",
-		"--base-url", "http://10.255.255.1:9",
+		"--base-url", srv.URL,
 		"--model", "tg",
 		"--workspace", t.TempDir(),
 		"--permission", "read_only",
 		"--prompt-file", promptFile,
 		"--output", "jsonl",
+		"--state-dir", t.TempDir(),
 	)
 	jsonlFile, err := os.Create(outPath)
 	if err != nil {
@@ -1430,7 +1443,7 @@ func TestRun_SIGTERM_Headless_EmitsInterruptedAndExits6(t *testing.T) {
 		t.Fatalf("start harness: %v", err)
 	}
 
-	time.Sleep(2 * time.Second)
+	waitForJSONLEvent(t, outPath, "model_request")
 
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatalf("signal: %v", err)
@@ -1883,9 +1896,10 @@ func TestRun_InterruptedRun_Diagnosable(t *testing.T) {
 		t.Fatalf("write prompt: %v", err)
 	}
 
+	srv := hangingModelServer(t)
 	cmd := exec.Command(binPath,
 		"run",
-		"--base-url", "http://10.255.255.1:9",
+		"--base-url", srv.URL,
 		"--model", "tg",
 		"--workspace", workspace,
 		"--permission", "read_only",
@@ -1893,14 +1907,22 @@ func TestRun_InterruptedRun_Diagnosable(t *testing.T) {
 		"--output", "jsonl",
 		"--state-dir", stateDir,
 	)
-	cmd.Stdout, _ = os.Create(os.DevNull)
+	outPath := filepath.Join(t.TempDir(), "out.jsonl")
+	outFile, err := os.Create(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stdout = outFile
 	cmd.Stderr, _ = os.Create(os.DevNull)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start harness: %v", err)
 	}
-	time.Sleep(2 * time.Second)
-	_ = cmd.Process.Signal(syscall.SIGTERM)
+	waitForJSONLEvent(t, outPath, "model_request")
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("signal: %v", err)
+	}
 	waitErr := cmd.Wait()
+	outFile.Close()
 	if exitErr, ok := waitErr.(*exec.ExitError); !ok || exitErr.ExitCode() != 6 {
 		t.Fatalf("harness exit: %v; want exit 6 (interrupted)", waitErr)
 	}

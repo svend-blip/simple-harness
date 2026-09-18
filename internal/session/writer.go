@@ -72,12 +72,19 @@ func NewWriter(stateDir, sessionID string, cfg Config) (*Writer, error) {
 // per line, no trailing newline concerns (json.Encoder.Encode adds
 // the newline). The timestamp is auto-stamped if zero.
 func (w *Writer) AppendMessage(role, content string) error {
+	return w.AppendRecord(Message{Role: role, Content: content})
+}
+
+// AppendRecord adds a message with its tool-call fields to
+// messages.jsonl. The timestamp is stamped if zero.
+func (w *Writer) AppendRecord(m Message) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	m := Message{
-		Timestamp: time.Now().UTC(),
-		Role:      role,
-		Content:   content,
+	if w.msgsFile == nil {
+		return fmt.Errorf("session: messages.jsonl is closed")
+	}
+	if m.Timestamp.IsZero() {
+		m.Timestamp = time.Now().UTC()
 	}
 	if err := json.NewEncoder(w.msgsFile).Encode(m); err != nil {
 		return fmt.Errorf("session: encode message: %w", err)
