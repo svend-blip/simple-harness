@@ -1,12 +1,8 @@
-// Package perm owns the permission-gate scaffold for Simple Harness:
-// the policy stub (Permissive, satisfying tools.Policy), the Authorize
-// pipeline runner, and the re-export seam from internal/path.
-//
-// Run 003 ships the seam and the stub; Run 004 replaces Permissive with
-// a real mode-aware policy (READ_ONLY / WORKSPACE_WRITE / FULL_ACCESS)
-// and adds the Mode parameter to Authorize. The pipeline order is fixed
-// now and matches docs/ARCHITECTURE.md §"Permission boundary placement"
-// §"Enforcement placement" verbatim:
+// Package perm owns the permission gate of Simple Harness: the
+// mode-aware Policy (READ_ONLY / WORKSPACE_WRITE / FULL_ACCESS), the
+// Authorize pipeline runner, and the re-export seam from
+// internal/path. The pipeline order matches docs/ARCHITECTURE.md
+// §"Permission boundary placement" §"Enforcement placement" verbatim:
 //
 //	schema validation  (tools.Validate on the call)
 //	      ↓

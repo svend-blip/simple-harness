@@ -149,6 +149,26 @@ reachable only under the prefixed name. The `simple-harness
 tools` subcommand lists the resolved names; collision-bearing
 MCP tools appear under the prefixed form.
 
+#### Per-server permission
+
+A server's tools are mutations for the permission policy unless the
+server is declared `"permission": "read_only"`. Under the harness's
+`read_only` mode every tool of a server declared otherwise is
+rejected as `permission_denied`; under `workspace_write` a
+path-shaped argument that escapes the workspace is rejected;
+`full_access` allows everything. A server declared `read_only` has
+its tools allowed under every mode.
+
+#### Credentials and lifecycle
+
+`api_key` is sent as `Authorization: Bearer <key>` and `headers` are
+sent verbatim on every http request. Both transports perform the MCP
+`initialize` exchange (and send `notifications/initialized`) before
+any other request. The startup listing is bounded to 30 s per server;
+a tool call is bounded by the `shell_timeout` configuration (default
+10 minutes). A stdio child's stderr is forwarded to the harness's
+stderr, and the child does not inherit `SIMPLE_HARNESS_API_KEY`.
+
 #### Transport failure semantics
 
 A transport failure during a tool call surfaces as a structured
@@ -317,7 +337,7 @@ The `run` subcommand takes the following flags. The text below mirrors
 |------|----------|---------|--------|
 | `--base-url <url>` | yes | — | Base URL of the OpenAI-compatible endpoint. Empty exits 2 (SCOPE §28). |
 | `--model <name>` | yes | — | Model name to send in the chat request. Empty exits 2. |
-| `--prompt-file <path>` | yes (unless `--prompt`) | — | Path to the prompt file; use `-` to read from stdin. Empty exits 2. |
+| `--prompt-file <path>` | yes | — | Path to the prompt file; `-` reads the prompt from stdin. Empty exits 2. |
 | `--output <mode>` | no | `terminal` | `terminal` (default — streamed assistant text to stdout) or `jsonl` (every line on stdout is a structured event). |
 | `--workspace <dir>` | no | cwd | Workspace directory. |
 | `--state-dir <dir>` | no | `~/.simple-harness/sessions` | State directory for session persistence. |
@@ -327,6 +347,7 @@ The `run` subcommand takes the following flags. The text below mirrors
 | `--skills-dir <dir>` | no | `~/.simple-harness/skills + <workspace>/.simple-harness/skills` | Skills directory override. Test-only deterministic handle. |
 | `--max-turns <n>` | no | `8` | Upper bound on agent's model-request / tool-execution cycles. `< 0` exits 2. |
 | `--limit <n>` | no | `0` | Configured context limit in tokens. `<= 0` disables the overflow check. Set + overflow exits 2 (SCOPE §18). |
+| `--context-limit <n>` | no | `0` (config `context.model_limit`) | The model's context window for the bounded context lifecycle (a budget planned against before each call). Distinct from `--limit`. |
 | `--version` | — | — | Print the runtime version and exit 0. |
 | `--help` | — | — | Print the run-mode usage and exit 0. |
 
@@ -353,6 +374,7 @@ flag is added:
 | `--skill <name>` | Skill to load at startup. |
 | `--skills-dir <dir>` | Skills directory override. |
 | `--limit <n>` | Configured context limit in tokens. |
+| `--max-turns <n>` | Bound on model-request/tool-execution cycles per prompt (default 8). Exceeding it is reported at the prompt; the session continues. |
 
 Interactive mode REPL commands (at the prompt):
 
@@ -398,7 +420,7 @@ risk).
 
 ### Event types in V1
 
-The V1 protocol defines 8 event types. Event-specific fields extend
+The V1 protocol defines 9 event types. Event-specific fields extend
 the base schema per type.
 
 | Event | Fields (beyond base) | When emitted |
@@ -409,6 +431,7 @@ the base schema per type.
 | `assistant_stream` | `delta` (string), `role` (string — `"assistant"`) | On each streamed chunk from the model. |
 | `tool_call` | `call_id` (string), `tool` (string) | When the model emits a tool-call delta the harness has chosen to dispatch. |
 | `tool_result` | `call_id` (string), `tool_result_status` (string — `"ok"` or `"error"`), `content` (string, optional) | After the dispatch pipeline returns for a call. Carries the matching `call_id` of the `tool_call` event for correlation. |
+| `usage` | `usage` (object: `prompt_tokens`, `completion_tokens`, `reasoning_tokens`) | After a model request whose upstream reported a usage block; also for compaction inferences. |
 | `interrupted` | *(none)* | Terminal signal emitted on SIGINT/SIGTERM in headless mode (SCOPE §26). Precedes `completed(exit_code: 6)`. |
 | `completed` | `exit_code` (int — SCOPE §28 code) | Terminal event; emitted once per session, after the final status. |
 
@@ -574,22 +597,31 @@ when.
 
 | State | Meaning | V1 emits? |
 |-------|---------|-----------|
-| `STARTING` | Harness is initializing (config load, session id generation). | yes |
-| `READY` | Configuration loaded, session identity established, awaiting the model. | yes |
-| `WAITING_FOR_MODEL` | An active model request is in flight (HTTP request pending). | yes |
+| `STARTING` | Harness is initializing (config load, session id generation). | reserved (not emitted; `started` is the event) |
+| `READY` | Configuration loaded, session identity established, awaiting the model. | reserved (not emitted) |
+| `WAITING_FOR_MODEL` | An active model request is in flight (HTTP request pending). | reserved (not emitted; `model_request` is the event) |
 | `STREAMING` | Model is streaming a response. | yes |
 | `READING` | A `read_file` tool call is in flight. | reserved (post-V1 — V1 tool set per `internal/tools/builtins/` will emit this) |
 | `SEARCHING` | A `search_files` tool call is in flight. | reserved |
 | `WRITING` | A `write_file` tool call is in flight. | reserved |
 | `PATCHING` | An `apply_patch` tool call is in flight. | reserved |
-| `RUNNING_TOOL` | A tool is executing (generic state for tools without a more specific state). | yes |
-| `INTERRUPTING` | A signal has been received; cleanup in progress. | yes |
+| `RUNNING_TOOL` | A tool is executing (generic state for tools without a more specific state). | reserved (not emitted; `tool_call` / `tool_result` are the events) |
+| `INTERRUPTING` | A signal has been received; cleanup in progress. | reserved (not emitted) |
 | `COMPLETED` | The run finished successfully. | yes |
 | `FAILED` | The run terminated with an error. | yes |
-| `CLEANUP` | Subprocess cleanup in progress (post-completion). | yes |
+| `CLEANUP` | Subprocess cleanup in progress (post-completion). | reserved (not emitted) |
 | `INTERRUPTED` | The run was interrupted by SIGINT/SIGTERM (terminal state). | yes |
+| `COMPACTING` | A context-compaction inference is about to be made (followed by its own `model_request`). | yes |
 
-The status string is the SCOPE value verbatim. Statuses correspond to
+Three diagnostic statuses carry a prefix and free text after a colon,
+and a controller must match them by prefix:
+`TOOL_DISPATCH_OVERFLOW: max-turns <n> exceeded`,
+`CONTEXT_REDUCED: <what the reduction did>`, and
+`CONTEXT_BUDGET_EXCEEDED: <why the budget cannot be met>`.
+
+Reserved names are part of the SCOPE §23 vocabulary and may be
+emitted by a later V1.x additively. The status string is the SCOPE
+value verbatim. Statuses correspond to
 actual execution state — not to inferred chain-of-thought or hidden
 model reasoning (SCOPE §23 closing line).
 
@@ -615,9 +647,12 @@ record.
     events.jsonl     append-only JSONL of every event
                      ALWAYS written regardless of --output mode
                      (Run 008 handoff 030)
-    messages.jsonl   append-only JSONL of every message
-                     (system / governance / skills / task /
-                      assistant / tool results)
+    messages.jsonl   append-only JSONL of the execution history:
+                     the user prompt, each assistant message (with
+                     its tool_calls), each tool result (with its
+                     tool_call_id), the final assistant answer. The
+                     system/governance/skill composition is not
+                     persisted per message; `context show` renders it.
 ```
 
 The default `<state-dir>` is `~/.simple-harness/sessions`. The flag
@@ -1086,7 +1121,7 @@ external controller reconstructs the runtime timeline from the
 sequence of `status` events.
 
 ```text
-{"protocol_version":"1","event":"status","timestamp":"...","session_id":"...","status":"WAITING_FOR_MODEL"}
+{"protocol_version":"1","event":"model_request","timestamp":"...","session_id":"..."}
 {"protocol_version":"1","event":"status","timestamp":"...","session_id":"...","status":"STREAMING"}
 ...
 {"protocol_version":"1","event":"status","timestamp":"...","session_id":"...","status":"COMPLETED"}
@@ -1100,9 +1135,9 @@ pre-launch composition inspection.
 
 **What the controller learns (live):**
 
-* The harness's current SCOPE §23 status (`WAITING_FOR_MODEL`,
-  `STREAMING`, `RUNNING_TOOL`, `INTERRUPTING`, `COMPLETED`,
-  `FAILED`, `CLEANUP`, `INTERRUPTED`).
+* The harness's current SCOPE §23 status (`STREAMING`, `COMPACTING`,
+  `COMPLETED`, `FAILED`, `INTERRUPTED`, and the prefixed diagnostics
+  listed under *Status States*).
 * The full sequence of state transitions since session start.
 
 **What the controller learns (offline):**
@@ -1198,7 +1233,7 @@ the JSONL sidecar (always written) and stdout under `--output jsonl`
 |---------|---------------|--------------|
 | JSONL sidecar | `<state-dir>/<session-id>/events.jsonl` | ALWAYS, regardless of `--output` mode. (Run 008 handoff 030.) |
 | stdout (live) | `--output jsonl` only | One JSON object per line on stdout while the session is in flight. |
-| messages.jsonl | `<state-dir>/<session-id>/messages.jsonl` | ALWAYS, one message per append (system / governance / skills / task / assistant / tool results). |
+| messages.jsonl | `<state-dir>/<session-id>/messages.jsonl` | ALWAYS, one message per append (user prompt / assistant with tool_calls / tool results / final assistant). |
 | session.json | `<state-dir>/<session-id>/session.json` | ALWAYS, exactly once at session end (atomic rename). |
 
 The canonical collection target is the JSONL sidecar — a controller

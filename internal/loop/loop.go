@@ -1,19 +1,12 @@
-// Package loop is the minimal single-turn model loop for Simple
-// Harness. It is the architecture's "internal/loop/" component
-// (docs/ARCHITECTURE.md lines 275-294), reduced to its V1 minimum:
-// take one prompt, stream one response, surface *model.ModelError
-// to the caller so the cmd can map it to a SCOPE §28 exit code.
-//
-// V1 loop does NOT include: tool dispatch, multi-turn loops with
-// message-history accumulation, permission enforcement, retries,
-// or session/message persistence. The architecture's full SCOPE §3
-// multi-turn loop with tool dispatch is deferred to later Runs (Run
-// 003+ lands tools; Run 004 lands sessions; the loop-with-tools
-// integration lands after both). This handoff ships the smallest
-// vertical slice that satisfies SCOPE §§3-4 (interactive mode) and
-// §§21-23 (event protocol subset) with the four events the loop
-// emits in V1: started, status: STREAMING, assistant_stream,
-// status: COMPLETED, completed.
+// Package loop is the model/tool loop of Simple Harness, the
+// architecture's "internal/loop/" component. RunAgent runs the
+// SCOPE §3 cycle — compose, request, stream, dispatch tool calls
+// through the permission pipeline, append results, request again —
+// bounded by MaxTurns and by the bounded context lifecycle; RunOne
+// is the single-turn call without tools. The loop emits the event
+// protocol, reports every message it appends through OnMessage so
+// the cmd can persist the execution history, and surfaces typed
+// errors the cmd maps to SCOPE §28 exit codes.
 //
 // The loop is one-way dependent on internal/model and internal/event
 // (it does NOT import them in the reverse direction). The model

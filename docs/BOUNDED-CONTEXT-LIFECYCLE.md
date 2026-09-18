@@ -25,10 +25,18 @@ Before each model call:
 3. If it fits, send it unchanged. Nothing is reduced that does not need to be.
 4. Otherwise replace older tool results with placeholders, oldest first,
    stopping as soon as it fits.
-5. Otherwise compact older conversation into a working summary.
-6. Otherwise fail explicitly, naming what could not be reduced.
+5. Otherwise compact older conversation into a working summary — a pinned
+   user-role message headed `COMPACTED WORKING HISTORY` (not a system
+   message: a system message after the task is rejected by runtimes that
+   apply the model's chat template). A summary is never compacted again.
+6. Otherwise narrow the recent verbatim window, halving it down to a floor
+   of two messages and pruning at each step, when the alternative is
+   failing a run that could continue.
+7. Otherwise fail explicitly, naming what could not be reduced.
 
-Steps 4 and 5 never touch pinned context or the recent verbatim window.
+Steps 4 to 6 never touch pinned context. The view fitted for one call is
+carried forward to the next, so a reduction is made once, not redone every
+turn.
 
 ## The budget
 
@@ -67,16 +75,26 @@ every OpenAI-compatible endpoint rejects with a 400, mid-run.
 Safe behaviour needs no configuration. A config file that says nothing about
 context gets a bounded one.
 
-```yaml
-context:
-  policy: bounded            # or "unbounded" to turn the feature off
-  model_limit: 131072        # the model's window; 0 or absent = unknown
-  generation_reserve: 16384  # absent = derived
-  safety_reserve: 4096       # absent = derived
-  keep_recent_turns: 8       # absent = 8
-  tool_result_pruning: true  # absent = true
-  compaction: true           # absent = true
+```json
+{
+  "context": {
+    "policy": "bounded",
+    "model_limit": 131072,
+    "generation_reserve": 16384,
+    "safety_reserve": 4096,
+    "keep_recent_turns": 8,
+    "tool_result_pruning": true,
+    "compaction": true
+  }
+}
 ```
+
+`policy` is `bounded` (default) or `unbounded` (turns the feature off);
+`model_limit` is the model's window (0 or absent = unknown); the reserves
+are derived when absent; `keep_recent_turns` defaults to 8; the two
+booleans default to true. `SIMPLE_HARNESS_CONTEXT_POLICY` and
+`SIMPLE_HARNESS_CONTEXT_MODEL_LIMIT` override the first two from the
+environment.
 
 Turning it off has to be asked for by name: any other value of `policy`,
 including a misspelling, leaves the safe behaviour in place.
@@ -113,7 +131,10 @@ Peak active context:             98330
 
 During a run the JSONL sidecar carries `CONTEXT_REDUCED` when a reduction
 happens, with what it did, and `CONTEXT_BUDGET_EXCEEDED` when one cannot be
-made to fit.
+made to fit. A compaction is an inference: it is announced by a
+`COMPACTING` status and its own `model_request` event, and its `usage`
+is emitted like any other request's, so a measurement counting model
+calls counts it.
 
 ## What it is not
 

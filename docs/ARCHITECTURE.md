@@ -96,8 +96,8 @@ Allocator's future adapter reaches. SCOPE §§4, 5, 36.
 ## `internal/config/` — Configuration loader
 
 **(a) Owns:** the configuration precedence chain (defaults → user
-config at `~/.simple-harness/config.yaml` → project config at
-`.simple-harness/config.yaml` → environment variables → CLI flags),
+config at `~/.simple-harness/config.json` → project config at
+`.simple-harness/config.json` → environment variables → CLI flags),
 typed unmarshalling into a frozen struct, secret-resolution (env vars
 and config only — never CLI where avoidable), and a `config show`
 command that prints the fully resolved configuration for operator
@@ -277,8 +277,10 @@ change execution meaning (SCOPE §20).
 **(a) Owns:** the SCOPE §3 loop (task → assemble context → model
 request → stream response → tool calls? → validate → authorize →
 execute → record → append → next model request), the configurable
-safety limits (`max_turns`, `max_tool_calls`, `max_execution_time`)
-with their default values, the exit-code scheme (SCOPE §28: 0
+safety limits (`max_turns` is implemented; `max_tool_calls` and
+`max_execution_time` are named by SCOPE §3 and remain extension
+points — the shell tool's per-call timeout and the model client's
+request timeout are the bounds that exist), the exit-code scheme (SCOPE §28: 0
 success, 1 generic failure, 2 configuration error, 3 model/API
 failure, 4 permission violation, 5 tool failure, 6 interrupted),
 the deterministic headless `run` subcommand flow (no browser, no
@@ -359,9 +361,9 @@ values, their location in config (`internal/config`), and the
 "exceeded a limit" behaviour:
 
 ```text
-max_turns           default 32       (configurable; SCOPE §3)
-max_tool_calls      default 128      (configurable; SCOPE §3)
-max_execution_time  default 30m      (configurable; SCOPE §3)
+max_turns           default 8        (--max-turns; SCOPE §3)
+max_tool_calls      not implemented  (extension point; SCOPE §3)
+max_execution_time  not implemented  (extension point; SCOPE §3)
 ```
 
 Exceeding any limit produces an explicit observable result: the
@@ -522,11 +524,17 @@ status                  — emits the active status; allowed values per SCOPE §
                           READING, SEARCHING, WRITING, PATCHING,
                           RUNNING_TOOL, INTERRUPTING, COMPLETED, FAILED,
                           CLEANUP, INTERRUPTED
-model_request           — a model call is being made (carries turn number)
+model_request           — a model call is being made
 assistant_stream        — a streaming chunk arrived from the model
 tool_call               — a tool was invoked (carries call_id, tool name)
-tool_result             — a tool finished (carries call_id, status, duration)
+tool_result             — a tool finished (carries call_id, status, content)
+usage                   — the upstream's token counts for one request
 completed               — final event; carries exit_code
+
+Of the SCOPE §23 status names, V1 emits STREAMING, COMPACTING,
+COMPLETED, FAILED and INTERRUPTED plus three prefixed diagnostics
+(see docs/HARNESS-CONTRACT.md §"Status States"); the rest are
+reserved.
 ```
 
 ## External subscription (V1)

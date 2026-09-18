@@ -51,9 +51,10 @@ exactly as described below.
 ## Quick start
 
 ```bash
-# interactive (endpoint/model/permission come from the config hierarchy:
-# ~/.simple-harness/config.yaml, .simple-harness/config.yaml, env)
-bin/simple-harness --workspace ~/project
+# interactive (endpoint/model come from the config hierarchy:
+# ~/.simple-harness/config.json, .simple-harness/config.json, env;
+# each prompt runs the agent loop, tool calls included)
+bin/simple-harness --workspace ~/project --permission workspace_write
 
 # headless (machine-readable events on stdout, deterministic exit codes)
 bin/simple-harness run \
@@ -64,7 +65,15 @@ bin/simple-harness run \
   --prompt-file task.md \
   --max-turns 8 \
   --output jsonl
+
+# the prompt can also come from stdin
+cat task.md | bin/simple-harness run --base-url ... --model ... --prompt-file -
 ```
+
+Run mode takes the endpoint and model from its flags only — the
+public contract exits 2 when either is empty — so an external
+controller never inherits an endpoint from a config file it did not
+write. Interactive mode reads them from the config hierarchy.
 
 `bin/simple-harness` is a POSIX wrapper that `exec`s the committed
 runtime binary (`bin/simple-harness-runtime`), so signals reach the
@@ -89,8 +98,10 @@ simple-harness>
 
 - **Agent loop** with tool dispatch: model request → stream → validate →
   authorize → execute → record → append → next request, bounded by
-  `--max-turns`. Malformed model tool-calls are untrusted input —
-  structured rejection, never a crash.
+  `--max-turns` (run mode and, per prompt, interactive mode). Malformed
+  model tool-calls are untrusted input — structured rejection, never a
+  crash. Each interactive prompt is a fresh composition: the REPL does
+  not carry conversation history from one prompt to the next.
 - **Nine builtin tools:** `read_file`, `write_file`, `apply_patch`,
   `list_directory`, `search_files`, `grep`, `shell`, `list_skills`,
   `load_skill` — each with explicit schema, validation, structured
@@ -126,10 +137,13 @@ simple-harness>
   when set; `usage` events carry `reasoning_tokens`.
 - **MCP client (V2):** configuration-pinned servers via the
   `mcp_servers` config key — the harness connects to configured
-  Model Context Protocol servers at session start and exposes their
-  tools alongside the builtins. See `docs/examples/mcp-light.json`
-  for a reference config and `docs/HARNESS-CONTRACT.md` for the
-  MCP client section.
+  Model Context Protocol servers at session start (run mode,
+  interactive mode and `tools`) and exposes their tools alongside the
+  builtins. A server's tools count as mutations for the permission
+  policy unless the server is declared `read_only`; `api_key` and
+  `headers` are sent on every request. See
+  `docs/examples/mcp-light.json` for a reference config and
+  `docs/HARNESS-CONTRACT.md` for the MCP client section.
 - **Model-invoked skills:** the `list_skills` + `load_skill` builtin
   tools let a model discover and load skills at runtime — the
   `--skill` flag and `/skill` slash command remain for human-initiated
@@ -137,7 +151,9 @@ simple-harness>
   one into its context mid-session.
 - **Sessions:** stable identity per execution, inspectable history
   (`session.json` + `messages.jsonl` + `events.jsonl` under
-  `--state-dir`), `sessions list` / `sessions show`.
+  `--state-dir`), `sessions list` / `sessions show`. `messages.jsonl`
+  is the execution history: the prompt, every assistant message with
+  its tool calls, every tool result, the final answer.
 - **Skills:** reusable instruction packages from
   `~/.simple-harness/skills/` and `.simple-harness/skills/` (`--skill`,
   `/skill`); `share/skills/cold-start/SKILL.md` is the shipped reference.
@@ -148,7 +164,7 @@ simple-harness>
 ## Development
 
 ```bash
-./scripts/test.sh           # full suite (12 packages, mocked models)
+./scripts/test.sh           # full suite (every package, mocked models)
 ./scripts/contract-check.sh # black-box V1 contract conformance
 ./scripts/e2e-coding.sh URL MODEL   # live coding-agent acceptance
 ./scripts/e2e-review.sh URL MODEL   # live read-only reviewer acceptance
@@ -156,7 +172,7 @@ simple-harness>
 
 Built with Go (see `docs/ADR-001-implementation-language.md` for the
 Python-vs-Go decision record). Architecture: `docs/ARCHITECTURE.md`.
-Reference study of Pi and Whip: `docs/RECON.md` and
+Comparative validation against Pi and Whip:
 `docs/COMPARATIVE-VALIDATION.md`. Concurrency stance (sequential V1,
 extension points documented): `docs/ADR-002-concurrency.md`.
 
@@ -165,9 +181,11 @@ extension points documented): `docs/ADR-002-concurrency.md`.
 The harness keeps what it sends to the model inside a budget derived from the
 model's context limit, so a long session does not grow until the runtime
 refuses it. Older tool results are replaced with placeholders, then older
-conversation is compacted; instructions, skills, the current task and the
-recent verbatim window are never touched to make room, and if the budget
-cannot be met the run fails and says why.
+conversation is compacted into a pinned working summary; instructions,
+skills and the current task are never touched to make room. The recent
+verbatim window is narrowed, down to a floor of two messages, only when
+the alternative is failing a run that could continue — and if the budget
+still cannot be met the run fails and says why.
 
 Durable history is not the active context. Nothing is deleted — what changes
 is the view that goes on the wire.
@@ -217,15 +235,23 @@ self-contained and works out of the box.
 
 ### Verify installation
 
-Run `./scripts/test.sh` (13 packages, mocked models) and
+Run `./scripts/test.sh` (every package, mocked models) and
 `./scripts/contract-check.sh` (model-free V1 contract conformance).
 Both scripts are part of the committed repository.
 
 ## Configuration
 
-Configuration is read from the hierarchy:
-`~/.simple-harness/config.yaml` → `.simple-harness/config.yaml` →
-environment variables. The `mcp_servers` config key (V2) lists
+Configuration is JSON, read from the hierarchy:
+`~/.simple-harness/config.json` → `.simple-harness/config.json`
+(searched upward from the working directory) → `SIMPLE_HARNESS_*`
+environment variables. Keys: `model` (`base_url`, `model`, `api_key`,
+`temperature`, `max_output_tokens`, `request_timeout`,
+`reasoning_effort`, `enable_thinking`, `thinking_budget`),
+`shell_timeout`, `context` (`policy`, `model_limit`,
+`generation_reserve`, `safety_reserve`, `keep_recent_turns`,
+`tool_result_pruning`, `compaction`; the first two also as
+`SIMPLE_HARNESS_CONTEXT_POLICY` / `SIMPLE_HARNESS_CONTEXT_MODEL_LIMIT`)
+and `mcp_servers`. The `mcp_servers` config key (V2) lists
 configuration-pinned MCP servers the harness connects to at session
 start — see `docs/examples/mcp-light.json` for a reference config and
 `docs/HARNESS-CONTRACT.md` for the MCP client section. The `api_key`
@@ -261,7 +287,7 @@ directly. See the Quick start section above for examples.
 
 ## Testing
 
-Run `./scripts/test.sh` for the full test suite (13 packages, mocked
+Run `./scripts/test.sh` for the full test suite (every package, mocked
 models) and `./scripts/contract-check.sh` for the model-free V1
 contract conformance checker. Live acceptance runners
 (`./scripts/e2e-coding.sh URL MODEL` and

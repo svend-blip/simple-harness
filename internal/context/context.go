@@ -26,10 +26,11 @@
 //     whose TokenEstimate exceeds 500).
 //
 // The seven Category constants map verbatim to SCOPE §18's seven
-// categories. V1 populates HarnessSystem + ExternalSystem + Skill(s)
-// + Task; ToolSchemas / Conversation / ToolResults are tracked as
-// categories but currently have zero entries (the loop does not yet
-// dispatch tools or maintain multi-turn conversation history).
+// categories. The ledger describes one request's composition:
+// HarnessSystem + ExternalSystem + Skill(s) + Task + ToolSchemas.
+// Conversation and ToolResults grow during a run and are accounted
+// by the bounded context lifecycle (internal/ctxlife), whose report
+// `context show` prints beneath this one.
 //
 // Estimates are honest: where exact tokenization is unavailable
 // (SCOPE §20 standing constraint), the Estimate function is clearly
@@ -64,17 +65,15 @@ const (
 	// Task is the user prompt for the current RunOne call. One
 	// entry per RunOne call.
 	Task Category = "task"
-	// Conversation is the assistant-side message history
-	// (multi-turn conversation). V1: zero entries — multi-turn
-	// is not yet wired.
+	// Conversation is the assistant-side message history. The
+	// composition ledger carries no entries here; the lifecycle
+	// accounting (internal/ctxlife) reports it per request.
 	Conversation Category = "conversation"
-	// ToolSchemas is the tool schema surface sent to the
-	// model. V1: zero entries — tool dispatch is not yet wired
-	// into RunOne.
+	// ToolSchemas is the tool schema surface sent to the model:
+	// one entry per advertised tool.
 	ToolSchemas Category = "tool schemas"
 	// ToolResults is the tool result surface returned to the
-	// model. V1: zero entries — tool dispatch is not yet wired
-	// into RunOne.
+	// model; accounted by the lifecycle, not the composition.
 	ToolResults Category = "tool results"
 )
 
