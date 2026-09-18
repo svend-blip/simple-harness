@@ -740,7 +740,12 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir,
 	// unchanged; only the NEW `interrupted` branch is added.
 	if interrupted.Load() {
 		signal.Stop(sigCh)
+		// The contract: `interrupted`, then the terminal
+		// `completed(exit_code: 6)`. The second was never emitted,
+		// which the model-free conformance check measured as a
+		// failure the first time it ran against a live endpoint.
 		_ = em.Interrupted(sessionID)
+		_ = em.Completed(6)
 		if sidecar != nil {
 			_ = sidecar.Sync()
 			_ = sidecar.Close()

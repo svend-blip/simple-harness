@@ -1761,9 +1761,10 @@ func TestRun_SessionJSON_HasFinalStatus(t *testing.T) {
 		// (connect-hang target) and SIGTERM after 2s.
 		stateDir := t.TempDir()
 		workspace := t.TempDir()
+		srv := hangingModelServer(t)
 		cmd := exec.Command(binPath,
 			"run",
-			"--base-url", "http://10.255.255.1:9",
+			"--base-url", srv.URL,
 			"--model", "tg",
 			"--workspace", workspace,
 			"--permission", "read_only",
@@ -1771,14 +1772,22 @@ func TestRun_SessionJSON_HasFinalStatus(t *testing.T) {
 			"--output", "jsonl",
 			"--state-dir", stateDir,
 		)
-		cmd.Stdout, _ = os.Create(os.DevNull)
+		outPath := filepath.Join(t.TempDir(), "out.jsonl")
+		outFile, err := os.Create(outPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd.Stdout = outFile
 		cmd.Stderr, _ = os.Create(os.DevNull)
 		if err := cmd.Start(); err != nil {
 			t.Fatalf("start harness: %v", err)
 		}
-		time.Sleep(2 * time.Second)
-		_ = cmd.Process.Signal(syscall.SIGTERM)
+		waitForJSONLEvent(t, outPath, "model_request")
+		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+			t.Fatalf("signal: %v", err)
+		}
 		waitErr := cmd.Wait()
+		outFile.Close()
 		exitCode := -1
 		if exitErr, ok := waitErr.(*exec.ExitError); ok {
 			exitCode = exitErr.ExitCode()
@@ -1966,6 +1975,7 @@ func TestRun_InterruptedRun_Diagnosable(t *testing.T) {
 		t.Fatalf("read %s: %v", eventsPath, err)
 	}
 	foundInterrupted := false
+	var terminal *event.Event
 	for _, line := range strings.Split(strings.TrimSpace(string(edata)), "\n") {
 		if line == "" {
 			continue
@@ -1976,11 +1986,18 @@ func TestRun_InterruptedRun_Diagnosable(t *testing.T) {
 		}
 		if ev.Event == "interrupted" {
 			foundInterrupted = true
-			break
 		}
+		cp := ev
+		terminal = &cp
 	}
 	if !foundInterrupted {
 		t.Errorf("events.jsonl missing `interrupted` event; raw=%s", edata)
+	}
+	// The contract: `interrupted` precedes the terminal
+	// completed(exit_code: 6). The completed event was never
+	// emitted on this path until the conformance checker measured it.
+	if terminal == nil || terminal.Event != "completed" || terminal.ExitCode != 6 {
+		t.Errorf("terminal event = %+v, want completed with exit_code 6; raw=%s", terminal, edata)
 	}
 }
 
@@ -3601,8 +3618,11 @@ func TestE2E_ReviewRunner_HappyPath_ScriptInvokesHarness(t *testing.T) {
 			string(patchArgs),
 		)
 		fmt.Fprint(w, payload)
-		// No [DONE] — the harness is in a permission-violation
-		// terminal state after the rejected apply_patch.
+		// Like any real endpoint the stub terminates its turn; the
+		// client reports a stream cut before finish_reason or
+		// [DONE] as an error (it used to accept it, which is why an
+		// earlier version of this stub got away with omitting it).
+		fmt.Fprint(w, "data: [DONE]\n\n")
 	}))
 	defer srv.Close()
 

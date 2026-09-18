@@ -106,7 +106,7 @@ assert_unreachable_endpoint() {
     --output jsonl \
     --state-dir "$CONTRACT_CHECK_STATE_DIR" \
     --max-turns 1 \
-    > "$jsonl" 2>&1
+    > "$jsonl" 2> "$jsonl.stderr"
   ec=$?
   set -e
   if [[ $ec -ne 3 ]]; then
@@ -176,7 +176,15 @@ assert_sigterm_exit_6() {
     --prompt-file "$long_prompt" \
     > "$launch_jsonl" 2>&1 &
   local pid=$!
-  sleep 2.5
+  # Signal once the harness is demonstrably in flight (its
+  # model_request event is on disk) rather than after a fixed
+  # sleep: a warm model answers a short prompt in under a second,
+  # and a signal that arrives after exit 0 measures nothing.
+  local spins=0
+  while ! grep -q '"event":"model_request"' "$launch_jsonl" 2>/dev/null && [[ $spins -lt 100 ]]; do
+    sleep 0.1
+    spins=$((spins + 1))
+  done
   kill -TERM "$pid" 2>/dev/null || true
   local waited=0
   while kill -0 "$pid" 2>/dev/null && [[ $waited -lt 50 ]]; do
