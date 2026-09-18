@@ -11,6 +11,7 @@ import sys
 def main() -> int:
     label, path, rc, runtime, limit = sys.argv[1:6]
     calls = input_tokens = 0
+    compactions = 0
     max_prompt = 0
     reduced = 0
     overflow = False
@@ -34,6 +35,8 @@ def main() -> int:
             status = str(rec.get("status", ""))
             if status.startswith("CONTEXT_REDUCED"):
                 reduced += 1
+            if status == "COMPACTING":
+                compactions += 1
             if status.startswith("CONTEXT_BUDGET_EXCEEDED"):
                 overflow = True
     if calls == 0:
@@ -43,7 +46,9 @@ def main() -> int:
         print(f"{label:<12}{'DID NOT RUN — exit ' + rc:>54}")
         return 1
     mark = "over" if max_prompt > int(limit) else ""
-    print(f"{label:<12}{calls:>10}{input_tokens:>12,}{max_prompt:>13,}{mark:<1}"
+    # calls counts every model_request, compaction inferences included;
+    # compact says how many of them were compactions.
+    print(f"{label:<12}{calls:>8}{compactions:>9}{input_tokens:>12,}{max_prompt:>13,}{mark:<1}"
           f"{reduced:>10}{runtime:>9}s{rc:>9}"
           + ("  BUDGET FAILURE" if overflow else ""))
     return 0

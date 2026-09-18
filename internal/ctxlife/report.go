@@ -29,6 +29,9 @@ func (m *Manager) Report(a Accounting) string {
 	}
 
 	w("Model context limit", m.Budget.ModelLimit)
+	if m.LimitSource != "" {
+		fmt.Fprintf(&b, "%-28s%s\n", "Limit source:", m.LimitSource)
+	}
 	w("Generation reserve", m.Budget.GenerationReserve)
 	w("Safety reserve", m.Budget.SafetyReserve)
 	w("Active input budget", a.Budget)
@@ -36,6 +39,7 @@ func (m *Manager) Report(a Accounting) string {
 	w("Pinned", a.Pinned)
 	w("Recent verbatim", a.Recent)
 	w("Reducible", a.Reducible)
+	w("Compacted history", a.Compacted)
 	w("Tool schemas", a.ToolSchemas)
 	b.WriteString(strings.Repeat("-", 38) + "\n")
 	w("Active context", a.Total)

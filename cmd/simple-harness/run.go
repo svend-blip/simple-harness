@@ -45,6 +45,7 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/svend-blip/simple-harness/internal/config"
 	"github.com/svend-blip/simple-harness/internal/event"
@@ -682,7 +683,7 @@ func runModeExecute(prompt, baseURL, modelName, workspace, outputMode, stateDir,
 		Skills:         skills,
 		Tools:          globalRegistry,
 		MaxTurns:       maxTurns,
-		ContextPolicy:  contextPolicyFrom(cfg.Context, contextLimit),
+		ContextPolicy:  resolveContextPolicy(cfg.Context, contextLimit, normalizedBase, modelName, cfg.Model.APIKey),
 		OnMessage:      persistLoopMessage(sessWriter),
 	}, client, em, loopOut)
 
@@ -914,12 +915,18 @@ func validateReadableFile(path string) error {
 // it would be unsafe to be wrong about.
 func contextPolicyFrom(cc config.ContextConfig, flagLimit int) loop.ContextPolicy {
 	limit := cc.ModelLimit
+	source := ""
+	if limit > 0 {
+		source = "config context.model_limit"
+	}
 	if flagLimit > 0 {
 		limit = flagLimit
+		source = "--context-limit"
 	}
 	return loop.ContextPolicy{
 		Disabled:                 !cc.Bounded(),
 		ModelLimit:               limit,
+		LimitSource:              source,
 		GenerationReserve:        cc.GenerationReserve,
 		SafetyReserve:            cc.SafetyReserve,
 		KeepRecentTurns:          cc.KeepRecentTurns,
@@ -943,4 +950,32 @@ func persistLoopMessage(w *session.Writer) func(model.Message) {
 			fmt.Fprintf(os.Stderr, "warning: messages.jsonl: %v\n", err)
 		}
 	}
+}
+
+// resolveContextPolicy is contextPolicyFrom plus §5's runtime probe:
+// when no --context-limit was given and the configuration allows it,
+// the runtime is asked what window it serves the model with. A
+// configured limit and a probed one are reconciled by taking the
+// smaller (estimation prefers safety), and the report names both.
+// The probe is skipped when the flag is set (a deliberate act for
+// this run) or when the lifecycle is off.
+func resolveContextPolicy(cc config.ContextConfig, flagLimit int, baseURL, modelName, apiKey string) loop.ContextPolicy {
+	p := contextPolicyFrom(cc, flagLimit)
+	if p.Disabled || flagLimit > 0 || !cc.ProbeEnabled() || baseURL == "" {
+		return p
+	}
+	probe := model.ProbeContextLimit(context.Background(), baseURL, modelName, apiKey, 3*time.Second)
+	switch {
+	case probe.Limit <= 0:
+		return p
+	case p.ModelLimit <= 0:
+		p.ModelLimit = probe.Limit
+		p.LimitSource = probe.Source
+	case probe.Limit < p.ModelLimit:
+		p.LimitSource = fmt.Sprintf("%s (configured %d is larger than the served window)", probe.Source, p.ModelLimit)
+		p.ModelLimit = probe.Limit
+	default:
+		p.LimitSource = fmt.Sprintf("config context.model_limit (runtime reports %d)", probe.Limit)
+	}
+	return p
 }

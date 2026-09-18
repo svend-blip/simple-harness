@@ -333,3 +333,52 @@ func TestContextShow_ReflectsWhatRunSends(t *testing.T) {
 		t.Errorf("an inline --system did not raise the pinned figure (%d -> %d)", pinned(out), pinned(out2))
 	}
 }
+
+// TestContextShow_TakesTheLimitFromTheRuntime — addendum §5: with no
+// --context-limit and no configured limit, the served window the
+// runtime reports is the limit, and the report names the source. A
+// configured limit larger than the served window is reduced to it.
+func TestContextShow_TakesTheLimitFromTheRuntime(t *testing.T) {
+	t.Setenv("SIMPLE_HARNESS_CONTEXT_PROBE_LIMIT", "true")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			fmt.Fprint(w, `{"data":[{"id":"m","max_model_len":24576}]}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	promptFile := filepath.Join(t.TempDir(), "p.md")
+	if err := os.WriteFile(promptFile, []byte("task"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"context", "show", "--base-url", srv.URL + "/v1", "--model", "m",
+		"--workspace", t.TempDir(), "--prompt-file", promptFile}
+	code, out, errOut := captureContext(t, args)
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+	if !strings.Contains(out, "Model context limit:") || !strings.Contains(out, "24576") || !strings.Contains(out, "Limit source:") {
+		t.Errorf("runtime limit not used:\n%s", out)
+	}
+	// A configured limit above the served window is reduced to it.
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".simple-harness"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".simple-harness", "config.json"), []byte(`{"context":{"model_limit":131072}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	_, out2, _ := captureContext(t, args)
+	if !strings.Contains(out2, "24576") || !strings.Contains(out2, "131072") {
+		t.Errorf("configured 131072 vs served 24576 not reconciled to the smaller with both named:\n%s", out2)
+	}
+	// An explicit --context-limit wins outright, no probe.
+	_, out3, _ := captureContext(t, append(append([]string{}, args...), "--context-limit", "4096"))
+	for _, line := range strings.Split(out3, "\n") {
+		if strings.HasPrefix(line, "Model context limit:") && (!strings.Contains(line, "4096") || strings.Contains(line, "24576")) {
+			t.Errorf("--context-limit did not win: %q", line)
+		}
+	}
+}

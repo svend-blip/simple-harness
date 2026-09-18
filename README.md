@@ -190,7 +190,9 @@ still cannot be met the run fails and says why.
 Durable history is not the active context. Nothing is deleted — what changes
 is the view that goes on the wire.
 
-It needs no configuration; `--context-limit <n>` or `context.model_limit` tells
+It needs no configuration: the harness asks the runtime what window it
+serves the model with (llama.cpp, vLLM, SGLang and Ollama all say);
+`--context-limit <n>` or `context.model_limit` tells
 it the model's window. See [docs/BOUNDED-CONTEXT-LIFECYCLE.md](docs/BOUNDED-CONTEXT-LIFECYCLE.md).
 
 ## Boundaries
@@ -249,8 +251,9 @@ environment variables. Keys: `model` (`base_url`, `model`, `api_key`,
 `reasoning_effort`, `enable_thinking`, `thinking_budget`),
 `shell_timeout`, `context` (`policy`, `model_limit`,
 `generation_reserve`, `safety_reserve`, `keep_recent_turns`,
-`tool_result_pruning`, `compaction`; the first two also as
-`SIMPLE_HARNESS_CONTEXT_POLICY` / `SIMPLE_HARNESS_CONTEXT_MODEL_LIMIT`)
+`tool_result_pruning`, `compaction`, `probe_limit`; `policy`,
+`model_limit` and `probe_limit` also as `SIMPLE_HARNESS_CONTEXT_POLICY` /
+`_CONTEXT_MODEL_LIMIT` / `_CONTEXT_PROBE_LIMIT`)
 and `mcp_servers`. The `mcp_servers` config key (V2) lists
 configuration-pinned MCP servers the harness connects to at session
 start — see `docs/examples/mcp-light.json` for a reference config and

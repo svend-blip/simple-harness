@@ -6,13 +6,33 @@ checking happens. The --limit accounting check is one: it runs AFTER
 the call, so against an unreachable endpoint it never runs at all and
 the exit code means something else entirely.
 
-Writes its chosen port to argv[1] and serves until killed.
+Writes its chosen port to argv[1] and serves until killed. An optional
+argv[2] is a context window the stub reports on GET /v1/models as
+max_model_len, for the runtime-probe check; without it the stub reports
+no window and the harness must say the limit is unknown.
 """
 import http.server
+import json
 import sys
+
+MAX_MODEL_LEN = int(sys.argv[2]) if len(sys.argv) > 2 else 0
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/v1/models":
+            entry = {"id": "stub", "object": "model"}
+            if MAX_MODEL_LEN:
+                entry["max_model_len"] = MAX_MODEL_LEN
+            body = json.dumps({"object": "list", "data": [entry]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_response(404)
+        self.end_headers()
+
     def do_POST(self):
         self.rfile.read(int(self.headers.get("content-length", 0)))
         self.send_response(200)

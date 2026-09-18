@@ -49,6 +49,12 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	os.Setenv("HOME", home)
+	// The runtime probe for the model's context window sends GET
+	// /v1/models (and friends) at session start. The test stubs
+	// answer every request as a chat completion and count them, so
+	// the probe is off for the package; the test that covers it
+	// turns it back on.
+	os.Setenv("SIMPLE_HARNESS_CONTEXT_PROBE_LIMIT", "false")
 	if err := os.Chdir(cwd); err != nil {
 		panic(err)
 	}

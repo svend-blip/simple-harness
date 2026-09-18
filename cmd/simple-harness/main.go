@@ -145,6 +145,10 @@ Flags:
   --max-turns <n>       upper bound on model-request/tool-execution
                         cycles per prompt (default: 8). Exceeding it
                         reports the overflow and returns to the prompt.
+  --context-limit <n>   the model's context window for the bounded
+                        context lifecycle (default: config
+                        context.model_limit, else what the runtime
+                        reports, else unbounded).
 
 Subcommands:
   config show           print the resolved configuration (secrets redacted)
@@ -197,11 +201,12 @@ See docs/ARCHITECTURE.md §"Distribution shape" for the full contract.
 // (a new built-in command at the prompt) so the next prompt uses
 // the freshly-loaded skill.
 type interactiveOpts struct {
-	workspace string
-	stateDir  string       // Run 008: --state-dir; defaults to ~/.simple-harness/sessions
-	skill     *skill.Skill // resolved at flag-parse time; nil if --skill not set
-	limit     int          // Run 010 / handoff 038: --limit <n> flag; applied to the per-prompt ledger after each prompt returns
-	maxTurns  int          // --max-turns: bound on tool rounds per prompt (0 = loop default)
+	workspace    string
+	stateDir     string       // Run 008: --state-dir; defaults to ~/.simple-harness/sessions
+	skill        *skill.Skill // resolved at flag-parse time; nil if --skill not set
+	limit        int          // Run 010 / handoff 038: --limit <n> flag; applied to the per-prompt ledger after each prompt returns
+	maxTurns     int          // --max-turns: bound on tool rounds per prompt (0 = loop default)
+	contextLimit int          // --context-limit: the model window for the lifecycle (0 = config/runtime)
 }
 
 // run is the testable inner entry point. It returns the process
@@ -292,6 +297,7 @@ func run(args []string) int {
 	// the operator notices the misconfiguration).
 	limitFlag := fs.Int("limit", 0, "configured context limit in tokens (default: 0 = unknown, no overflow check). SCOPE §18.")
 	maxTurnsFlag := fs.Int("max-turns", 8, "upper bound on model-request/tool-execution cycles per prompt (default: 8)")
+	contextLimitFlag := fs.Int("context-limit", 0, "the model's context window in tokens for the bounded context lifecycle (default: from config context.model_limit or the runtime)")
 
 	if err := fs.Parse(args); err != nil {
 		// flag.ContinueOnError already printed the parse error to
@@ -371,11 +377,12 @@ func run(args []string) int {
 	// with --workspace; the permission mode was set at the top.
 	return runInteractive(os.Stdin, os.Stdout, os.Stderr,
 		interactiveOpts{
-			workspace: *workspace,
-			stateDir:  *stateDir,
-			skill:     loadedSkill,
-			limit:     *limitFlag,
-			maxTurns:  *maxTurnsFlag,
+			workspace:    *workspace,
+			stateDir:     *stateDir,
+			skill:        loadedSkill,
+			limit:        *limitFlag,
+			maxTurns:     *maxTurnsFlag,
+			contextLimit: *contextLimitFlag,
 		})
 }
 
@@ -765,6 +772,7 @@ func runInteractive(stdin io.Reader, stdout, stderr io.Writer, seams ...any) int
 		Skills:         skills,
 		Tools:          globalRegistry,
 		MaxTurns:       o.maxTurns,
+		ContextPolicy:  resolveContextPolicy(cfg.Context, o.contextLimit, normalizedBase, cfg.Model.Model, cfg.Model.APIKey),
 		OnMessage:      persistLoopMessage(sessWriter),
 	}, client, em, stdout)
 

@@ -375,6 +375,7 @@ flag is added:
 | `--skills-dir <dir>` | Skills directory override. |
 | `--limit <n>` | Configured context limit in tokens. |
 | `--max-turns <n>` | Bound on model-request/tool-execution cycles per prompt (default 8). Exceeding it is reported at the prompt; the session continues. |
+| `--context-limit <n>` | The model's context window for the bounded context lifecycle (default: config `context.model_limit`, else what the runtime reports). |
 
 Interactive mode REPL commands (at the prompt):
 
@@ -613,9 +614,10 @@ when.
 | `INTERRUPTED` | The run was interrupted by SIGINT/SIGTERM (terminal state). | yes |
 | `COMPACTING` | A context-compaction inference is about to be made (followed by its own `model_request`). | yes |
 
-Three diagnostic statuses carry a prefix and free text after a colon,
+Four diagnostic statuses carry a prefix and free text after a colon,
 and a controller must match them by prefix:
-`TOOL_DISPATCH_OVERFLOW: max-turns <n> exceeded`,
+`CONTEXT_LIMIT: <n> (<source>)` or `CONTEXT_LIMIT: unknown (unbounded)`
+once per run, `TOOL_DISPATCH_OVERFLOW: max-turns <n> exceeded`,
 `CONTEXT_REDUCED: <what the reduction did>`, and
 `CONTEXT_BUDGET_EXCEEDED: <why the budget cannot be met>`.
 

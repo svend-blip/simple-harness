@@ -8,12 +8,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/svend-blip/simple-harness/internal/event"
+	"github.com/svend-blip/simple-harness/internal/mcp"
 	"github.com/svend-blip/simple-harness/internal/model"
+	"github.com/svend-blip/simple-harness/internal/path"
 	"github.com/svend-blip/simple-harness/internal/tools"
 )
 
@@ -296,3 +299,117 @@ func TestPopulateLedger_AccountsTheToolSurface(t *testing.T) {
 		t.Error("the lifecycle manager was not told what the tool surface costs")
 	}
 }
+
+// bigResultTransport is an MCP server whose tool returns a large
+// result on every call and records what it was asked.
+type bigResultTransport struct {
+	mu    sync.Mutex
+	calls []map[string]interface{}
+}
+
+func (b *bigResultTransport) List(context.Context) ([]mcp.ListedTool, error) {
+	return []mcp.ListedTool{{Name: "scope_state", Description: "authoritative project state",
+		InputSchema: map[string]interface{}{"type": "object", "properties": map[string]interface{}{"n": map[string]interface{}{"type": "string"}}}}}, nil
+}
+func (b *bigResultTransport) Call(_ context.Context, _ string, args map[string]interface{}) (map[string]interface{}, error) {
+	b.mu.Lock()
+	b.calls = append(b.calls, args)
+	b.mu.Unlock()
+	return map[string]interface{}{"content": []interface{}{map[string]interface{}{"type": "text",
+		"text": "STATE-" + fmt.Sprint(args["n"]) + " " + strings.Repeat("abc ", 900)}}}, nil
+}
+func (b *bigResultTransport) Close() error { return nil }
+
+type allowPolicy struct{}
+
+func (allowPolicy) Decide(context.Context, tools.Call, tools.Workspace) tools.Decision {
+	return tools.Decision{Allowed: true}
+}
+
+// TestMCPToolsKeepWorkingAfterPruningAndCompaction — addendum §24.10
+// and §24.11: an external MCP tool (scope-mcp stands in for any
+// stateful server) keeps being called with the model's arguments
+// after tool results have been pruned and conversation compacted,
+// and the durable record still holds every full result — the
+// placeholders exist only in the active context.
+func TestMCPToolsKeepWorkingAfterPruningAndCompaction(t *testing.T) {
+	const turns = 12
+	var compactions int32
+	srv, _ := toolCallingServerWithCompactionCount(t, turns, &compactions)
+	// The server names the tool "echo"; the registry must offer it
+	// under that name, so the MCP server lists it as "echo" too.
+	tr := &bigResultTransport{}
+	reg := tools.NewRegistry()
+	ws, err := path.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr := mcp.NewManager(reg, func(context.Context, tools.Call, tools.Schema, tools.Workspace, tools.Policy) *tools.DecisionError {
+		return nil
+	}, allowPolicy{}, ws)
+	if err := mgr.AddServer(context.Background(), mcp.Server{Name: "scope-mcp"}, renamed{tr}); err != nil {
+		t.Fatal(err)
+	}
+	var durable []model.Message
+	client := model.NewClient(model.Options{BaseURL: srv.URL, Model: "qwen", RequestTimeout: 10 * time.Second})
+	var sidecar, stdout bytes.Buffer
+	r := New(Config{
+		Model:         model.Options{BaseURL: srv.URL, Model: "qwen"},
+		Workspace:     ws.Root(),
+		Permission:    "READ_ONLY",
+		System:        HarnessSystem,
+		Tools:         reg,
+		MaxTurns:      turns + 2,
+		ContextPolicy: ContextPolicy{ModelLimit: 8192, KeepRecentTurns: 4},
+		OnMessage:     func(m model.Message) { durable = append(durable, m) },
+	}, client, event.NewEmitter(&sidecar, "mcp-reduce"), &stdout)
+	if _, err := r.RunAgent(context.Background(), "work"); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	st := r.ContextManager().Stats
+	if st.ToolResultsPruned == 0 {
+		t.Fatal("nothing was pruned; the fixture proves nothing")
+	}
+	tr.mu.Lock()
+	n := len(tr.calls)
+	last := tr.calls[len(tr.calls)-1]
+	tr.mu.Unlock()
+	if n != turns {
+		t.Errorf("MCP tool was called %d times, want %d (every turn, before and after reduction)", n, turns)
+	}
+	if fmt.Sprint(last["n"]) != fmt.Sprint(turns) {
+		t.Errorf("last MCP call args = %v, want the model's argument for turn %d", last, turns)
+	}
+	// Every full result is in the durable record; no placeholder is.
+	full := 0
+	for _, m := range durable {
+		if m.Role != "tool" {
+			continue
+		}
+		if strings.Contains(m.Content, "[Earlier tool result pruned") {
+			t.Errorf("a placeholder reached the durable record: %.80s", m.Content)
+		}
+		if strings.Contains(m.Content, "STATE-") {
+			full++
+		}
+	}
+	if full != turns {
+		t.Errorf("durable record holds %d full MCP results, want %d", full, turns)
+	}
+}
+
+// renamed lists the wrapped transport's tool under the name the test
+// server calls.
+type renamed struct{ inner *bigResultTransport }
+
+func (r renamed) List(ctx context.Context) ([]mcp.ListedTool, error) {
+	l, err := r.inner.List(ctx)
+	for i := range l {
+		l[i].Name = "echo"
+	}
+	return l, err
+}
+func (r renamed) Call(ctx context.Context, name string, args map[string]interface{}) (map[string]interface{}, error) {
+	return r.inner.Call(ctx, name, args)
+}
+func (r renamed) Close() error { return nil }

@@ -141,6 +141,9 @@ type ContextPolicy struct {
 	// Zero means unknown: the lifecycle then accounts and
 	// reports but cannot bound, and says so.
 	ModelLimit int
+	// LimitSource names where ModelLimit came from, for the report
+	// and the CONTEXT_LIMIT status.
+	LimitSource string
 	// GenerationReserve and SafetyReserve override the derived
 	// reserves. Zero means derive them from ModelLimit.
 	GenerationReserve int
@@ -201,6 +204,7 @@ func newContextManager(cfg Config, client *model.Client, em *event.Emitter) *ctx
 		return nil
 	}
 	m := ctxlife.New(p.ModelLimit)
+	m.LimitSource = p.LimitSource
 	if p.GenerationReserve > 0 {
 		m.Budget.GenerationReserve = p.GenerationReserve
 	}
@@ -783,6 +787,16 @@ func (r *Run) RunAgent(ctx context.Context, prompt string) (string, error) {
 	// manager what it costs.
 	if r.ctxmgr != nil {
 		r.ctxmgr.ToolSchemaTokens = ctxlife.ToolSchemaTokens(advertisedTools)
+		// Say what the run is bounded by, or that it is not.
+		if r.ctxmgr.Budget.Known() {
+			src := r.ctxmgr.LimitSource
+			if src == "" {
+				src = "configured"
+			}
+			_ = r.em.Status(fmt.Sprintf("CONTEXT_LIMIT: %d (%s)", r.ctxmgr.Budget.ModelLimit, src))
+		} else {
+			_ = r.em.Status("CONTEXT_LIMIT: unknown (unbounded)")
+		}
 	}
 	lastReductions := 0
 

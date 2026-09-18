@@ -90,11 +90,33 @@ context gets a bounded one.
 ```
 
 `policy` is `bounded` (default) or `unbounded` (turns the feature off);
-`model_limit` is the model's window (0 or absent = unknown); the reserves
-are derived when absent; `keep_recent_turns` defaults to 8; the two
-booleans default to true. `SIMPLE_HARNESS_CONTEXT_POLICY` and
-`SIMPLE_HARNESS_CONTEXT_MODEL_LIMIT` override the first two from the
-environment.
+`model_limit` is the model's window (0 or absent = ask the runtime, see
+below); the reserves are derived when absent; `keep_recent_turns`
+defaults to 8; the booleans default to true. `SIMPLE_HARNESS_CONTEXT_POLICY`,
+`SIMPLE_HARNESS_CONTEXT_MODEL_LIMIT` and `SIMPLE_HARNESS_CONTEXT_PROBE_LIMIT`
+override from the environment.
+
+## Where the limit comes from
+
+The model context limit is resolved, in order:
+
+1. `--context-limit <n>` on the command line — a deliberate act for this
+   run; nothing else is consulted.
+2. The runtime, unless `probe_limit` is false: the harness asks what
+   window the model is actually served with — `max_model_len` from
+   `/v1/models` (vLLM, SGLang), `n_ctx` from `/props` (llama.cpp), or
+   `num_ctx` from `/api/show` (Ollama). It deliberately ignores
+   architecture maxima such as Ollama's `context_length`, which for a
+   model served at 65 536 says 262 144: a limit above the served window
+   would make the budget unsafe. Each request is bounded by three
+   seconds; a runtime that reports nothing yields "unknown".
+3. `context.model_limit` from configuration. When both the runtime and
+   the configuration report a figure, the smaller is used and the
+   report names both.
+
+The result is announced once per run as a `CONTEXT_LIMIT: <n> (<source>)`
+status event (`CONTEXT_LIMIT: unknown (unbounded)` when nothing is known),
+and `context show` prints it as `Limit source:`.
 
 Turning it off has to be asked for by name: any other value of `policy`,
 including a misspelling, leaves the safe behaviour in place.
@@ -118,6 +140,7 @@ Active input budget:            110592
 Pinned:                           5210
 Recent verbatim:                 27100
 Reducible:                       19400
+Compacted history:                2210
 Tool schemas:                     8870
 --------------------------------------
 Active context:                  60580

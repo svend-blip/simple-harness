@@ -394,7 +394,7 @@ func runContextShow(args []string) int {
 		SystemExternal: *systemText + systemFileContent,
 		Skills:         skills,
 		Tools:          globalRegistry,
-		ContextPolicy:  contextPolicyFrom(cfg.Context, *contextLimit),
+		ContextPolicy:  resolveContextPolicy(cfg.Context, *contextLimit, loop.NormalizeBaseURL(*baseURL), *modelName, cfg.Model.APIKey),
 	}, client, em, io.Discard)
 
 	// Run 010 / handoff 038: --limit <n> overflow wiring on the
@@ -627,7 +627,7 @@ func runContextDoctor(args []string) int {
 		SystemExternal: *systemText + systemFileContent,
 		Skills:         skills,
 		Tools:          globalRegistry,
-		ContextPolicy:  contextPolicyFrom(cfg.Context, *contextLimit),
+		ContextPolicy:  resolveContextPolicy(cfg.Context, *contextLimit, loop.NormalizeBaseURL(*baseURL), *modelName, cfg.Model.APIKey),
 	}, client, em, io.Discard)
 
 	// Run 010 / handoff 038: --limit <n> overflow wiring on the

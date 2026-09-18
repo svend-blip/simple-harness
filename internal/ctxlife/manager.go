@@ -71,6 +71,7 @@ type Accounting struct {
 	Pinned       int
 	Recent       int
 	Reducible    int
+	Compacted    int // tokens held by compaction summaries (pinned)
 	ToolSchemas  int
 	ToolResults  int
 	Conversation int
@@ -126,6 +127,10 @@ type Manager struct {
 	// ToolSchemaTokens is the tool surface's cost, which the loop
 	// knows and the message list does not carry.
 	ToolSchemaTokens int
+
+	// LimitSource says where Budget.ModelLimit came from (a flag, the
+	// configuration, the runtime), for the report.
+	LimitSource string
 
 	Stats Stats
 }
@@ -286,6 +291,9 @@ func (m *Manager) Account(messages []model.Message) Accounting {
 			a.Recent += n
 		default:
 			a.Reducible += n
+		}
+		if IsCompacted(msg) {
+			a.Compacted += n
 		}
 		if msg.Role == "tool" {
 			a.ToolResults += n

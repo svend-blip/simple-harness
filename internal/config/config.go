@@ -82,6 +82,16 @@ type ContextConfig struct {
 	// explicit false can be told from an absent key. Nil means on.
 	ToolResultPruning *bool `json:"tool_result_pruning,omitempty"`
 	Compaction        *bool `json:"compaction,omitempty"`
+	// ProbeLimit asks the runtime for the served context window at
+	// session start (§5: "from runtime/model metadata where
+	// reliable"). Nil means on. A configured ModelLimit and a probed
+	// one are reconciled by taking the smaller.
+	ProbeLimit *bool `json:"probe_limit,omitempty"`
+}
+
+// ProbeEnabled resolves the tri-state pointer. Absent means on.
+func (c ContextConfig) ProbeEnabled() bool {
+	return c.ProbeLimit == nil || *c.ProbeLimit
 }
 
 // Bounded reports whether the lifecycle is on. Anything other than
@@ -446,6 +456,17 @@ func setEnvField(cfg *Config, field, val string) error {
 		mc.RequestTimeout = d
 	case "context_policy":
 		cfg.Context.Policy = val
+	case "context_probe_limit":
+		switch strings.ToLower(strings.TrimSpace(val)) {
+		case "true", "1", "yes", "on":
+			v := true
+			cfg.Context.ProbeLimit = &v
+		case "false", "0", "no", "off":
+			v := false
+			cfg.Context.ProbeLimit = &v
+		default:
+			return fmt.Errorf("invalid context_probe_limit %q: want true or false", val)
+		}
 	case "context_model_limit":
 		n, err := strconv.Atoi(val)
 		if err != nil || n < 0 {
@@ -712,6 +733,7 @@ type contextOverlay struct {
 	KeepRecentTurns   *int    `json:"keep_recent_turns"`
 	ToolResultPruning *bool   `json:"tool_result_pruning"`
 	Compaction        *bool   `json:"compaction"`
+	ProbeLimit        *bool   `json:"probe_limit"`
 }
 
 type modelOverlay struct {
@@ -807,6 +829,10 @@ func applyOverlay(cfg *Config, overlay configOverlay, modelPresent map[string]st
 		if c.Compaction != nil {
 			v := *c.Compaction
 			cfg.Context.Compaction = &v
+		}
+		if c.ProbeLimit != nil {
+			v := *c.ProbeLimit
+			cfg.Context.ProbeLimit = &v
 		}
 	}
 	if overlay.Model == nil && overlay.MCPServers == nil && !mcpServersPresent {

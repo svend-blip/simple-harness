@@ -14,7 +14,8 @@ BIN="$TMP/simple-harness"
 WORK="$TMP/work"
 mkdir -p "$WORK"
 STUB_PID=""
-cleanup() { [ -n "$STUB_PID" ] && kill "$STUB_PID" 2>/dev/null; rm -rf "$TMP"; }
+STUB2_PID=""
+cleanup() { [ -n "$STUB_PID" ] && kill "$STUB_PID" 2>/dev/null; [ -n "$STUB2_PID" ] && kill "$STUB2_PID" 2>/dev/null; rm -rf "$TMP"; }
 trap cleanup EXIT
 
 pass=0
@@ -41,6 +42,14 @@ for _ in $(seq 1 60); do [ -s "$WORK/port" ] && break; sleep 0.1; done
 [ -s "$WORK/port" ] || { echo "the stub endpoint did not start" >&2; exit 1; }
 STUB="http://127.0.0.1:$(cat "$WORK/port")"
 echo "stub endpoint at $STUB"
+# A second stub that reports a served window, for the §5 probe check.
+python3 scripts/stub-endpoint.py "$WORK/port2" 20480 &
+STUB2_PID=$!
+for _ in $(seq 1 60); do [ -s "$WORK/port2" ] && break; sleep 0.1; done
+STUB2="http://127.0.0.1:$(cat "$WORK/port2")"
+# The probe is off for the checks that assert an unknown limit; the
+# probe check turns it on.
+export SIMPLE_HARNESS_CONTEXT_PROBE_LIMIT=false
 echo
 
 printf 'summarise the repository and list its packages\n' >"$WORK/prompt.txt"
@@ -51,9 +60,18 @@ SHOW="$BIN context show --base-url $STUB --model stub --workspace $WORK --prompt
 
 check 1 "the complete active context is accounted for" "
     out=\$($SHOW --context-limit 131072)
-    grep -q 'Active context:' <<<\"\$out\" &&
-    grep -q 'Tool schemas:'   <<<\"\$out\" &&
-    grep -q 'Pinned:'         <<<\"\$out\""
+    grep -q 'Active context:'     <<<\"\$out\" &&
+    grep -q 'Tool schemas:'       <<<\"\$out\" &&
+    grep -q 'Compacted history:'  <<<\"\$out\" &&
+    grep -q 'Pinned:'             <<<\"\$out\""
+
+check 5b "the served window is taken from the runtime when it reports one" "
+    out=\$(SIMPLE_HARNESS_CONTEXT_PROBE_LIMIT=true $BIN context show --base-url $STUB2 --model stub --workspace $WORK --prompt-file $WORK/prompt.txt)
+    grep -q 'Model context limit: *20480' <<<\"\$out\" &&
+    grep -q 'Limit source: *runtime' <<<\"\$out\""
+
+check 24b "MCP tools keep working after pruning and compaction (§24.10, §24.11)" "
+    cd $REPO && go test ./internal/loop/ -run 'TestMCPToolsKeepWorkingAfterPruningAndCompaction' -count=1"
 
 check 2 "a safe budget is derived from the model limit" "
     out=\$($SHOW --context-limit 131072)
