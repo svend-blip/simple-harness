@@ -276,3 +276,149 @@ done`})
 		t.Errorf("a call after cancellation = %v, want a closed-transport error", err)
 	}
 }
+
+// strictParamsStub is a stdio MCP server that, like the reference
+// TypeScript SDK, validates each message against the JSON-RPC schema
+// before dispatch: `"params":null` is not an object, so the message is
+// dropped without a response.
+const strictParamsStub = `while IFS= read -r line; do
+  id=$(echo "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *'"params":null'*) ;;
+    *'"method":"initialize"'*) echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{}}";;
+    *'"method":"notifications/initialized"'*) ;;
+    *) echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"tools\":[{\"name\":\"t\",\"description\":\"d\",\"inputSchema\":{\"type\":\"object\"}}]}}";;
+  esac
+done`
+
+// TestStdioTransportOmitsAbsentParams — tools/list went out as
+// `"params":null`. The reference TypeScript SDK drops such a message
+// silently, so listing against scope-mcp hung until the startup
+// deadline ("listing failed: context deadline exceeded").
+func TestStdioTransportOmitsAbsentParams(t *testing.T) {
+	tr, err := NewStdioTransport(context.Background(), []string{"sh", "-c", strictParamsStub})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tr.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	listing, err := tr.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(listing) != 1 || listing[0].Name != "t" {
+		t.Errorf("listing = %+v", listing)
+	}
+}
+
+// TestHTTPTransportOmitsAbsentParams — the same wire defect on the
+// http transport: a request without parameters carries no params
+// member at all.
+func TestHTTPTransportOmitsAbsentParams(t *testing.T) {
+	var mu sync.Mutex
+	var listBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		_ = json.Unmarshal(body, &req)
+		if req.Method == "tools/list" {
+			mu.Lock()
+			listBody = string(body)
+			mu.Unlock()
+		}
+		if len(req.ID) == 0 {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"result":{"tools":[]}}`, req.ID)
+	}))
+	defer srv.Close()
+	tr := NewHTTPTransport(srv.URL)
+	defer tr.Close()
+	if _, err := tr.List(context.Background()); err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if listBody == "" {
+		t.Fatal("no tools/list request reached the server")
+	}
+	if strings.Contains(listBody, `"params"`) {
+		t.Errorf("tools/list carries a params member: %s", listBody)
+	}
+}
+
+// TestWireSchemaKeepsWhatTheModelNeeds — the model was shown only
+// {"goals":{"type":"array"}} for scope-mcp's set_goals: the item
+// shape, the status enum and every parameter description were lost in
+// the conversion to the validator's type-only schema, so the model had
+// to guess the structure of a call it could not see.
+func TestWireSchemaKeepsWhatTheModelNeeds(t *testing.T) {
+	in := map[string]interface{}{
+		"$schema": "http://json-schema.org/draft-07/schema#",
+		"type":    "object",
+		"properties": map[string]interface{}{
+			"goals": map[string]interface{}{
+				"type":        "array",
+				"description": "Full goal list, in intended order.",
+				"items": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"id":     map[string]interface{}{"type": "string"},
+						"status": map[string]interface{}{"type": "string", "enum": []interface{}{"pending", "active"}},
+						"rank":   map[string]interface{}{"type": "int"},
+						"done":   map[string]interface{}{"type": []interface{}{"bool", "null"}},
+					},
+					"required": []interface{}{"id"},
+				},
+			},
+		},
+		"required": []interface{}{"goals"},
+	}
+	raw := wireSchemaFromMap(in)
+	if raw == nil {
+		t.Fatal("wireSchemaFromMap returned nil for a complete schema")
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got["$schema"]; ok {
+		t.Error("$schema must not reach the model endpoint")
+	}
+	goals := got["properties"].(map[string]interface{})["goals"].(map[string]interface{})
+	if goals["description"] != "Full goal list, in intended order." {
+		t.Errorf("description lost: %v", goals["description"])
+	}
+	item := goals["items"].(map[string]interface{})
+	props := item["properties"].(map[string]interface{})
+	if enum, _ := props["status"].(map[string]interface{})["enum"].([]interface{}); len(enum) != 2 {
+		t.Errorf("enum lost: %v", props["status"])
+	}
+	// Strict endpoints answer 400 to the "int"/"bool" shorthand.
+	if props["rank"].(map[string]interface{})["type"] != "integer" {
+		t.Errorf("int not normalised: %v", props["rank"])
+	}
+	if alts := props["done"].(map[string]interface{})["type"].([]interface{}); alts[0] != "boolean" {
+		t.Errorf("bool not normalised inside a type array: %v", alts)
+	}
+	// The caller's map is not mutated.
+	if in["$schema"] == nil {
+		t.Error("input schema was mutated")
+	}
+
+	// A schema without the object envelope gets one; nil stays nil.
+	raw = wireSchemaFromMap(map[string]interface{}{})
+	_ = json.Unmarshal(raw, &got)
+	if got["type"] != "object" || got["properties"] == nil {
+		t.Errorf("empty schema not completed: %s", raw)
+	}
+	if wireSchemaFromMap(nil) != nil {
+		t.Error("nil schema must stay nil so the caller falls back")
+	}
+}

@@ -201,11 +201,17 @@ declaration is `read_only` and is unaffected. `run` still requires
 
 ## Remaining risks
 
-- `scope-mcp` was not running on this machine; the Simple Harness side
-  was validated against the live mcp-light server (stateful,
-  session-id, SSE) through the same transport and against stdio stubs
-  modelled on the reference SDK. A live scope-mcp round trip is still
-  owed.
+- The live scope-mcp round trip owed by the first pass was run the same
+  evening (`scripts/e2e-scope-mcp.sh`, 6/6) and found two defects the
+  SDK-modelled stubs had not, both corrected with regression tests —
+  see "Addendum: live scope-mcp round trip" below. scope-mcp is a stdio
+  server; "not running" was never the obstacle.
+- A stdio MCP server inherits the harness's cwd, not `--workspace`.
+  scope-mcp keeps its state under its cwd, so a harness started outside
+  the workspace puts `.scope-mcp/state.db` there. Not changed: which
+  directory a server should run in is the declaration's business, and
+  the config has no field for it yet. Recommendation: an optional `cwd`
+  on the stdio declaration, defaulting to the workspace.
 - MCP http: no re-initialize after a server restart (404 "Session not
   found" ends the session's MCP use); no `DELETE` on close.
 - Config: lenient env parsing (`0.7abc` → 0.7), negative
@@ -222,6 +228,43 @@ declaration is `read_only` and is unaffected. `run` still requires
   that overflowed the window can overflow the compaction request.
 - `max_tool_calls` / `max_execution_time` from SCOPE §3 remain
   unimplemented (documented as extension points).
+
+## Addendum: live scope-mcp round trip
+
+Run against `~/scope-mcp` at `4db943a` (reference TypeScript SDK, stdio)
+with a scripted model, after the report above was written.
+
+- **High — no server built on the TypeScript SDK could be listed.**
+  `internal/mcp/transport_stdio.go`, `transport_http.go`. Observed:
+  `mcp server unreachable: … listing failed: context deadline exceeded`,
+  exit 2, with the server demonstrably up. Expected: the listing.
+  Root cause: a request without parameters went out as `"params":null`.
+  JSON-RPC allows only an object or array there; the SDK validates the
+  envelope before dispatch and drops the message unanswered, so the
+  harness waited for a reply that was never coming. Python servers
+  (mcp-light) tolerate it, and the audit's stubs matched on `"method"`
+  only. Correction: the member is omitted when there are no parameters.
+  Tests: `TestStdioTransportOmitsAbsentParams`,
+  `TestHTTPTransportOmitsAbsentParams`.
+- **Medium — the model was shown a type-only schema for MCP tools.**
+  `internal/mcp/registry.go`, `internal/loop/loop.go`. Observed on the
+  wire for `set_goals`: `{"goals":{"type":"array"}}`. Expected: the
+  server's schema — the goal object's fields, the status enum, every
+  parameter description. Root cause: the request was rendered from
+  `tools.Schema`, which holds only what the validator consumes.
+  Correction: the adapter carries the server's `inputSchema`
+  (`tools.WireSchemaProvider`) and the loop prefers it; `$schema` is
+  dropped and the `int`/`bool` shorthand normalised at every depth, so
+  strict endpoints keep accepting it. Validation is unchanged. Tests:
+  `TestWireSchemaKeepsWhatTheModelNeeds`,
+  `TestToolDefinitionsCarryTheFullSchemaWhenAToolHasOne`. Effect on
+  accounting: tool definitions are larger and are counted as sent —
+  the ledger reads the same rendering the request uses.
+
+Verified live: listing, five tool rounds with correct call/result
+pairing, a server-side `isError` reaching the model as a failure, a
+schema violation rejected before the server, and state written by one
+harness process read back by the next.
 
 ## Readiness
 

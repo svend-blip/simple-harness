@@ -563,8 +563,17 @@ func toolsToChatRequestTools(reg *tools.Registry) ([]model.ToolDefinition, *stri
 			continue
 		}
 		meta := t.Meta()
-		schema := t.Schema()
-		params, err := schemaToJSONSchema(schema)
+		// A tool that knows its full JSON Schema (an MCP adapter)
+		// shows the model that; the type-only rendering of Schema()
+		// drops item shapes, enums and parameter descriptions.
+		var params json.RawMessage
+		var err error
+		if wp, ok := t.(tools.WireSchemaProvider); ok {
+			params = wp.WireSchema()
+		}
+		if len(params) == 0 {
+			params, err = schemaToJSONSchema(t.Schema())
+		}
 		if err != nil {
 			// A schema-render failure is a programming error in
 			// the tool's Schema declaration; the loop continues

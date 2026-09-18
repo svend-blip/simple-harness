@@ -78,6 +78,7 @@ func (m *Manager) AddServer(ctx context.Context, srv Server, transport Transport
 			FinalName:    finalName,
 			Description:  lt.Description,
 			Schema:       schema,
+			WireSchema:   wireSchemaFromMap(lt.InputSchema),
 			Transport:    transport,
 			CallTimeout:  m.CallTimeout,
 		})
@@ -241,6 +242,82 @@ func schemaFromMap(in map[string]interface{}) (tools.Schema, error) {
 	return out, nil
 }
 
+// wireSchemaFromMap renders a server's inputSchema for the model
+// request. schemaFromMap keeps only what the validator consumes
+// (required, property types); the model needs the rest — item shapes,
+// enums, nested objects, parameter descriptions — or it has to guess
+// the structure of a call it cannot see.
+//
+// The schema passes through with three corrections, all on a copy:
+// "$schema" is dropped (a dialect marker, not part of the parameters);
+// the "int"/"bool" shorthand becomes "integer"/"boolean" at every depth
+// (strict endpoints answer 400 to the shorthand); and the top level is
+// completed to an object with a properties map, which the function-
+// calling wire requires. A nil schema returns nil so the caller falls
+// back to the type-only rendering.
+func wireSchemaFromMap(in map[string]interface{}) json.RawMessage {
+	if in == nil {
+		return nil
+	}
+	out, _ := normalizeWireSchema(in).(map[string]interface{})
+	delete(out, "$schema")
+	if _, ok := out["type"].(string); !ok {
+		out["type"] = "object"
+	}
+	if _, ok := out["properties"].(map[string]interface{}); !ok {
+		out["properties"] = map[string]interface{}{}
+	}
+	bs, err := json.Marshal(out)
+	if err != nil {
+		return nil
+	}
+	return bs
+}
+
+// normalizeWireSchema deep-copies a decoded JSON value, rewriting the
+// type shorthand wherever a "type" member holds it.
+func normalizeWireSchema(v interface{}) interface{} {
+	switch tv := v.(type) {
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(tv))
+		for k, val := range tv {
+			if k == "type" {
+				out[k] = normalizeWireType(val)
+				continue
+			}
+			out[k] = normalizeWireSchema(val)
+		}
+		return out
+	case []interface{}:
+		out := make([]interface{}, len(tv))
+		for i, val := range tv {
+			out[i] = normalizeWireSchema(val)
+		}
+		return out
+	}
+	return v
+}
+
+func normalizeWireType(v interface{}) interface{} {
+	switch tv := v.(type) {
+	case string:
+		switch tv {
+		case "int":
+			return "integer"
+		case "bool":
+			return "boolean"
+		}
+		return tv
+	case []interface{}:
+		out := make([]interface{}, len(tv))
+		for i, val := range tv {
+			out[i] = normalizeWireType(val)
+		}
+		return out
+	}
+	return normalizeWireSchema(v)
+}
+
 // jsonTypeToPropertyType maps a JSON Schema "type" string to a
 // tools.PropertyType. Returns "" for unrecognized types (the caller
 // in schemaFromMap skips the property).
@@ -317,6 +394,7 @@ type adapterConfig struct {
 	FinalName    string
 	Description  string
 	Schema       tools.Schema
+	WireSchema   json.RawMessage
 	Transport    Transport
 	CallTimeout  time.Duration
 }
@@ -367,6 +445,7 @@ type mcpAdapter struct {
 	origName    string
 	meta        tools.ToolMeta
 	schema      tools.Schema
+	wireSchema  json.RawMessage
 	transport   Transport
 	auth        tools.AuthorizeFunc
 	policy      tools.Policy
@@ -388,6 +467,7 @@ func newAdapter(cfg adapterConfig) *mcpAdapter {
 		origName:    cfg.OriginalName,
 		meta:        tools.ToolMeta{Name: cfg.FinalName, Description: cfg.Description},
 		schema:      cfg.Schema,
+		wireSchema:  cfg.WireSchema,
 		transport:   cfg.Transport,
 		auth:        cfg.Auth,
 		policy:      cfg.Policy,
@@ -402,6 +482,10 @@ func (a *mcpAdapter) Meta() tools.ToolMeta { return a.meta }
 // Schema implements tools.Tool. Returns the resolved JSON-schema-lite
 // shape (the MCP server's verbatim schema, converted via schemaFromMap).
 func (a *mcpAdapter) Schema() tools.Schema { return a.schema }
+
+// WireSchema implements tools.WireSchemaProvider: the server's own
+// inputSchema, normalised by wireSchemaFromMap, is what the model sees.
+func (a *mcpAdapter) WireSchema() json.RawMessage { return a.wireSchema }
 
 // Execute implements tools.Tool. The adapter's role at execute time
 // is narrowly scoped:

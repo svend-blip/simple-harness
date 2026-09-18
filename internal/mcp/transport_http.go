@@ -38,7 +38,7 @@ import (
 //     headers plus the conditional Mcp-Session-Id header.
 //
 //   - List(): POST to endpoint with {"jsonrpc":"2.0","id":1,"method":
-//     "tools/list","params":{}}. Parse the JSON-RPC response.
+//     "tools/list"} (no params member). Parse the JSON-RPC response.
 //     "result": {"tools":[<tool>,...]}. Each tool's name +
 //     description + inputSchema map verbatim from the server's
 //     response. JSON-RPC error → List returns the wrapped error
@@ -385,7 +385,12 @@ func (t *httpTransport) roundtrip(ctx context.Context, method string, params int
 		"jsonrpc": "2.0",
 		"id":      id,
 		"method":  method,
-		"params":  params,
+	}
+	// A request without parameters carries no params member. JSON-RPC
+	// allows only an object or array there, and the reference
+	// TypeScript SDK drops a message with "params":null unanswered.
+	if params != nil {
+		reqBody["params"] = params
 	}
 	bs, err := json.Marshal(reqBody)
 	if err != nil {

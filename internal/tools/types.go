@@ -37,6 +37,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/svend-blip/simple-harness/internal/path"
 )
@@ -139,6 +140,16 @@ type Tool interface {
 	Meta() ToolMeta
 	Schema() Schema
 	Execute(ctx context.Context, call Call) (Result, error)
+}
+
+// WireSchemaProvider is implemented by a tool that knows a fuller JSON
+// Schema for its arguments than Schema() can express — an MCP adapter
+// holds the server's own inputSchema, with item shapes, enums and
+// parameter descriptions. Schema() stays the validator's input; the
+// wire schema is what the model is shown. A nil or empty result means
+// "none", and the caller renders Schema() instead.
+type WireSchemaProvider interface {
+	WireSchema() json.RawMessage
 }
 
 // Policy decides whether a tool call is allowed given the active

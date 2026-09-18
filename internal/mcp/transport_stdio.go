@@ -23,8 +23,9 @@ import (
 //
 // Wire shape (newline-delimited JSON-RPC 2.0 over stdin/stdout):
 //
-//   - List(): write {"jsonrpc":"2.0","id":<n>,"method":"tools/list",
-//     "params":{}}\n to child's stdin. Read JSON objects line-by-
+//   - List(): write {"jsonrpc":"2.0","id":<n>,"method":"tools/list"}\n
+//     to child's stdin (no params member: a request without
+//     parameters carries none). Read JSON objects line-by-
 //     line from stdout until a response with matching id arrives
 //     (the server may emit notifications/log entries on stdout —
 //     the transport ignores anything that isn't a JSON-RPC response
@@ -310,7 +311,12 @@ func (t *stdioTransport) exchange(ctx context.Context, method string, params int
 		"jsonrpc": "2.0",
 		"id":      id,
 		"method":  method,
-		"params":  params,
+	}
+	// A request without parameters carries no params member. JSON-RPC
+	// allows only an object or array there, and the reference
+	// TypeScript SDK drops a message with "params":null unanswered.
+	if params != nil {
+		reqBody["params"] = params
 	}
 	bs, err := json.Marshal(reqBody)
 	if err != nil {

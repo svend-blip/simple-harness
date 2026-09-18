@@ -445,3 +445,26 @@ func TestARunWhoseToolResultsExceedTheBudgetStillCompletes(t *testing.T) {
 		t.Error("no result was truncated; the fixture proves nothing")
 	}
 }
+
+// wireSchemaTool is a tool that carries a full JSON Schema next to the
+// validator's type-only one, as an MCP adapter does.
+type wireSchemaTool struct{ *stubLoopTool }
+
+func (wireSchemaTool) WireSchema() json.RawMessage {
+	return json.RawMessage(`{"type":"object","properties":{"goals":{"type":"array","items":{"type":"object"}}}}`)
+}
+
+// TestToolDefinitionsCarryTheFullSchemaWhenAToolHasOne — the request
+// showed the model the validator's type-only rendering even when the
+// tool knew its full schema.
+func TestToolDefinitionsCarryTheFullSchemaWhenAToolHasOne(t *testing.T) {
+	reg := tools.NewRegistry()
+	reg.Register(wireSchemaTool{&stubLoopTool{name: "set_goals"}})
+	defs, _ := toolsToChatRequestTools(reg)
+	if len(defs) != 1 {
+		t.Fatalf("defs = %d", len(defs))
+	}
+	if !strings.Contains(string(defs[0].Function.Parameters), `"items"`) {
+		t.Errorf("parameters = %s", defs[0].Function.Parameters)
+	}
+}
