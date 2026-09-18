@@ -95,13 +95,20 @@ func (LoadSkill) Execute(ctx context.Context, call tools.Call) (tools.Result, er
 		}}, nil
 	}
 
-	workspaceDir, err := os.Getwd()
-	if err != nil {
-		return tools.Result{Status: "error", Error: &tools.ToolError{
-			Kind:    "execution_failed",
-			Message: fmt.Sprintf("load_skill: cannot determine workspace directory: %v", err),
-			Call:    call,
-		}}, nil
+	// The workspace comes from the dispatch context; os.Getwd() is
+	// only the workspace when the harness was launched from it.
+	var workspaceDir string
+	if ws, ok := tools.WorkspaceFromContext(ctx); ok {
+		workspaceDir = ws.Root()
+	} else {
+		workspaceDir, err = os.Getwd()
+		if err != nil {
+			return tools.Result{Status: "error", Error: &tools.ToolError{
+				Kind:    "execution_failed",
+				Message: fmt.Sprintf("load_skill: cannot determine workspace directory: %v", err),
+				Call:    call,
+			}}, nil
+		}
 	}
 
 	opts := skill.LoadOptions{

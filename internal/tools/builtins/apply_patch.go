@@ -332,6 +332,22 @@ func (ApplyPatch) Execute(ctx context.Context, call tools.Call) (tools.Result, e
 // patch is "soft-positioned"). The test plan pins each behavior.
 func applyHunks(fileLines []string, hunks []patchHunk, pathVal string, call tools.Call) ([]string, *hunkApplyError) {
 	result := append([]string(nil), fileLines...)
+	// Hunk headers count lines of the ORIGINAL file. Once an earlier
+	// hunk has added or removed lines, a later hunk's target has
+	// moved by the net difference; searching from the original
+	// number in the modified slice missed targets that moved up and
+	// matched duplicates that sat further down.
+	delta := 0
+	// A CRLF file is matched with its line endings ignored — read_file
+	// hands the model lines without their '\r', so the patch it
+	// writes back has none — and keeps the endings it had.
+	crlf := false
+	for _, l := range fileLines {
+		if strings.HasSuffix(l, "\r") {
+			crlf = true
+			break
+		}
+	}
 	for hunkIdx, h := range hunks {
 		var oldSeq, newSeq []string
 		for _, l := range h.lines {
@@ -353,7 +369,7 @@ func applyHunks(fileLines []string, hunks []patchHunk, pathVal string, call tool
 			}
 		}
 
-		searchStart := h.oldStart - 1
+		searchStart := h.oldStart - 1 + delta
 		if searchStart < 0 {
 			searchStart = 0
 		}
@@ -386,11 +402,19 @@ func applyHunks(fileLines []string, hunks []patchHunk, pathVal string, call tool
 			}
 		}
 
+		if crlf {
+			for i, l := range newSeq {
+				if !strings.HasSuffix(l, "\r") {
+					newSeq[i] = l + "\r"
+				}
+			}
+		}
 		newResult := make([]string, 0, len(result)-len(oldSeq)+len(newSeq))
 		newResult = append(newResult, result[:matchIdx]...)
 		newResult = append(newResult, newSeq...)
 		newResult = append(newResult, result[matchIdx+len(oldSeq):]...)
 		result = newResult
+		delta += len(newSeq) - len(oldSeq)
 	}
 	return result, nil
 }
@@ -403,7 +427,7 @@ func linesEqual(a, b []string) bool {
 		return false
 	}
 	for i := range a {
-		if a[i] != b[i] {
+		if strings.TrimSuffix(a[i], "\r") != strings.TrimSuffix(b[i], "\r") {
 			return false
 		}
 	}
@@ -477,6 +501,12 @@ func parseUnifiedDiff(text string) ([]patchHunk, error) {
 					last := &hunks[len(hunks)-1]
 					last.lines = append(last.lines, patchLine{kind: ' ', text: ""})
 				}
+				continue
+			}
+			if strings.HasPrefix(line, "\\") {
+				// "\ No newline at end of file": every git diff of
+				// a file without a trailing newline carries it. It
+				// annotates the previous line; it is not a line.
 				continue
 			}
 			kind := line[0]

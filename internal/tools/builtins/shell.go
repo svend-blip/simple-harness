@@ -53,6 +53,10 @@ type Shell struct{}
 // process-group SIGTERM/SIGKILL path reaps the helper.
 var DefaultTimeout time.Duration
 
+// maxTimeoutMs bounds timeout_ms so the Duration multiplication
+// cannot overflow (1e18 ms did, and the result was no timeout at all).
+const maxTimeoutMs = int64(time.Duration(1<<63-1) / time.Millisecond)
+
 // Meta implements tools.Tool.
 func (Shell) Meta() tools.ToolMeta {
 	return tools.ToolMeta{
@@ -255,6 +259,13 @@ func (Shell) Execute(ctx context.Context, call tools.Call) (tools.Result, error)
 			timeoutMs = int(n)
 		}
 	}
+	if timeoutMs > int(maxTimeoutMs) {
+		return tools.Result{Status: "error", Error: &tools.ToolError{
+			Kind:    "schema_violation",
+			Message: fmt.Sprintf("shell: timeout_ms %d exceeds the maximum %d", timeoutMs, maxTimeoutMs),
+			Call:    call,
+		}}, nil
+	}
 	if timeoutMs <= 0 && DefaultTimeout > 0 {
 		timeoutMs = int(DefaultTimeout / time.Millisecond)
 	}
@@ -271,6 +282,11 @@ func (Shell) Execute(ctx context.Context, call tools.Call) (tools.Result, error)
 	cmd := shellCommand(command)
 	if cwd != "" {
 		cmd.Dir = cwd
+	} else if ws, ok := tools.WorkspaceFromContext(ctx); ok {
+		// The workspace is the default working directory. The
+		// process cwd is only the workspace when the harness was
+		// launched from it.
+		cmd.Dir = ws.Root()
 	}
 	cmd.SysProcAttr = procgroup.Attr()
 

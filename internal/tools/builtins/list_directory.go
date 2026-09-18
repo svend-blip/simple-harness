@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"sort"
 
@@ -134,6 +135,10 @@ func (ListDirectory) Execute(ctx context.Context, call tools.Call) (tools.Result
 		if e.IsDir() {
 			entry.Type = "dir"
 			// SizeBytes omitted for directories.
+		} else if e.Type()&fs.ModeSymlink != 0 {
+			// Reported as its own kind: a link to a directory was
+			// listed as a "file" with the link's own byte size.
+			entry.Type = "symlink"
 		} else {
 			entry.Type = "file"
 			info, err := e.Info()

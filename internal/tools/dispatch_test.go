@@ -201,3 +201,68 @@ func tempPathWorkspace(t *testing.T) path.Workspace {
 	}
 	return ws
 }
+
+// TestRegistry_Dispatch_DoesNotMutateTheCallersArguments — the
+// authorize stage rewrites path arguments to their normalized form
+// for the tool. That rewrite must land on a copy: the caller's map is
+// also the model's own tool_calls record in the conversation, and the
+// model must see what it sent, not what the harness resolved it to.
+func TestRegistry_Dispatch_DoesNotMutateTheCallersArguments(t *testing.T) {
+	var calls []Call
+	reg := NewRegistry()
+	reg.Register(&recordingTool{
+		meta:   ToolMeta{Name: "t", Description: "d"},
+		schema: Schema{Properties: map[string]PropertyType{"path": TypeString}},
+		calls:  &calls,
+	})
+	ws, err := path.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rewriting := func(_ context.Context, call Call, _ Schema, ws Workspace, _ Policy) *DecisionError {
+		call.Arguments["path"] = ws.Root() + "/rewritten"
+		return nil
+	}
+	args := map[string]any{"path": "original"}
+	res := reg.Dispatch(context.Background(), Call{Name: "t", Arguments: args}, ws, stubPolicy{}, rewriting)
+	if res.Status != "ok" {
+		t.Fatalf("Dispatch: %+v", res)
+	}
+	if args["path"] != "original" {
+		t.Errorf("caller's arguments were mutated: %v", args)
+	}
+	if len(calls) != 1 || calls[0].Arguments["path"] != ws.Root()+"/rewritten" {
+		t.Errorf("tool saw %v, want the rewritten path", calls)
+	}
+}
+
+// TestRegistry_Dispatch_CarriesTheWorkspaceInContext — tools that
+// need the workspace root (the shell's default cwd, the skill tools'
+// workspace search root) used os.Getwd(), which is only the
+// workspace when the harness happens to run from it.
+func TestRegistry_Dispatch_CarriesTheWorkspaceInContext(t *testing.T) {
+	var seen []string
+	reg := NewRegistry()
+	reg.Register(&ctxTool{seen: &seen})
+	ws, err := path.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg.Dispatch(context.Background(), Call{Name: "c", Arguments: map[string]any{}}, ws, stubPolicy{}, allowAllAuthorize)
+	if len(seen) != 1 || seen[0] != ws.Root() {
+		t.Errorf("tool saw workspace %v, want %q", seen, ws.Root())
+	}
+	if _, ok := WorkspaceFromContext(context.Background()); ok {
+		t.Error("a bare context must not report a workspace")
+	}
+}
+
+type ctxTool struct{ seen *[]string }
+
+func (c *ctxTool) Meta() ToolMeta { return ToolMeta{Name: "c", Description: "d"} }
+func (c *ctxTool) Schema() Schema { return Schema{} }
+func (c *ctxTool) Execute(ctx context.Context, _ Call) (Result, error) {
+	ws, _ := WorkspaceFromContext(ctx)
+	*c.seen = append(*c.seen, ws.Root())
+	return Result{Status: "ok"}, nil
+}

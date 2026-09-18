@@ -2,6 +2,8 @@ package perm
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -287,4 +289,50 @@ func tempWorkspace(t *testing.T) path.Workspace {
 		t.Fatalf("path.New(%q): %v", dir, err)
 	}
 	return ws
+}
+
+// TestAuthorize_RewritesPathArgumentsToWorkspaceAbsolute — the path
+// stage used to validate the normalized path and throw it away, so
+// every tool then opened the raw argument against the PROCESS working
+// directory. With --workspace elsewhere, `read_file grep.go` read a
+// file outside the workspace and `list_directory .` listed the cwd.
+// The normalized absolute path must be what the tool receives.
+func TestAuthorize_RewritesPathArgumentsToWorkspaceAbsolute(t *testing.T) {
+	ws := tempWorkspace(t)
+	if err := os.MkdirAll(filepath.Join(ws.Root(), "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	call := tools.Call{Name: "read_file", Arguments: map[string]any{"path": "sub/f.txt"}}
+	schema := tools.Schema{Properties: map[string]tools.PropertyType{"path": tools.TypeString}, Required: []string{"path"}}
+	if de := Authorize(context.Background(), call, schema, ws, NewPolicy(READ_ONLY)); de != nil {
+		t.Fatalf("Authorize: %v", de)
+	}
+	if got, want := call.Arguments["path"], filepath.Join(ws.Root(), "sub", "f.txt"); got != want {
+		t.Errorf("path after Authorize = %v, want %q", got, want)
+	}
+}
+
+// TestAuthorize_ShellCwdIsPathShaped — `cwd` names a directory the
+// shell runs in. It was not in the path-shaped set, so cwd="/" and
+// cwd=<anywhere> passed the path stage and the WORKSPACE_WRITE policy;
+// only a literal "../" prefix was caught.
+func TestAuthorize_ShellCwdIsPathShaped(t *testing.T) {
+	ws := tempWorkspace(t)
+	outside := t.TempDir()
+	schema := tools.Schema{Properties: map[string]tools.PropertyType{
+		"command": tools.TypeString, "cwd": tools.TypeString}, Required: []string{"command"}}
+	for _, cwd := range []string{"/", outside, "../"} {
+		call := tools.Call{Name: "shell", Arguments: map[string]any{"command": "true", "cwd": cwd}}
+		de := Authorize(context.Background(), call, schema, ws, NewPolicy(WORKSPACE_WRITE))
+		if de == nil || de.Stage != "path" {
+			t.Errorf("cwd=%q: Authorize = %v, want a path-stage rejection", cwd, de)
+		}
+	}
+	call := tools.Call{Name: "shell", Arguments: map[string]any{"command": "true", "cwd": "."}}
+	if de := Authorize(context.Background(), call, schema, ws, NewPolicy(WORKSPACE_WRITE)); de != nil {
+		t.Errorf("cwd=.: Authorize = %v, want allowed", de)
+	}
+	if got := call.Arguments["cwd"]; got != ws.Root() {
+		t.Errorf("cwd after Authorize = %v, want %q", got, ws.Root())
+	}
 }

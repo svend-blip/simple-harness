@@ -290,7 +290,14 @@ func (ReadFile) Execute(ctx context.Context, call tools.Call) (tools.Result, err
 		startLine = 1
 	}
 	if startLine > totalLines {
-		startLine = totalLines
+		// Clamping to the last line returned that line as a fresh
+		// result to a model paging through the file, which then
+		// never learned it had reached the end.
+		return tools.Result{Status: "error", Error: &tools.ToolError{
+			Kind:    "schema_violation",
+			Message: fmt.Sprintf("read_file: start_line %d is past the end of %s (%d lines)", startLine, pathVal, totalLines),
+			Call:    call,
+		}}, nil
 	}
 	if endLine < startLine {
 		endLine = startLine

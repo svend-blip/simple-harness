@@ -309,7 +309,11 @@ func (Grep) runRg(rgPath, pattern, path, filePattern string, caseInsensitive boo
 	if filePattern != "" {
 		args = append(args, "--glob="+filePattern)
 	}
-	args = append(args, pattern, path)
+	// -e marks the pattern as a pattern and -- ends option parsing:
+	// a model-supplied pattern such as "--pre=/bin/sh" was otherwise
+	// parsed by rg as a flag, and that one runs a program over every
+	// file — under READ_ONLY.
+	args = append(args, "-e", pattern, "--", path)
 
 	cmd := exec.Command(rgPath, args...)
 	var stdout, stderr bytes.Buffer

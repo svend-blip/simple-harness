@@ -147,44 +147,36 @@ func (w Workspace) Normalize(p string) (string, error) {
 		}
 	}
 
-	// Step 2: absolute paths must resolve inside the workspace root.
-	// filepath.IsAbs on Linux matches any leading "/". An absolute path
-	// that is itself equal-to-or-under the resolved root is allowed
-	// (an absolute reference to a file inside the workspace is the same
-	// file as the relative one); an absolute path outside the root is
-	// rejected as an absolute_path escape.
-	//
-	// The "outside" check is segment-boundary-safe: a literal string-
-	// prefix match against ".." is wrong (e.g. a file whose cleaned
-	// relative path begins with "..oddfile" would be wrongly flagged).
-	// The correct test is "rel is exactly '..' OR rel starts with '..'
-	// followed by a path separator" — both forms mean "the cleaned
-	// path resolves to a parent or higher level of the root".
+	var candidate string
 	if filepath.IsAbs(p) {
+		// Step 2: an absolute path may spell the workspace through
+		// an unresolved symlink (the root given to New was itself a
+		// link), so the comparison is made on the resolved form of
+		// its longest existing prefix. A path whose resolved form is
+		// outside the root is an absolute_path escape when the
+		// unresolved string was already outside, and a
+		// symlink_escape when only the resolution took it there.
 		cleaned := filepath.Clean(p)
-		rel, err := filepath.Rel(w.root, cleaned)
-		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return "", &EscapeError{
-				Path:      p,
-				Workspace: w.root,
-				Reason:    ReasonAbsolutePath,
-			}
+		resolved, err := resolveExistingPrefix(cleaned)
+		if err != nil {
+			return "", fmt.Errorf("path: eval symlinks for %q: %w", cleaned, err)
 		}
-		// The absolute path is inside the workspace. Return the
-		// cleaned form without further resolution — an absolute
-		// reference to an existing-or-not file inside the workspace
-		// is allowed.
-		return cleaned, nil
+		if w.outside(resolved) {
+			reason := ReasonSymlinkEscape
+			if w.outside(cleaned) {
+				reason = ReasonAbsolutePath
+			}
+			return "", &EscapeError{Path: p, Workspace: w.root, Reason: reason}
+		}
+		return resolved, nil
 	}
 
 	// Step 3: join and clean; check the cleaned string against the
-	// root. The "outside" check is segment-boundary-safe (see step 2
-	// for the rationale — a literal ".."-prefix match is wrong; the
-	// correct test is "rel is exactly '..' OR rel starts with '..'
-	// followed by a path separator").
-	candidate := filepath.Clean(filepath.Join(w.root, p))
-	rel, err := filepath.Rel(w.root, candidate)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	// root. The "outside" check is segment-boundary-safe (a literal
+	// ".."-prefix match is wrong; the correct test is "rel is exactly
+	// '..' OR rel starts with '..' followed by a path separator").
+	candidate = filepath.Clean(filepath.Join(w.root, p))
+	if w.outside(candidate) {
 		return "", &EscapeError{
 			Path:      p,
 			Workspace: w.root,
@@ -192,32 +184,58 @@ func (w Workspace) Normalize(p string) (string, error) {
 		}
 	}
 
-	// Step 4: evaluate symlinks on the candidate. EvalSymlinks fails
-	// with a NotExist error if the file does not exist; in that case we
-	// fall back to the cleaned candidate (no symlink resolution) — the
-	// prefix check above already rejected ".." escapes, so a non-
-	// existent path that survives the prefix check is inside the root
-	// by construction.
-	evaluated, err := filepath.EvalSymlinks(candidate)
+	// Step 4: evaluate symlinks. For a path that does not exist yet
+	// the longest existing ancestor is evaluated and the missing
+	// tail re-attached, so a new file under a directory symlink that
+	// points outside the workspace is caught — write_file and
+	// apply_patch create files through exactly this path, and a
+	// NotExist on the leaf used to skip evaluation altogether.
+	evaluated, err := resolveExistingPrefix(candidate)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return candidate, nil
-		}
-		// Any other error (permission, EIO, etc.) is propagated as a
-		// plain Go error so the caller can decide. We do NOT wrap it
-		// in *EscapeError because the failure mode is not "the path
-		// escaped" — it is "the filesystem rejected the lookup".
+		// Permission, EIO, etc.: not "the path escaped" but "the
+		// filesystem rejected the lookup"; propagated as a plain
+		// error so the caller can decide.
 		return "", fmt.Errorf("path: eval symlinks for %q: %w", candidate, err)
 	}
-
-	rel, err = filepath.Rel(w.root, evaluated)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	if w.outside(evaluated) {
 		return "", &EscapeError{
 			Path:      p,
 			Workspace: w.root,
 			Reason:    ReasonSymlinkEscape,
 		}
 	}
-
 	return evaluated, nil
+}
+
+// outside reports whether the cleaned absolute path abs lies outside
+// the workspace root. Segment-boundary-safe: "<root>-evil/x" is
+// outside, "<root>/..oddfile" is inside.
+func (w Workspace) outside(abs string) bool {
+	rel, err := filepath.Rel(w.root, abs)
+	return err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// resolveExistingPrefix evaluates the symlinks in the longest existing
+// prefix of abs and re-attaches the non-existent remainder unchanged.
+// An existing path is simply evaluated. Errors other than NotExist
+// are returned.
+func resolveExistingPrefix(abs string) (string, error) {
+	evaluated, err := filepath.EvalSymlinks(abs)
+	if err == nil {
+		return evaluated, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	dir, base := filepath.Split(abs)
+	dir = filepath.Clean(dir)
+	if dir == abs {
+		// Reached the filesystem root without finding anything.
+		return abs, nil
+	}
+	parent, err := resolveExistingPrefix(dir)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(parent, base), nil
 }

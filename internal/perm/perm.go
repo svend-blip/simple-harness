@@ -62,13 +62,20 @@ func Authorize(ctx context.Context, call tools.Call, schema tools.Schema, ws pat
 		if !looksLikePath(argName, s) {
 			continue
 		}
-		if _, err := ws.Normalize(s); err != nil {
+		normalized, err := ws.Normalize(s)
+		if err != nil {
 			var ee *path.EscapeError
 			if errors.As(err, &ee) {
 				return &tools.DecisionError{Stage: "path", Reason: ee.Reason, Call: call}
 			}
 			return &tools.DecisionError{Stage: "path", Reason: "normalize_failed", Call: call}
 		}
+		// The tool receives the normalized absolute path. Before
+		// this the normalized value was checked and discarded, and
+		// every tool opened the raw argument relative to the
+		// process working directory — correct only when the harness
+		// was launched from the workspace.
+		call.Arguments[argName] = normalized
 	}
 
 	// 3. Policy decision. The stub Permissive always returns Allowed;
@@ -112,7 +119,7 @@ func looksLikePath(argName, argValue string) bool {
 		return false
 	}
 	switch argName {
-	case "path", "file", "dir":
+	case "path", "file", "dir", "cwd":
 		return true
 	}
 	if strings.HasSuffix(argName, "_path") ||

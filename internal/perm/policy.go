@@ -208,7 +208,7 @@ func hasEscapingPathArg(args map[string]any, wsRoot string) bool {
 // stage would have caught.
 func looksLikePathish(name, value string) bool {
 	switch name {
-	case "path", "file", "dir":
+	case "path", "file", "dir", "cwd":
 		return true
 	}
 	if strings.HasSuffix(name, "_path") ||

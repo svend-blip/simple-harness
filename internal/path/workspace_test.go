@@ -190,3 +190,96 @@ func tempWorkspace(t *testing.T) Workspace {
 	}
 	return ws
 }
+
+// TestNormalize_AbsolutePathThroughSymlinkEscapes — an absolute path
+// spelled inside the workspace whose components include a symlink
+// pointing outside must be rejected exactly like its relative twin.
+// The absolute branch used to return the cleaned string without
+// evaluating symlinks, so `<ws>/link/secret` read the outside file
+// while `link/secret` was rejected.
+func TestNormalize_AbsolutePathThroughSymlinkEscapes(t *testing.T) {
+	ws := tempWorkspace(t)
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("s"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(ws.Root(), "link")); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{
+		filepath.Join(ws.Root(), "link", "secret.txt"),
+		"link/secret.txt",
+	} {
+		_, err := ws.Normalize(p)
+		var ee *EscapeError
+		if !errors.As(err, &ee) || ee.Reason != ReasonSymlinkEscape {
+			t.Errorf("Normalize(%q) = err %v, want EscapeError{symlink_escape}", p, err)
+		}
+	}
+}
+
+// TestNormalize_NewFileUnderSymlinkedParentEscapes — a file that does
+// not exist yet, under a directory symlink that points outside the
+// workspace, must be rejected: write_file and apply_patch create
+// files through exactly this path, and a NotExist on the leaf used to
+// skip symlink evaluation altogether.
+func TestNormalize_NewFileUnderSymlinkedParentEscapes(t *testing.T) {
+	ws := tempWorkspace(t)
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(ws.Root(), "link")); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{
+		"link/new.txt",
+		"link/deeper/new.txt",
+		filepath.Join(ws.Root(), "link", "new.txt"),
+	} {
+		_, err := ws.Normalize(p)
+		var ee *EscapeError
+		if !errors.As(err, &ee) || ee.Reason != ReasonSymlinkEscape {
+			t.Errorf("Normalize(%q) = err %v, want EscapeError{symlink_escape}", p, err)
+		}
+	}
+	// A new file under a real subdirectory is still fine, and comes
+	// back as the absolute path it will be created at.
+	if err := os.Mkdir(filepath.Join(ws.Root(), "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ws.Normalize("sub/new.txt")
+	if err != nil || got != filepath.Join(ws.Root(), "sub", "new.txt") {
+		t.Errorf("Normalize(sub/new.txt) = %q, %v", got, err)
+	}
+}
+
+// TestNormalize_AbsolutePathSpelledThroughSymlinkedRoot — when the
+// workspace root itself was given through a symlink, an absolute path
+// spelled with that unresolved root names a file inside the workspace
+// and must be accepted (it used to be rejected as absolute_path
+// because the string did not start with the resolved root).
+func TestNormalize_AbsolutePathSpelledThroughSymlinkedRoot(t *testing.T) {
+	real := t.TempDir()
+	linkParent := t.TempDir()
+	link := filepath.Join(linkParent, "ws")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(real, "f.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ws, err := New(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ws.Normalize(filepath.Join(link, "f.txt"))
+	if err != nil {
+		t.Fatalf("Normalize(<link-root>/f.txt): %v", err)
+	}
+	if want := filepath.Join(ws.Root(), "f.txt"); got != want {
+		t.Errorf("got %q want %q", got, want)
+	}
+	// And a not-yet-existing file spelled the same way.
+	got, err = ws.Normalize(filepath.Join(link, "new.txt"))
+	if err != nil || got != filepath.Join(ws.Root(), "new.txt") {
+		t.Errorf("Normalize(<link-root>/new.txt) = %q, %v", got, err)
+	}
+}

@@ -92,6 +92,16 @@ func (r *Registry) Dispatch(ctx context.Context, call Call, ws Workspace, pol Po
 			Call:    call,
 		}}
 	}
+	// The authorize stage rewrites path-shaped arguments to their
+	// normalized absolute form for the tool. That must land on a
+	// copy: the caller's map is also the model's own tool_calls
+	// record in the conversation history, and the model must see
+	// what it sent, not what the harness resolved it to.
+	args := make(map[string]any, len(call.Arguments))
+	for k, v := range call.Arguments {
+		args[k] = v
+	}
+	call.Arguments = args
 	if de := auth(ctx, call, t.Schema(), ws, pol); de != nil {
 		return Result{Status: "error", Error: &ToolError{
 			Kind:    mapStageToKind(de.Stage, de.Reason),
@@ -99,7 +109,7 @@ func (r *Registry) Dispatch(ctx context.Context, call Call, ws Workspace, pol Po
 			Call:    de.Call,
 		}}
 	}
-	res, err := t.Execute(ctx, call)
+	res, err := t.Execute(WithWorkspace(ctx, ws), call)
 	if err != nil {
 		return Result{Status: "error", Error: &ToolError{
 			Kind:    "execution_failed",

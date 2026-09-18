@@ -173,6 +173,15 @@ func (SearchFiles) Execute(ctx context.Context, call tools.Call) (tools.Result, 
 	var matches []string
 	walkErr := filepath.WalkDir(pathVal, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
+			// An unreadable subdirectory is skipped, as the grep
+			// tool and rg skip it; aborting the whole search hid
+			// every match elsewhere behind a "not_found".
+			if p != pathVal && errors.Is(err, fs.ErrPermission) {
+				if d != nil && d.IsDir() {
+					return fs.SkipDir
+				}
+				return nil
+			}
 			return err
 		}
 		// Skip the literal .git directory at any depth. fs.SkipDir
