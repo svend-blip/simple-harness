@@ -348,9 +348,23 @@ Corrected in `internal/ctxlife`:
 Not done, recommended: the compaction request carries no size target and
 no output cap, so one summary ran to 1 424 tokens and 35 s.
 `model.ChatRequest` has no per-request output limit; adding one is a
-change to the wire contract and was left out of this correction. The
-Ollama re-measurement with the correction is owed: the GPU was serving
-FreeToken when this was written.
+change to the wire contract and was left out of this correction. Re-measured on Ollama with the correction (2026-09-19, same model, limit
+and turn budget as the twenty-four-turn run above; peak 560 W, 79 °C, no
+fault):
+
+| arm | calls | compact | input tokens | largest prompt | reductions | runtime | exit |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| bounded | 12 | 0 | 108 746 | 11 154 | 6 | 49.7 s | 0 |
+| baseline | 11 | 0 | 447 826 | **64 530** | 0 | 60.4 s | 0 |
+
+The bounded arm went from 2.9x the baseline's wall time to 0.82x, with
+76 % fewer input tokens, and completed the task. Its time is 34.3 s to
+first token and 15.3 s generating, against the baseline's 36.2 s and
+24.2 s: twelve prompts of at most 11k cost about what eleven prompts
+growing to 64k do, and nothing is spent on compaction. One run per arm —
+the model took twelve calls this time and fifteen working calls
+yesterday, so the ratio will move between runs; the 103 s of compaction
+is what is gone.
 
 Not measured: resume/continue across invocations, which the harness does
 not implement (a new session is a new composition; durable history is
