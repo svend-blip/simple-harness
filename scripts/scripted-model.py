@@ -27,6 +27,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_response(404)
         self.end_headers()
 
+    def do_HEAD(self):
+        # A launcher's preflight may probe the endpoint with HEAD
+        # (FlowRunner does); the stdlib answers 501 to a method it has no
+        # handler for, which reads as "endpoint down".
+        self.send_response(200)
+        self.end_headers()
+
     def do_POST(self):
         global n
         if self.path != "/v1/chat/completions":
