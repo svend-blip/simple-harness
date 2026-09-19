@@ -383,9 +383,34 @@ begins: about 1 500-2 300 tokens of it here, for a summary of 500. That
 is where a compaction's time goes — the size target barely moved the
 summary, which was already under it — and a cap sized for the summary
 alone returned nothing. With reasoning off the same compaction takes a
-fifth of the time. `none` is a setting and not the default because not
-every OpenAI-compatible endpoint accepts the value; Ollama does, and
-ignores `enable_thinking` and `think` on `/v1`.
+fifth of the time.
+
+The same test against FreeToken (`Qwen3.8-Flash-Next-Abliterated-NVFP4`):
+
+| compaction request | summary | output tokens | time |
+|---|---:|---:|---:|
+| no target (before) | 794 | 1 702 | 43.7 s |
+| target 600, cap 1 200 + 4 096 | 551 | 1 182 | 32.0 s |
+| target 600, cap 1 200, reasoning `none` | 599 | 501 | 15.4 s |
+
+Here the size target did shorten the summary (794 to 551); reasoning off
+again took the larger share of the time away.
+
+What the two runtimes do with the setting, measured with a plain
+60-word summary request:
+
+| | default | `none` | other |
+|---|---|---|---|
+| Ollama `/v1`, qwen3.6-27b | 28.3 s, 7 260 chars of reasoning | 1.4 s, none | `low`: no effect; `enable_thinking`, `think`: ignored |
+| FreeToken, Qwen3.8-Flash-Next | 12.1 s, 1 502 chars | 4.3 s, none | `low` 5.7 s, `medium` 8.0 s, `xhigh` 11.7 s; `enable_thinking`: no effect |
+
+FreeToken's `/v1/models` advertises `xhigh`, `medium` and `low` only, but
+the endpoint accepts `none`, `minimal`, `low`, `medium`, `high`, `xhigh`,
+`max` and `off` — and answers HTTP 400 to anything else. That 400 is why
+`none` is a setting and not the default: an endpoint that validates the
+value and does not know this one would fail every compaction. Neither
+runtime reports reasoning tokens in its usage block, so the sidecar's
+`reasoning_tokens: 0` means "not reported", not "none spent".
 
 ### The benchmark after the corrections
 
