@@ -121,6 +121,11 @@ type Manager struct {
 	// what it just did cannot continue doing it.
 	MinRecentTurns int
 
+	// MinSummaryRoom is what must be left of the reducible span, once
+	// the deficit is taken out of it, before a compaction inference is
+	// spent on it. Zero means DefaultMinSummaryRoom.
+	MinSummaryRoom int
+
 	// Compactor enables §10. Nil means conversation compaction is
 	// unavailable, which is reported rather than worked around.
 	Compactor Compactor
@@ -140,7 +145,12 @@ type Manager struct {
 // configuration at all, per §17.
 const (
 	DefaultKeepRecentTurns = 8
-	DefaultMinRecentTurns  = 2
+	// DefaultMinSummaryRoom is the room a compaction summary needs.
+	// The smallest summary measured against real models was 464
+	// tokens (the instruction asks for six headings); the largest,
+	// 1 424.
+	DefaultMinSummaryRoom = 512
+	DefaultMinRecentTurns = 2
 
 	// The placeholder that replaces a pruned tool result. It says
 	// what was there and how big it was, so a reader of the
@@ -386,13 +396,26 @@ func (m *Manager) Fit(messages []model.Message) ([]model.Message, Accounting, er
 		}
 	}
 
-	if m.Compactor != nil {
+	// Compaction is a model inference; every other reduction is free.
+	// It is attempted here only when it could reach the budget by
+	// itself: when the reducible span, less the deficit, still leaves
+	// room for a summary. Otherwise the free reductions below go
+	// first, and compaction is tried again after them if the context
+	// still does not fit.
+	//
+	// Measured 2026-09-19 on a file-reading task: the deficit sat in
+	// large tool results inside the recent window, the span was a few
+	// hundred tokens of one-line remarks and pruned placeholders, and
+	// the summaries came back at 464-1 424 tokens. Each inference cost
+	// 13-35 s and the run's compactions saved ~8 tokens between them
+	// — 28 % of the wall time against FreeToken, 63 % against Ollama —
+	// before narrowing the window did the actual work.
+	tryCompact := func() bool {
 		compacted, n, tokens, err := m.compact(working)
 		switch {
 		case err != nil:
 			m.Stats.CompactionFailures++
-			// Fall through: a failed compaction is not a
-			// reason to stop, but it is a reason the final
+			// Not a reason to stop, but a reason the final
 			// failure below must be able to name.
 		case n > 0:
 			reduced = true
@@ -400,11 +423,17 @@ func (m *Manager) Fit(messages []model.Message) ([]model.Message, Accounting, er
 			m.Stats.Compactions++
 			m.Stats.TokensCompacted += tokens
 			acct = m.Account(working)
-			if acct.WithinBudget() {
-				m.Stats.LastActiveTokens = acct.Total
-				m.trackPeak(acct.Total)
+		}
+		return acct.WithinBudget()
+	}
+	compactionDeferred := false
+	if m.Compactor != nil {
+		if m.compactionCanPay(working, acct) {
+			if tryCompact() {
 				return working, acct, nil
 			}
+		} else {
+			compactionDeferred = true
 		}
 	}
 
@@ -453,6 +482,28 @@ func (m *Manager) Fit(messages []model.Message) ([]model.Message, Accounting, er
 			if acct.WithinBudget() {
 				return working, acct, nil
 			}
+			// Narrowing was tried above while the oversized result
+			// was still whole, and could not succeed: that result
+			// sits inside the window's floor. Now that it is an
+			// excerpt, the older results in the window may be the
+			// whole deficit, and pruning them is free.
+			if m.KeepRecentTurns > m.minRecent() {
+				if narrowed, n, tokens, ok := m.narrowAndPrune(working, &acct); ok {
+					working = narrowed
+					m.Stats.RecentWindowNarrowings++
+					m.Stats.ToolResultsPruned += n
+					m.Stats.TokensPruned += tokens
+					return working, acct, nil
+				}
+			}
+		}
+	}
+
+	// The free reductions were not enough. If compaction was put off
+	// above and the deficit is now one the span can cover, it is time.
+	if compactionDeferred && m.compactionCanPay(working, acct) {
+		if tryCompact() {
+			return working, acct, nil
 		}
 	}
 
@@ -656,6 +707,29 @@ func isPruned(content string) bool {
 }
 
 // -- §10 conversation compaction ----------------------------------
+
+// reducibleTokens is the size of the span compaction would replace:
+// the most it could free, were the summary empty.
+func (m *Manager) reducibleTokens(messages []model.Message) int {
+	total := 0
+	for i, prio := range m.Classify(messages) {
+		if prio == Reducible {
+			total += MessageTokens(messages[i])
+		}
+	}
+	return total
+}
+
+// compactionCanPay reports whether replacing the reducible span with a
+// summary could bring the context within budget: the span must cover
+// the deficit and still leave room for the summary itself.
+func (m *Manager) compactionCanPay(messages []model.Message, acct Accounting) bool {
+	room := m.MinSummaryRoom
+	if room <= 0 {
+		room = DefaultMinSummaryRoom
+	}
+	return m.reducibleTokens(messages)-(acct.Total-acct.Budget) >= room
+}
 
 // compact replaces the reducible span with one summary message.
 //

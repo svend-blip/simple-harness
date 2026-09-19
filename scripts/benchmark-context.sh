@@ -52,6 +52,9 @@ run_arm() { # run_arm <label> <extra-flags...>
     end=$(date +%s.%N)
     python3 scripts/benchmark-report.py "$label" "$sidecar" "$rc" \
         "$(python3 -c "print(f'{$end-$start:.1f}')")" "$LIMIT"
+    # Where the arm's wall time went: working turns against compaction
+    # inferences, time to first token against generation.
+    python3 scripts/benchmark-timing.py "$sidecar" >"$TMP/$label.timing" || true
     if [ "$rc" -ne 0 ]; then
         # A failed arm names its cause: the harness's stderr and the
         # last status it emitted, so the failure is a finding rather
@@ -75,5 +78,10 @@ run_arm bounded --context-limit "$LIMIT"
 # would otherwise bound it at the served window, the lifecycle is
 # switched off by name for this arm.
 SIMPLE_HARNESS_CONTEXT_POLICY=unbounded run_arm baseline
+for arm in bounded baseline; do
+    echo
+    echo "$arm — where the time went:"
+    sed 's/^/  /' "$TMP/$arm.timing"
+done
 echo
 echo "the arms differ only in the context lifecycle (bounded at $LIMIT vs off); everything else is identical"

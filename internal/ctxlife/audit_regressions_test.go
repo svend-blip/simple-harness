@@ -192,3 +192,139 @@ func TestAnOversizedRecentToolResultIsTruncatedRatherThanFatal(t *testing.T) {
 		t.Errorf("second Fit: err=%v truncated=%d", err, m.Stats.ToolResultsTruncated)
 	}
 }
+
+// TestCompactionIsNotAttemptedWhenItCannotCoverTheDeficit — measured
+// 2026-09-19 on a file-reading task: the context was over budget because
+// of large tool results inside the recent window, the reducible span was
+// a few hundred tokens of one-line remarks and pruned placeholders, and
+// Fit still spent a whole model inference compacting it — 13 s and 16 s
+// against FreeToken to save ~6 tokens once and nothing the second time,
+// 22-29 s each against Ollama, 63 % of that run's wall time. Removing
+// the span entirely could not have reached the budget; narrowing the
+// window, which costs nothing, is what did.
+func TestCompactionIsNotAttemptedWhenItCannotCoverTheDeficit(t *testing.T) {
+	c := &fixedCompactor{summary: "objective: x."}
+	m := New(4096)
+	m.Compactor = c
+	budget := m.Account(nil).Budget
+	in := []model.Message{sys("instructions"), user("read the files")}
+	for i := 0; i < 4; i++ {
+		in = append(in, asst("That file holds the configuration."))
+	}
+	// The recent window: eight messages whose tool results alone
+	// exceed the budget.
+	for i := 0; i < 4; i++ {
+		in = append(in, asst("reading"), toolResult(fmt.Sprintf("c%d", i), filler(budget/3)))
+	}
+
+	out, acct, err := m.Fit(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !acct.WithinBudget() {
+		t.Fatalf("over budget: %d of %d", acct.Total, acct.Budget)
+	}
+	if c.calls != 0 {
+		t.Errorf("the compactor was called %d times for a span that could not cover the deficit", c.calls)
+	}
+	if m.Stats.RecentWindowNarrowings == 0 {
+		t.Errorf("the window was not narrowed; stats %+v", m.Stats)
+	}
+	_ = out
+}
+
+// TestCompactionStillRunsOnceCheaperReductionsHaveMadeItWorthwhile —
+// skipping is not giving up: when the free reductions leave a deficit
+// the span can cover, the compactor is called then.
+func TestCompactionStillRunsOnceCheaperReductionsHaveMadeItWorthwhile(t *testing.T) {
+	c := &fixedCompactor{summary: "objective: x."}
+	m := New(4096)
+	m.Compactor = c
+	m.KeepRecentTurns = DefaultMinRecentTurns // no window left to narrow
+	budget := m.Account(nil).Budget
+	in := []model.Message{sys("instructions"), user("read the files")}
+	for i := 0; i < 10; i++ {
+		in = append(in, asst(filler(budget/10)))
+	}
+	// One result twice the budget: at first the deficit exceeds the
+	// span; cut to an excerpt, it no longer does.
+	in = append(in, asst("reading"), toolResult("big", filler(2*budget)))
+
+	_, acct, err := m.Fit(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !acct.WithinBudget() {
+		t.Fatalf("over budget: %d of %d", acct.Total, acct.Budget)
+	}
+	if c.calls != 1 || m.Stats.Compactions != 1 {
+		t.Errorf("compactor calls %d, compactions %d; want 1 and 1", c.calls, m.Stats.Compactions)
+	}
+}
+
+// TestNarrowingIsRetriedAfterAnOversizedResultIsCut — measured
+// 2026-09-19: a 10.5k-token file read into a 7k budget. Narrowing ran
+// first and failed, because the oversized result sits inside the floor
+// of the window; the result was then cut to an excerpt, which left the
+// context 1 064 tokens over — and Fit gave up ("the window will not
+// narrow below 2") without narrowing again, though the older results
+// in the window were now the whole deficit and pruning them was free.
+func TestNarrowingIsRetriedAfterAnOversizedResultIsCut(t *testing.T) {
+	m := New(4096)
+	m.KeepRecentTurns = 12
+	budget := m.Account(nil).Budget
+	in := []model.Message{sys("instructions"), user("read the files")}
+	for i := 0; i < 5; i++ {
+		in = append(in, asst("reading"), toolResult(fmt.Sprintf("c%d", i), filler(budget/5)))
+	}
+	in = append(in, asst("reading"), toolResult("big", filler(2*budget)))
+
+	_, acct, err := m.Fit(in)
+	if err != nil {
+		t.Fatalf("Fit gave up on a context the free reductions can fit: %v", err)
+	}
+	if !acct.WithinBudget() {
+		t.Fatalf("over budget: %d of %d", acct.Total, acct.Budget)
+	}
+	if m.Stats.ToolResultsTruncated != 1 || m.Stats.RecentWindowNarrowings == 0 {
+		t.Errorf("want one truncation and a narrowing; stats %+v", m.Stats)
+	}
+}
+
+// TestCompactionNeedsRoomForASummary — a span larger than the deficit
+// is not enough. Measured 2026-09-19: spans of 150-500 tokens against
+// deficits of a few dozen, and summaries of 464-1 424 tokens (the
+// instruction asks for six headings). Three inferences, 52 s, ~8 tokens
+// saved. A summary has a size of its own; where span minus deficit
+// leaves no room for one, the inference cannot pay.
+func TestCompactionNeedsRoomForASummary(t *testing.T) {
+	c := &fixedCompactor{summary: "objective: x."}
+	m := New(4096)
+	m.Compactor = c
+	budget := m.Account(nil).Budget
+	in := []model.Message{sys("instructions"), user("read the files")}
+	// A reducible span of ~300 tokens: larger than the deficit
+	// below, smaller than the room a summary needs.
+	for i := 0; i < 6; i++ {
+		in = append(in, asst(filler(50)))
+	}
+	// The recent window, a little over what is left of the budget.
+	for i := 0; i < 4; i++ {
+		in = append(in, asst("reading"), toolResult(fmt.Sprintf("c%d", i), filler((budget-250)/4)))
+	}
+	before := m.Account(in)
+	if d := before.Total - before.Budget; d <= 0 || d >= 300 {
+		t.Fatalf("fixture: deficit %d, want between 1 and the 300-token span", d)
+	}
+
+	_, acct, err := m.Fit(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !acct.WithinBudget() {
+		t.Fatalf("over budget: %d of %d", acct.Total, acct.Budget)
+	}
+	if c.calls != 0 {
+		t.Errorf("the compactor was called %d times with no room for a summary", c.calls)
+	}
+}

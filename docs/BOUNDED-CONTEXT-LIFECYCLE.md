@@ -301,7 +301,56 @@ What the reference shows:
 - Wall time: on FreeToken the bounded arm took 1.16x the unbounded
   arm's time, with no compaction inferences; on Ollama with
   `qwen3.6-27b` (above) it took 2.9x, four of its calls being
-  compactions. The cause of the difference was not isolated.
+  compactions. The next section is what that difference was.
+
+### Why the bounded arm was 2.9x slower on Ollama
+
+Investigated 2026-09-19. Ollama's access log for the twenty-four-turn
+run holds the latency of every call: fifteen working calls of 1-11 s,
+and four of 22.2, 28.7, 23.1 and 29.2 s — 103 s of the arm's 163 s, 63 %.
+Those four are the compaction inferences. Without them the arm is 60 s
+against the baseline's 56 s: the whole difference.
+
+What those inferences bought was measured on FreeToken, where the same
+task at a 10 240 limit reproduces them
+(`scripts/benchmark-timing.py <sidecar>`, which the benchmark now prints
+per arm):
+
+| run | compactions | their time | share of wall | tokens saved | wall | task |
+|---|---:|---:|---:|---:|---:|---|
+| before | 2 | 28.5 s | 14 % | ~6 | 200.8 s | completed |
+| before | 3 | 51.8 s | 28 % | ~8 | 186.3 s | max turns |
+| before | 1 | 34.7 s | 22 % | ~122 | 156.0 s | completed |
+| after | 0 | — | — | — | 115.5 s | completed |
+| after | 0 | — | — | — | 101.1 s | completed |
+
+The cause: on a file-reading task the deficit sits in large tool results
+inside the recent window. Pruning has already turned everything older
+into placeholders, so the reducible span is a few hundred tokens of
+one-line remarks — and `Fit` compacted it regardless, because compaction
+was the next stage. The compaction prompt was 460-830 tokens; the
+summary that came back was 464-1 424, the instruction asking for six
+headings. Most were refused as no smaller than what they replaced, and
+narrowing the window, which costs nothing, then did the work.
+
+Corrected in `internal/ctxlife`:
+
+- Compaction is attempted only when it can pay: the reducible span, less
+  the deficit, must leave room for a summary (`MinSummaryRoom`, default
+  512 tokens). Otherwise the free reductions go first, and compaction is
+  tried after them if the context still does not fit.
+- A second defect surfaced while measuring, present before this change:
+  after an oversized result was cut to an excerpt, `Fit` did not narrow
+  the window again, and failed a run ("the window will not narrow below
+  2") that one more free pruning would have fitted. A 10.5k-token file
+  read into a 7k budget, exit 2. It narrows again now.
+
+Not done, recommended: the compaction request carries no size target and
+no output cap, so one summary ran to 1 424 tokens and 35 s.
+`model.ChatRequest` has no per-request output limit; adding one is a
+change to the wire contract and was left out of this correction. The
+Ollama re-measurement with the correction is owed: the GPU was serving
+FreeToken when this was written.
 
 Not measured: resume/continue across invocations, which the harness does
 not implement (a new session is a new composition; durable history is
