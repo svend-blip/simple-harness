@@ -402,18 +402,19 @@ func (s *sessionRequiredHTTPServer) handler(w http.ResponseWriter, r *http.Reque
 //     entry 1 = tools/list, header matching assignedSessionID).
 //
 //  2. Call succeeds with the SAME session id as List — the cached
-//     session id is reused across calls (the sync.Once +
-//     t.sessionID field work correctly; the stub records the
+//     session id is reused across calls (the negotiated
+//     t.sessionID is kept; the stub records the
 //     request's Mcp-Session-Id header on entry 2 and the test
 //     asserts it matches the header on entry 1).
 //
 //  3. Sub-call after a pre-flight failure surfaces the error
 //     CONSISTENTLY: a fresh stub with initializeStatus=500 returns
-//     500 on the initialize; the transport caches the failure in
-//     t.sessionErr; a subsequent Call on the SAME transport
-//     returns the SAME wrapped error without re-attempting
-//     initialize. The sync.Once semantics ensure the failure is
-//     reported once, not retried on every call.
+//     500 on the initialize; a subsequent Call on the SAME transport
+//     meets the same failure and reports it. (The failure used to be
+//     cached for the life of the transport; initialize is attempted
+//     again now, so a server that comes up later is reachable — see
+//     TestHTTPTransportInitializesAgainAfterAFailedInitialize. While
+//     the server stays broken the caller sees the same error.)
 //
 //  4. Regression check: the existing stubHTTPServer (lines 27-35,
 //     byte-identical against the Run 020 baseline) does NOT
@@ -526,7 +527,7 @@ func TestMCP_TransportHTTP_SessionRequiredStub(t *testing.T) {
 	}
 
 	// ---- (3) Sub-call after a pre-flight failure surfaces the
-	//         error CONSISTENTLY (sync.Once caches the failure). ----
+	//         error CONSISTENTLY while the server stays broken. ----
 	brokenStub := &sessionRequiredHTTPServer{initializeStatus: http.StatusInternalServerError}
 	brokenSrv := httptest.NewServer(http.HandlerFunc(brokenStub.handler))
 	defer brokenSrv.Close()
@@ -539,9 +540,9 @@ func TestMCP_TransportHTTP_SessionRequiredStub(t *testing.T) {
 	} else if !strings.Contains(err.Error(), "500") {
 		t.Fatalf("List(broken initialize) error = %q, want error mentioning 500", err.Error())
 	}
-	// Subsequent Call on the SAME transport must return the SAME
-	// cached error — the sync.Once caches the failure in
-	// t.sessionErr; the second call does NOT re-attempt initialize.
+	// Subsequent Call on the SAME transport meets the same failure:
+	// initialize is attempted again, the server is still broken, and
+	// the same error surfaces.
 	if _, err := brokenTr.Call(context.Background(), "tool_alpha", args); err == nil {
 		t.Fatalf("Call(broken preflight, second call) error = nil, want cached error")
 	} else if !strings.Contains(err.Error(), "500") {

@@ -7,7 +7,7 @@ further Bounded Context Lifecycle work.
 Updated 2026-09-19 with what was found after the first report — by the
 live scope-mcp round trip it still owed, and by the Bounded Context
 Lifecycle measurements made on top of the audited baseline. Those
-findings are in the two addenda before "Readiness"; "Tests" and
+findings are in the three addenda before "Readiness"; "Tests" and
 "Remaining risks" carry the current figures. Head at this update:
 `276f908`.
 
@@ -179,10 +179,10 @@ Severity per the addendum. All corrected unless marked.
 
 - Regression tests added: 45 in the first pass
   (`audit_regressions_test.go` in model, loop, tools, builtins, path,
-  perm, mcp, ctxlife, cmd; plus config), 17 more with the two addenda
-  (mcp 4, ctxlife 7, model 2, config 2, loop 1, cmd 1): 62.
+  perm, mcp, ctxlife, cmd; plus config), 21 more with the three addenda
+  (mcp 8, ctxlife 7, model 2, config 2, loop 1, cmd 1): 66.
 - First report: `go test ./...` 555 passing, 0 skipped, 15 packages.
-  At `276f908`: 580 passing, 1 skipped — `TestLive_SizedCompaction`,
+  After the third addendum: 584 passing, 1 skipped — `TestLive_SizedCompaction`,
   which needs a model endpoint and runs when
   `SIMPLE_HARNESS_LIVE_BASE_URL` and `_MODEL` name one (run against
   Ollama and FreeToken, passing). `go test -race ./...` clean;
@@ -191,6 +191,8 @@ Severity per the addendum. All corrected unless marked.
   event 100 %, loop 77 %, mcp 84 %, model 81 %, path 81 %, perm 82 %,
   procgroup 75 %, session 71 %, skill 79 %, tools 92 %, builtins 86 %.
 - `scripts/e2e-scope-mcp.sh` against the real scope-mcp: 7/7.
+- `scripts/e2e-mcp-restart.sh` (a real server restarted mid-run): pass.
+  `scripts/e2e-mcp.sh` against the live mcp-light: exit 0.
 - `scripts/smoketest-context.sh`: 12/12 at the first report, 14/14 now
   (two criteria came with the runtime probe). `scripts/contract-check.sh`
   with a live endpoint: 5/5 (checks (c) and (d) corrected to measure
@@ -222,8 +224,10 @@ declaration is `read_only` and is unaffected. `run` still requires
 - Owed by the first report and since settled: the live scope-mcp round
   trip (first addendum below) and the stdio server's working directory
   (second addendum).
-- MCP http: no re-initialize after a server restart (404 "Session not
-  found" ends the session's MCP use); no `DELETE` on close.
+- MCP http: no `DELETE` on close. (Re-initialize after a server
+  restart, the other half of this item, is corrected — third addendum.)
+  After a restart the tool listing is not fetched again, and a stdio
+  server whose child exits is not restarted.
 - Config: lenient env parsing (`0.7abc` → 0.7), negative
   `max_output_tokens`/`request_timeout` accepted, unknown
   `SIMPLE_HARNESS_*` names ignored silently, duplicate server names
@@ -390,6 +394,41 @@ and a relative path inside its `command` resolves there (no stdio
 declaration exists in the ecosystem's configurations today); a
 compaction request asks for `reasoning_effort: "none"` by default.
 
+## Addendum 3: an MCP server restarted during a run
+
+Listed under Remaining risks in the first report; corrected 2026-09-19
+on the repository owner's instruction.
+
+- **High — a restarted MCP server ended the session's MCP use.**
+  `internal/mcp/transport_http.go`. Observed, against a real server on
+  the reference Python SDK restarted between two tool calls: every call
+  after the restart failed with `http 404 … Session not found`, for the
+  rest of the run. Expected: a new session and the call answered. Root
+  cause: the `initialize` handshake ran exactly once per transport
+  (`sync.Once`), so the session id from before the restart was sent
+  forever; the same `sync.Once` cached a failed `initialize`, so a
+  server still starting at the first call stayed unreachable after it
+  was up. Correction: a `404` under a session id starts a new session
+  and repeats the refused request once; concurrent calls share the one
+  renewal; a failed `initialize` is attempted again on the next call.
+  Tests: `TestHTTPTransportReinitializesAfterTheServerForgetsTheSession`,
+  `TestHTTPTransportGivesUpOnAServerThatNeverKeepsASession`,
+  `TestHTTPTransportInitializesAgainAfterAFailedInitialize`,
+  `TestHTTPTransportConcurrentCallsShareOneNewSession` (run under the
+  race detector). Live: `scripts/e2e-mcp-restart.sh` — the binary before
+  the change fails both calls after the restart, the binary after it
+  gets both answered by the new server process.
+
+  The first report classed this Medium by leaving it among the risks.
+  High is the honest class: it is "incorrect MCP behaviour" that takes
+  out every MCP tool for the remainder of a run, and long runs are what
+  the harness is for.
+
+An existing test's comments were corrected, not its assertions:
+`TestMCP_TransportHTTP_SessionPreflight` part 3 said a failed initialize
+is cached and never retried. It asserts only that the error surfaces on
+both calls while the server stays broken, which still holds.
+
 ## Readiness
 
 The first report declared the baseline ready for further Bounded Context
@@ -401,8 +440,9 @@ conformance checker and the live runs listed above.
 That work has since been done on it, and measuring it is what produced
 the second addendum — four defects the suite did not hold, three of them
 in the lifecycle itself. All are corrected with regression coverage, and
-the full validation passes at `276f908`. No Critical or High finding is
-open. The items under Remaining risks are known and documented, none
+the full validation passes. The one High finding the first report had
+left among its risks — a restarted MCP server — is corrected in the third
+addendum. No Critical or High finding is open. The items under Remaining risks are known and documented, none
 Critical or High.
 
 What the two addenda say about the first pass is worth keeping: both

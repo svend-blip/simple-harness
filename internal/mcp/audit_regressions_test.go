@@ -457,3 +457,176 @@ func TestStdioTransportStartsTheChildInTheGivenDirectory(t *testing.T) {
 		t.Errorf("child cwd = %+v, want %s", listing, dir)
 	}
 }
+
+// restartableMCP is a streamable-http MCP server that can be "restarted":
+// it then forgets its session and answers 404 "Session not found" to the
+// old id, as the live mcp-light server does (measured 2026-09-19) and as
+// the specification requires.
+type restartableMCP struct {
+	mu          sync.Mutex
+	generation  int
+	initialize  int
+	initialized int
+	calls       []string // session id each tools/call arrived with
+	down        bool     // answer 503 to everything
+	forgetful   bool     // never recognise a session, even a fresh one
+}
+
+func (s *restartableMCP) restart() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.generation++
+}
+
+func (s *restartableMCP) handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		_ = json.Unmarshal(body, &req)
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.down {
+			http.Error(w, "restarting", http.StatusServiceUnavailable)
+			return
+		}
+		current := fmt.Sprintf("session-%d", s.generation)
+		switch req.Method {
+		case "initialize":
+			s.initialize++
+			w.Header().Set("Mcp-Session-Id", current)
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"result":{}}`, req.ID)
+			return
+		case "notifications/initialized":
+			s.initialized++
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		sid := r.Header.Get("Mcp-Session-Id")
+		if sid != current || s.forgetful {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"jsonrpc":"2.0","id":"server-error","error":{"code":-32600,"message":"Session not found"}}`)
+			return
+		}
+		if req.Method == "tools/call" {
+			s.calls = append(s.calls, sid)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"ok"}],"tools":[]}}`, req.ID)
+	})
+}
+
+// TestHTTPTransportReinitializesAfterTheServerForgetsTheSession — an MCP
+// server restarted mid-run answered every later request 404 "Session not
+// found", and the transport, which initialised exactly once, passed each
+// one on as a tool failure: the session's MCP use was over. The
+// specification's answer to that 404 is a new initialize.
+func TestHTTPTransportReinitializesAfterTheServerForgetsTheSession(t *testing.T) {
+	stub := &restartableMCP{}
+	srv := httptest.NewServer(stub.handler())
+	defer srv.Close()
+	tr := NewHTTPTransport(srv.URL)
+	defer tr.Close()
+	ctx := context.Background()
+
+	if _, err := tr.Call(ctx, "t", nil); err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	stub.restart()
+	if _, err := tr.Call(ctx, "t", nil); err != nil {
+		t.Fatalf("call after the server restarted: %v", err)
+	}
+	if _, err := tr.Call(ctx, "t", nil); err != nil {
+		t.Fatalf("call after recovery: %v", err)
+	}
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	if stub.initialize != 2 || stub.initialized != 2 {
+		t.Errorf("initialize %d, initialized notifications %d; want 2 and 2", stub.initialize, stub.initialized)
+	}
+	want := []string{"session-0", "session-1", "session-1"}
+	if fmt.Sprint(stub.calls) != fmt.Sprint(want) {
+		t.Errorf("tools/call arrived with sessions %v, want %v", stub.calls, want)
+	}
+}
+
+// TestHTTPTransportGivesUpOnAServerThatNeverKeepsASession — one new
+// session per request, not a loop: a server that answers 404 to a session
+// it has just issued gets the error reported.
+func TestHTTPTransportGivesUpOnAServerThatNeverKeepsASession(t *testing.T) {
+	stub := &restartableMCP{forgetful: true}
+	srv := httptest.NewServer(stub.handler())
+	defer srv.Close()
+	tr := NewHTTPTransport(srv.URL)
+	defer tr.Close()
+	_, err := tr.Call(context.Background(), "t", nil)
+	if err == nil || !strings.Contains(err.Error(), "404") {
+		t.Fatalf("err = %v, want the 404 reported", err)
+	}
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	if stub.initialize != 2 {
+		t.Errorf("initialize sent %d times, want 2 (the first, and one retry)", stub.initialize)
+	}
+}
+
+// TestHTTPTransportInitializesAgainAfterAFailedInitialize — the first
+// initialize was remembered for the life of the transport, its failure
+// included: a server that was still starting when the first call came
+// stayed unreachable after it was up.
+func TestHTTPTransportInitializesAgainAfterAFailedInitialize(t *testing.T) {
+	stub := &restartableMCP{down: true}
+	srv := httptest.NewServer(stub.handler())
+	defer srv.Close()
+	tr := NewHTTPTransport(srv.URL)
+	defer tr.Close()
+	if _, err := tr.Call(context.Background(), "t", nil); err == nil {
+		t.Fatal("call against a server that is down succeeded")
+	}
+	stub.mu.Lock()
+	stub.down = false
+	stub.mu.Unlock()
+	if _, err := tr.Call(context.Background(), "t", nil); err != nil {
+		t.Fatalf("call once the server is up: %v", err)
+	}
+}
+
+// TestHTTPTransportConcurrentCallsShareOneNewSession — calls in flight
+// when the session is lost must not each start a session of their own.
+func TestHTTPTransportConcurrentCallsShareOneNewSession(t *testing.T) {
+	stub := &restartableMCP{}
+	srv := httptest.NewServer(stub.handler())
+	defer srv.Close()
+	tr := NewHTTPTransport(srv.URL)
+	defer tr.Close()
+	if _, err := tr.Call(context.Background(), "t", nil); err != nil {
+		t.Fatal(err)
+	}
+	stub.restart()
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := tr.Call(context.Background(), "t", nil)
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("concurrent call: %v", err)
+		}
+	}
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	if stub.initialize != 2 {
+		t.Errorf("initialize sent %d times for one restart, want 2 in all", stub.initialize)
+	}
+}

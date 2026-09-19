@@ -141,6 +141,25 @@ unreachable" path. The internal MCP wire form
 cmd-side exit-2 mapping and is documented in
 `internal/mcp/registry.go`'s `Manager.AddServer`.
 
+#### A server restarted during the session
+
+An http MCP server that restarts forgets its sessions and answers
+`404` to the old `Mcp-Session-Id`. The harness then initializes a new
+session and sends the refused request again, once; calls in flight at
+the time share the one new session. The refused request was never
+dispatched by the server, so nothing is executed twice. A call made
+while the server is down fails as a tool failure the model sees, and
+the next call reaches the server once it is back — a failed
+`initialize` is not remembered. A server that answers `404` to a
+session it has just issued gets the error reported, not a loop.
+
+What does not follow a restart: the tool listing (fetched once per
+session, above — a restarted server offering different tools is still
+called by the old names), and a stdio server, whose child process is
+the transport: when it exits, that server's tools fail for the rest of
+the session. `scripts/e2e-mcp-restart.sh` restarts a real server
+between two tool calls.
+
 #### Collision naming (SCOPE §43 + GOAL §2 bound decision 5)
 
 When an MCP tool's name collides with a built-in tool name already

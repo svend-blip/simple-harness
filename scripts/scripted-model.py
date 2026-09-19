@@ -6,10 +6,12 @@ POSTs (Ollama's /api/show), and answering that would eat a script step.
 
 argv[1] = port file, argv[2] = request log (one JSON body per line),
 argv[3] = script file: JSON list of steps, each either
-{"tool": name, "args": {...}} or {"text": "..."}.
+{"tool": name, "args": {...}} or {"text": "..."}; an optional "before"
+is a shell command run before that step is answered.
 """
 import http.server
 import json
+import subprocess
 import sys
 
 PORT_FILE, LOG, SCRIPT = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -40,6 +42,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         step = STEPS[n]
         n += 1
+        if "before" in step:
+            # Something the run must find changed when this answer
+            # arrives — a server restarted between two tool calls.
+            subprocess.run(step["before"], shell=True, check=True)
         if "tool" in step:
             delta = {"tool_calls": [{"index": 0, "id": f"call_rt_{n}",
                                      "function": {"name": step["tool"],

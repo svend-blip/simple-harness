@@ -25,10 +25,14 @@ import (
 //     streamable-http session-id field; case-insensitive per HTTP
 //     header semantics), and caches it in t.sessionID. Subsequent
 //     requests on the same transport instance attach the header to
-//     every outgoing request. The preflight is serialized through a
-//     sync.Once so concurrent first-call attempts share a single
-//     `initialize` round-trip; the cached session id is reused
-//     across all subsequent calls. A server that does NOT require
+//     every outgoing request. The preflight is serialized through
+//     sessMu so concurrent first-call attempts share a single
+//     `initialize` round-trip; the session id is reused across all
+//     subsequent calls. A 404 under a session id means the server no
+//     longer knows it (it restarted, or expired the session): the
+//     transport initializes again and repeats the refused request
+//     once. A failed initialize is not remembered; the next call
+//     tries again. A server that does NOT require
 //     session negotiation (e.g., a stub or a non-session-aware
 //     server) is unaffected: the `initialize` request succeeds, the
 //     response carries no `Mcp-Session-Id` header, t.sessionID stays
@@ -89,12 +93,16 @@ import (
 // uses a direct `http.Client.Do` call (NOT a recursive `roundtrip`
 // call) to avoid infinite recursion against an empty session cache.
 type httpTransport struct {
-	endpoint    string
-	client      *http.Client
-	headers     map[string]string
+	endpoint string
+	client   *http.Client
+	headers  map[string]string
+	// sessMu guards the session: its id, and whether one has been
+	// negotiated. It is held across the initialize round trip, so
+	// concurrent callers wait for one negotiation instead of each
+	// starting their own.
+	sessMu      sync.Mutex
 	sessionID   string
-	sessionOnce sync.Once
-	sessionErr  error
+	initialized bool
 	nextID      int64
 }
 
@@ -122,15 +130,16 @@ func WithHeaders(h map[string]string) HTTPOption {
 	}
 }
 
-// applyHeaders sets the standard and configured headers on req.
-func (t *httpTransport) applyHeaders(req *http.Request) {
+// applyHeaders sets the standard and configured headers on req, and the
+// session id the caller is working under (empty: none).
+func (t *httpTransport) applyHeaders(req *http.Request, sessionID string) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	for k, v := range t.headers {
 		req.Header.Set(k, v)
 	}
-	if t.sessionID != "" {
-		req.Header.Set("Mcp-Session-Id", t.sessionID)
+	if sessionID != "" {
+		req.Header.Set("Mcp-Session-Id", sessionID)
 	}
 }
 
@@ -243,93 +252,101 @@ func (t *httpTransport) Close() error {
 	return nil
 }
 
-// ensureSession runs the MCP streamable-http `initialize` preflight
-// exactly once on the first call (List or Call) against this
-// transport instance. The preflight issues a direct HTTP POST (NOT
-// through roundtrip — the session id is what we're trying to obtain,
-// so a recursive roundtrip would loop against the empty session
-// cache). On success, the response's `Mcp-Session-Id` header is
-// cached in t.sessionID. On failure, the error is cached in
-// t.sessionErr; subsequent calls return the same cached error
-// (matching the existing transport's "declared-but-unreachable"
-// failure mode per SCOPE §43 + Out-§11 replacement).
+// ensureSession returns the session id to work under, negotiating one
+// with the MCP streamable-http `initialize` preflight when there is none.
+// The preflight is a direct HTTP POST (NOT through roundtrip — the
+// session id is what it obtains).
 //
-// The sync.Once serializes concurrent first-call attempts so only
-// one `initialize` round-trip is in flight at a time; once the
-// session id is cached, subsequent roundtrip calls skip the
-// preflight (the sync.Once.Do is a no-op on subsequent calls).
+// A failed initialize is not remembered: the next call tries again. It
+// used to be cached for the life of the transport (sync.Once), so a
+// server that was still starting at the first call stayed unreachable
+// after it was up.
 //
-// Servers that do NOT require session negotiation succeed with an
-// empty t.sessionID (the response carries no Mcp-Session-Id
-// header); roundtrip's `if t.sessionID != ""` guard then skips
-// header attachment, leaving the wire shape unchanged from the
-// pre-fix implementation.
-func (t *httpTransport) ensureSession(ctx context.Context) error {
-	t.sessionOnce.Do(func() {
-		initBody := map[string]interface{}{
-			"jsonrpc": "2.0",
-			"id":      0,
-			"method":  "initialize",
-			"params": map[string]interface{}{
-				"protocolVersion": "2025-03-26",
-				"capabilities":    map[string]interface{}{},
-				"clientInfo": map[string]interface{}{
-					"name":    httpTransportClientName,
-					"version": httpTransportClientVersion,
-				},
-			},
-		}
-		bs, err := json.Marshal(initBody)
-		if err != nil {
-			t.sessionErr = fmt.Errorf("mcp: marshal initialize: %w", err)
-			return
-		}
-		req, err := http.NewRequestWithContext(ctx, "POST", t.endpoint, bytes.NewReader(bs))
-		if err != nil {
-			t.sessionErr = fmt.Errorf("mcp: build initialize: %w", err)
-			return
-		}
-		t.applyHeaders(req)
+// Servers that do not negotiate sessions succeed with an empty id (the
+// response carries no Mcp-Session-Id header) and no header is sent.
+func (t *httpTransport) ensureSession(ctx context.Context) (string, error) {
+	t.sessMu.Lock()
+	defer t.sessMu.Unlock()
+	if t.initialized {
+		return t.sessionID, nil
+	}
+	return t.initializeLocked(ctx)
+}
 
-		resp, err := t.client.Do(req)
-		if err != nil {
-			t.sessionErr = fmt.Errorf("mcp: http initialize: %w", err)
-			return
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			t.sessionErr = fmt.Errorf("mcp: http initialize: %s%s", resp.Status, bodySnippet(resp.Body))
-			return
-		}
-		// The wire shape only requires the Mcp-Session-Id
-		// response header; the JSON-RPC payload of the
-		// `initialize` response is opaque to the harness (no
-		// per-server capabilities are negotiated today; future
-		// capability-aware code can decode here). Drain the
-		// body to EOF so the connection can be re-used by the
-		// underlying transport; the SSE form is handled by the
-		// helper but is irrelevant for the preflight (we only
-		// read the session id header, not the JSON payload).
-		_, _ = io.Copy(io.Discard, resp.Body)
-		// Capture the canonical MCP streamable-http session-id
-		// response header. Case-insensitive lookup per HTTP
-		// header semantics; the spec uses Mcp-Session-Id as
-		// the canonical case.
-		if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" {
-			t.sessionID = sid
-		}
-		// The spec requires the client to confirm initialization
-		// before any other request. Best effort: a server that
-		// does not implement the notification answers 4xx, and
-		// the requests that follow decide whether the session is
-		// usable.
-		t.notify(ctx, "notifications/initialized")
-	})
-	return t.sessionErr
+// renewSession replaces a session the server no longer knows. stale is
+// the id the caller was refused under: if the transport has moved on from
+// it already, another caller renewed the session first and its result is
+// shared rather than repeated.
+func (t *httpTransport) renewSession(ctx context.Context, stale string) (string, error) {
+	t.sessMu.Lock()
+	defer t.sessMu.Unlock()
+	if t.initialized && t.sessionID != stale {
+		return t.sessionID, nil
+	}
+	t.initialized, t.sessionID = false, ""
+	return t.initializeLocked(ctx)
+}
+
+// initializeLocked performs the initialize handshake. Callers hold sessMu.
+func (t *httpTransport) initializeLocked(ctx context.Context) (string, error) {
+	initBody := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      0,
+		"method":  "initialize",
+		"params": map[string]interface{}{
+			"protocolVersion": "2025-03-26",
+			"capabilities":    map[string]interface{}{},
+			"clientInfo": map[string]interface{}{
+				"name":    httpTransportClientName,
+				"version": httpTransportClientVersion,
+			},
+		},
+	}
+	bs, err := json.Marshal(initBody)
+	if err != nil {
+		return "", fmt.Errorf("mcp: marshal initialize: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", t.endpoint, bytes.NewReader(bs))
+	if err != nil {
+		return "", fmt.Errorf("mcp: build initialize: %w", err)
+	}
+	t.applyHeaders(req, "")
+
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("mcp: http initialize: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("mcp: http initialize: %s%s", resp.Status, bodySnippet(resp.Body))
+	}
+	// The wire shape only requires the Mcp-Session-Id
+	// response header; the JSON-RPC payload of the
+	// `initialize` response is opaque to the harness (no
+	// per-server capabilities are negotiated today; future
+	// capability-aware code can decode here). Drain the
+	// body to EOF so the connection can be re-used by the
+	// underlying transport; the SSE form is handled by the
+	// helper but is irrelevant for the preflight (we only
+	// read the session id header, not the JSON payload).
+	_, _ = io.Copy(io.Discard, resp.Body)
+	// Capture the canonical MCP streamable-http session-id
+	// response header. Case-insensitive lookup per HTTP
+	// header semantics; the spec uses Mcp-Session-Id as
+	// the canonical case.
+	t.sessionID = resp.Header.Get("Mcp-Session-Id")
+	t.initialized = true
+	// The spec requires the client to confirm initialization
+	// before any other request. Best effort: a server that
+	// does not implement the notification answers 4xx, and
+	// the requests that follow decide whether the session is
+	// usable.
+	t.notify(ctx, "notifications/initialized", t.sessionID)
+	return t.sessionID, nil
 }
 
 // notify sends a JSON-RPC notification (no id, no response expected).
-func (t *httpTransport) notify(ctx context.Context, method string) {
+func (t *httpTransport) notify(ctx context.Context, method, sessionID string) {
 	bs, err := json.Marshal(map[string]interface{}{
 		"jsonrpc": "2.0",
 		"method":  method,
@@ -341,7 +358,7 @@ func (t *httpTransport) notify(ctx context.Context, method string) {
 	if err != nil {
 		return
 	}
-	t.applyHeaders(req)
+	t.applyHeaders(req, sessionID)
 	resp, err := t.client.Do(req)
 	if err != nil {
 		return
@@ -369,15 +386,15 @@ func bodySnippet(r io.Reader) string {
 // exercise concurrent calls; the per-transport atomic counter is
 // the same wire the WORK-1 Manager + adapter use).
 //
-// On entry, the method runs the `initialize` preflight (once-only,
-// guarded by sync.Once) and attaches the cached Mcp-Session-Id
-// header to the outgoing request when the server returned one on
-// `initialize`. The preflight's own `initialize` request is issued
+// On entry, the method makes sure a session is negotiated
+// (ensureSession) and attaches its Mcp-Session-Id header to the
+// outgoing request when the server returned one on `initialize`. The preflight's own `initialize` request is issued
 // from ensureSession via a direct http.Client.Do call (NOT through
 // this method) to avoid infinite recursion against an empty
 // session cache.
 func (t *httpTransport) roundtrip(ctx context.Context, method string, params interface{}) (*jsonResponse, error) {
-	if err := t.ensureSession(ctx); err != nil {
+	sessionID, err := t.ensureSession(ctx)
+	if err != nil {
 		return nil, err
 	}
 	id := atomic.AddInt64(&t.nextID, 1)
@@ -396,15 +413,26 @@ func (t *httpTransport) roundtrip(ctx context.Context, method string, params int
 	if err != nil {
 		return nil, fmt.Errorf("mcp: marshal request: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, "POST", t.endpoint, bytes.NewReader(bs))
+	resp, err := t.post(ctx, bs, sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("mcp: build request: %w", err)
+		return nil, err
 	}
-	t.applyHeaders(req)
-
-	resp, err := t.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("mcp: http request: %w", err)
+	// 404 under a session id is the specification's "this session is
+	// gone" — the server restarted, or expired it — and its answer is a
+	// new initialize. The refused request was never dispatched, so
+	// sending it again under the new session repeats nothing. Once: a
+	// server that refuses a session it has just issued is reported.
+	if resp.StatusCode == http.StatusNotFound && sessionID != "" {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		sessionID, err = t.renewSession(ctx, sessionID)
+		if err != nil {
+			return nil, fmt.Errorf("mcp: the server no longer knows the session, and a new one could not be started: %w", err)
+		}
+		resp, err = t.post(ctx, bs, sessionID)
+		if err != nil {
+			return nil, err
+		}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -429,6 +457,20 @@ func (t *httpTransport) roundtrip(ctx context.Context, method string, params int
 		return nil, err
 	}
 	return parsed, nil
+}
+
+// post sends one JSON-RPC body under the given session id.
+func (t *httpTransport) post(ctx context.Context, body []byte, sessionID string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, "POST", t.endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("mcp: build request: %w", err)
+	}
+	t.applyHeaders(req, sessionID)
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("mcp: http request: %w", err)
+	}
+	return resp, nil
 }
 
 // jsonResponse holds the parsed JSON-RPC 2.0 response. Result is
