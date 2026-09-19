@@ -562,3 +562,44 @@ func TestMCP_StdioCwd_IsLoadedRenderedAndStdioOnly(t *testing.T) {
 		t.Errorf("http declaration with cwd: err = %v, want a cwd error", err)
 	}
 }
+
+// TestConfigFileEnv_IsALayerAboveTheProjectConfig — a launcher that
+// knows which MCP servers a run is meant to have (FlowRunner, from the
+// FlowApp) had no way to say so except by writing into the workspace,
+// which dirties the tree and collides with a project config already
+// there. SIMPLE_HARNESS_CONFIG_FILE names one more config file, applied
+// after the user and project files and before the other environment
+// variables. Named and absent is an error: the launcher meant something.
+func TestConfigFileEnv_IsALayerAboveTheProjectConfig(t *testing.T) {
+	home, proj, run := t.TempDir(), t.TempDir(), t.TempDir()
+	writeConfig(t, home, `{"mcp_servers":[{"name":"machine","transport":"http","endpoint":"http://m/mcp"}],"model":{"model":"from-user"}}`)
+	writeConfig(t, proj, `{"model":{"model":"from-project"}}`)
+	extra := filepath.Join(run, "harness-config.json")
+	if err := os.WriteFile(extra, []byte(`{"mcp_servers":[{"name":"declared","transport":"http","endpoint":"http://d/mcp"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadFrom(home, proj, []string{"SIMPLE_HARNESS_CONFIG_FILE=" + extra, "SIMPLE_HARNESS_MODEL=from-env"})
+	if err != nil {
+		t.Fatalf("loadFrom: %v", err)
+	}
+	if len(cfg.MCPServers) != 1 || cfg.MCPServers[0].Name != "declared" {
+		t.Errorf("mcp_servers = %+v, want the named file's list to replace the machine's", cfg.MCPServers)
+	}
+	if cfg.Model.Model != "from-env" {
+		t.Errorf("model = %q, want the environment to stay above the named file", cfg.Model.Model)
+	}
+
+	// Without the variable nothing changes.
+	cfg, err = loadFrom(home, proj, nil)
+	if err != nil || len(cfg.MCPServers) != 1 || cfg.MCPServers[0].Name != "machine" {
+		t.Errorf("without the variable: %+v, %v", cfg.MCPServers, err)
+	}
+
+	// Named and absent is an error, and it names the file.
+	missing := filepath.Join(run, "nope.json")
+	if _, err := loadFrom(home, proj, []string{"SIMPLE_HARNESS_CONFIG_FILE=" + missing}); err == nil ||
+		!strings.Contains(err.Error(), "nope.json") {
+		t.Errorf("a named file that is absent: err = %v, want it reported", err)
+	}
+}

@@ -338,8 +338,13 @@ Both scripts are part of the committed repository.
 
 Configuration is JSON, read from the hierarchy:
 `~/.simple-harness/config.json` → `.simple-harness/config.json`
-(searched upward from the working directory) → `SIMPLE_HARNESS_*`
-environment variables. Keys: `model` (`base_url`, `model`, `api_key`,
+(searched upward from the working directory) → the file
+`SIMPLE_HARNESS_CONFIG_FILE` names, if any → `SIMPLE_HARNESS_*`
+environment variables. The named file is how a launcher states what a
+run is meant to have — FlowRunner writes the MCP servers a FlowApp
+declares into one, outside the workspace. A named file that is absent is
+a configuration error (exit 2); `mcp_servers` from a later file replaces
+an earlier file's list whole. Keys: `model` (`base_url`, `model`, `api_key`,
 `temperature`, `max_output_tokens`, `request_timeout`,
 `reasoning_effort`, `enable_thinking`, `thinking_budget`),
 `shell_timeout`, `context` (`policy`, `model_limit`,

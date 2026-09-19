@@ -230,6 +230,9 @@ func Load() (Config, error) {
 //	project config (.simple-harness/config.json, searched upward
 //	                from projectRoot to /; missing → skip)
 //	    ↓
+//	the file SIMPLE_HARNESS_CONFIG_FILE names (unset → skip;
+//	                set and absent → error)
+//	    ↓
 //	environment variables (SIMPLE_HARNESS_<FIELD>; missing → skip)
 //
 // A later source's value OVERRIDES the earlier one for any field it
@@ -254,6 +257,21 @@ func loadFrom(homeDir, projectRoot string, env []string) (Config, error) {
 		}
 	}
 
+	// The file a launcher names. A launcher that knows what a run is
+	// meant to have — FlowRunner, which takes the MCP servers from the
+	// FlowApp — says so here instead of writing into the workspace,
+	// which would dirty the tree and collide with a project config
+	// already there. Unlike the two files above, a named file that is
+	// absent is an error: the launcher meant something by naming it.
+	if named := envValue(env, ConfigFileEnv); named != "" {
+		if _, err := os.Stat(named); err != nil {
+			return cfg, fmt.Errorf("%s names %s: %w", ConfigFileEnv, named, err)
+		}
+		if err := applyFile(&cfg, named); err != nil {
+			return cfg, err
+		}
+	}
+
 	// Environment variables — SIMPLE_HARNESS_<FIELD>.
 	if err := applyEnv(&cfg, env); err != nil {
 		return cfg, err
@@ -269,6 +287,22 @@ func loadFrom(homeDir, projectRoot string, env []string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// ConfigFileEnv names one more configuration file, applied after the
+// user and project files and before the other environment variables.
+const ConfigFileEnv = "SIMPLE_HARNESS_CONFIG_FILE"
+
+// envValue returns the value of key in an os.Environ-shaped slice; the
+// last assignment wins, as it does for a process.
+func envValue(env []string, key string) string {
+	val := ""
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == key {
+			val = v
+		}
+	}
+	return val
 }
 
 // applyFile reads the JSON file at path (if it exists) and unmarshals
