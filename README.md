@@ -220,6 +220,98 @@ committed; no Go toolchain needed to run it). See
 record. Optional: `jq` + `python3` for the test suite (`./scripts/test.sh`)
 and contract checker (`./scripts/contract-check.sh`).
 
+### Ecosystem dependencies and installation order
+
+**This repository is row 1.** It depends on nothing else here. Everything it gets from the rest — governance, retrieval, project state — arrives through the MCP servers declared in row 6.
+
+The same table is in the README of each of the six repositories; it was
+written from the code on 2026-09-19. Install top to bottom: each row
+needs only rows above it.
+
+| # | Repository | Needs | Serves | Needed by |
+|---|---|---|---|---|
+| 0 | a model runtime (Ollama, FreeToken, llama.cpp, a cloud endpoint) | — | an OpenAI-compatible `/v1` endpoint | every harness |
+| 1 | [simple-harness](https://github.com/svend-blip/simple-harness) | Go 1.27 to build; row 0 to run | the `simple-harness` command on `PATH` | FlowRunner steps that name it, DPMtF-WebUI roles launched through harness-allocator |
+| 2 | [scope-mcp](https://github.com/svend-blip/scope-mcp) | Node >= 22.5 (built-in `node:sqlite`) | a stdio MCP server; state in `<workspace>/.scope-mcp/state.db` | any harness that declares it (row 6) |
+| 3 | [knowledge-service](https://github.com/svend-blip/knowledge-service) | Python >= 3.11; provider `leann`: a CUDA GPU with ~2.5 GB free VRAM; provider `portable`: CPU only | `http://127.0.0.1:9140/v1` — retrieval over LEANN indexes | mcp-light (four `knowledge_*` tools), DPMtF-WebUI (service mode) |
+| 4 | [DPMtF-WebUI](https://github.com/svend-blip/DPMtF-WebUI) | Python 3.10+, tmux, git; [model-allocator](https://github.com/svend-blip/model-allocator) and [harness-allocator](https://github.com/svend-blip/harness-allocator) beside it; a harness on `PATH` (row 1); row 3 optional | `:9130`, the governance templates, BridgeV002, `DPMtF-WebUI/databases/dpmtf.db` | mcp-light (reads its files and database) |
+| 5 | [mcp-light](https://github.com/svend-blip/mcp-light) | Python 3.8+, `mcp[cli]`; read access to the DPMtF-WebUI checkout and database (row 4) and to `model-allocator/allocator.db`; row 3 for the knowledge tools | `http://127.0.0.1:9135/mcp` — read-only MCP context server | any harness that declares it (row 6) |
+| 6 | harness wiring | rows 1, 2, 5 | `~/.simple-harness/config.json` with an `mcp_servers` entry per server | every simple-harness run on the machine, whoever launched it |
+| 7 | [FlowRunner](https://github.com/svend-blip/FlowRunner) | Go 1.27 to build; at run time, every harness a FlowApp's steps name, on `PATH` (row 1 for `simple-harness`) | the `flowrunner` command and desktop app | — |
+
+Rows 1, 2 and 3 depend on nothing else in the table and can be installed
+in any order. knowledge-service's one-time `import-registry` step reads
+the DPMtF-WebUI database, so run that step after row 4; the service itself
+does not need DPMtF-WebUI at run time.
+
+#### Row 6: what wires a harness to the servers
+
+Neither FlowRunner nor DPMtF-WebUI tells simple-harness which MCP servers
+exist. simple-harness reads its own configuration —
+`~/.simple-harness/config.json`, then the nearest
+`.simple-harness/config.json` at or above its working directory, the
+later file replacing the earlier one's `mcp_servers` whole — and that is
+the entire wiring:
+
+```json
+{
+  "mcp_servers": [
+    { "name": "mcp-light", "transport": "http",
+      "endpoint": "http://127.0.0.1:9135/mcp", "permission": "read_only",
+      "allowlist": ["get_governance_index", "get_governance_file",
+                    "knowledge_search", "knowledge_scopes",
+                    "knowledge_learning", "knowledge_retrievals"] },
+    { "name": "scope-mcp", "transport": "stdio",
+      "command": ["node", "/abs/path/to/scope-mcp/src/server.js"],
+      "permission": "workspace_write" }
+  ]
+}
+```
+
+Without the `knowledge_*` names in the allowlist an agent has no
+retrieval. Without the scope-mcp entry it has no durable project state:
+no simple-harness configuration declares scope-mcp unless you add it. A
+stdio server is started in the workspace, so scope-mcp keeps its state
+with the project.
+
+#### How LEANN retrieval reaches an agent
+
+```text
+model in a harness
+  -> the harness's MCP client              (mcp_servers, row 6)
+  -> mcp-light          :9135/mcp          knowledge_search / _scopes / _learning / _retrievals
+  -> knowledge-service  :9140/v1           /v1/search, /v1/scopes, /v1/learning, /v1/retrievals
+  -> LEANN (hnsw, CUDA)  or the portable CPU provider
+```
+
+LEANN lives in knowledge-service and nowhere else. mcp-light is its only
+MCP face. scope-mcp has no retrieval of any kind, and simple-harness has
+none of its own: it is a generic MCP client that also fills in `run_id`,
+`handoff_id` and `flow_key` on MCP calls from `SIMPLE_HARNESS_RUN_ID`,
+`SIMPLE_HARNESS_HANDOFF_ID` and `SIMPLE_HARNESS_FLOW_KEY`, so that a
+retrieval can be attributed to the run that made it.
+
+#### What is and is not automatic
+
+- FlowRunner has no default harness: every step of a FlowApp names one,
+  and an empty `harness:` fails validation. A step that names
+  `simple-harness` gets whatever `simple-harness` resolves to on `PATH`
+  at dispatch — so a rebuilt simple-harness is used by the next run with
+  no change to FlowRunner, and a stale copy on `PATH` (or a bundled
+  `simple-harness.exe` beside a packaged FlowRunner) is used just as
+  faithfully.
+- FlowRunner passes `HOME` through, so a simple-harness step loads the
+  machine's `~/.simple-harness/config.json` and sees the servers declared
+  there. On a machine without that file the same FlowApp runs with no MCP
+  server and no retrieval, and nothing reports the difference.
+- FlowRunner sets the three position variables. DPMtF-WebUI's BridgeV002
+  launch does not, so retrievals made from its simple-harness panes are
+  logged without a run.
+- A FlowApp's `knowledge:` block reaches the harness as `KNOWLEDGE_PROVIDERS`
+  and `KNOWLEDGE_<NAME>_URL`. simple-harness does not read them; for a
+  simple-harness step, retrieval comes through mcp-light or not at all.
+
+
 ## Installation
 
 ### Install manually

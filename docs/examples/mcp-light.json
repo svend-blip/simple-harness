@@ -17,7 +17,11 @@
         "get_flow_steps",
         "get_execution_config",
         "get_implementation_mode",
-        "get_patcher_usage"
+        "get_patcher_usage",
+        "knowledge_search",
+        "knowledge_scopes",
+        "knowledge_learning",
+        "knowledge_retrievals"
       ]
     }
   ]
