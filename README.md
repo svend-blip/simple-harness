@@ -225,7 +225,7 @@ and contract checker (`./scripts/contract-check.sh`).
 **This repository is row 1.** It depends on nothing else here. Everything it gets from the rest — governance, retrieval, project state — arrives through the MCP servers declared in row 6.
 
 The same table is in the README of each of the six repositories; it was
-written from the code on 2026-09-19. Install top to bottom: each row
+written from the code on 2026-09-19 and follows it. Install top to bottom: each row
 needs only rows above it.
 
 | # | Repository | Needs | Serves | Needed by |
@@ -246,12 +246,13 @@ does not need DPMtF-WebUI at run time.
 
 #### Row 6: what wires a harness to the servers
 
-Neither FlowRunner nor DPMtF-WebUI tells simple-harness which MCP servers
-exist. simple-harness reads its own configuration —
+simple-harness takes its MCP servers from its own configuration:
 `~/.simple-harness/config.json`, then the nearest
-`.simple-harness/config.json` at or above its working directory, the
-later file replacing the earlier one's `mcp_servers` whole — and that is
-the entire wiring:
+`.simple-harness/config.json` at or above its working directory, then the
+file `SIMPLE_HARNESS_CONFIG_FILE` names. A later file replaces an earlier
+one's `mcp_servers` whole. FlowRunner writes that last file for a FlowApp
+that declares `mcp_servers` (see below); DPMtF-WebUI's BridgeV002 writes
+none, so its roles get what the machine's own files declare:
 
 ```json
 {
@@ -297,21 +298,33 @@ retrieval can be attributed to the run that made it.
   and an empty `harness:` fails validation. A step that names
   `simple-harness` gets whatever `simple-harness` resolves to on `PATH`
   at dispatch — so a rebuilt simple-harness is used by the next run with
-  no change to FlowRunner, and a stale copy on `PATH` (or a bundled
-  `simple-harness.exe` beside a packaged FlowRunner) is used just as
-  faithfully.
-- FlowRunner passes `HOME` through, so a simple-harness step loads the
-  machine's `~/.simple-harness/config.json` and sees the servers declared
-  there. On a machine without that file the same FlowApp runs with no MCP
-  server and no retrieval, and nothing reports the difference.
-- FlowRunner sets the three position variables. DPMtF-WebUI's BridgeV002
-  launch does not, so retrievals made from its simple-harness panes are
-  logged without a run.
-- A FlowApp's `knowledge:` block reaches the harness as `KNOWLEDGE_PROVIDERS`
-  and `KNOWLEDGE_<NAME>_URL`. simple-harness does not read them; for a
-  simple-harness step, retrieval comes through mcp-light or not at all.
-
-
+  no change to FlowRunner. The Windows bundle carries its own
+  `simple-harness.exe`; `scripts/build-windows-bundle.sh` in FlowRunner
+  builds the three programs together and stamps the commits into
+  `BUILD-INFO.txt`.
+- A FlowApp declares its MCP servers (`mcp_servers:` in `app.yaml`:
+  `endpoint_env` for an http server, a `command` with `${VAR}` references
+  for a stdio one). FlowRunner's preflight connects to each — a real MCP
+  handshake and tool listing — and the run is handed exactly those servers
+  through `SIMPLE_HARNESS_CONFIG_FILE`, written under FlowRunner's runtime
+  root, never into the workspace. `flowrunner mcp <flowapp-id>` and the
+  desktop's green pills show which declared servers FlowRunner is
+  connected to. A FlowApp that declares none leaves simple-harness with
+  the machine's `~/.simple-harness/config.json`, as before: on a machine
+  without that file such a FlowApp runs with no MCP server at all.
+- A FlowApp's `knowledge:` block reaches a harness as
+  `KNOWLEDGE_PROVIDERS` and `KNOWLEDGE_<NAME>_URL`. simple-harness does not
+  read them: for a simple-harness step retrieval comes through an MCP
+  server that offers `knowledge_search` (mcp-light does), and FlowRunner's
+  preflight refuses a FlowApp that enables knowledge, runs simple-harness
+  steps and declares no such server, instead of letting it run and
+  retrieve nothing.
+- Both launchers set the three position variables. FlowRunner sets them
+  from the family run number, the handoff cycle and the FlowApp id.
+  BridgeV002's role terminal sets them per delivered prompt — a pane
+  outlives its handoffs — from the flow key, the run the chain is
+  executing and the handoff id field of the prompt; what it does not know
+  it does not set.
 ## Installation
 
 ### Install manually
