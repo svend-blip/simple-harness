@@ -44,7 +44,8 @@ func TestLive_SizedCompaction(t *testing.T) {
 		label     string
 		target    int
 		reasoning string
-	}{{"no target", 0, ""}, {"target 600", target, ""}, {"target 600, reasoning none", target, "none"}} {
+	}{{"no target, model's effort", 0, EffortInherit}, {"target 600, model's effort", target, EffortInherit},
+		{"target 600, default", target, ""}} {
 		var usage *model.Usage
 		c := &ModelCompactor{
 			Client: model.NewClient(model.Options{BaseURL: base, Model: name,

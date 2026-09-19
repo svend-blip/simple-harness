@@ -157,7 +157,8 @@ type ContextPolicy struct {
 	// available.
 	DisableCompaction bool
 	// CompactionReasoningEffort is the compaction request's own
-	// reasoning_effort. Empty means the client's configured one.
+	// reasoning_effort. Empty means "none" with a fallback to the
+	// client's configured one; "inherit" means the client's.
 	CompactionReasoningEffort string
 }
 

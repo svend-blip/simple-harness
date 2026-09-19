@@ -89,9 +89,11 @@ type ContextConfig struct {
 	ProbeLimit *bool `json:"probe_limit,omitempty"`
 	// CompactionReasoningEffort is the reasoning_effort of the
 	// compaction request alone; the working turns keep
-	// model.reasoning_effort. Empty means the same as theirs. On a
-	// reasoning model "none" (where the endpoint accepts it) turns a
-	// half-minute compaction into a second or two.
+	// model.reasoning_effort. Absent means "none" — on a reasoning
+	// model that turns a half-minute compaction into seconds — with a
+	// fallback to the model's own effort if the endpoint refuses the
+	// value. "inherit" means the model's own from the start. Any
+	// other value is sent as given, without a fallback.
 	CompactionReasoningEffort string `json:"compaction_reasoning_effort,omitempty"`
 }
 

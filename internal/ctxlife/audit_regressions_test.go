@@ -411,8 +411,10 @@ func TestModelCompactorStatesTheTargetAndCapsTheOutput(t *testing.T) {
 	client := model.NewClient(model.Options{
 		BaseURL: srv.URL, Model: "m", MaxOutputTokens: 16384, RequestTimeout: 2 * time.Second})
 
-	// Reasoning left to the client's configuration: allowance included.
-	c := &ModelCompactor{Client: client}
+	// Reasoning left to the model's configuration: allowance included.
+	// (This was what an empty ReasoningEffort meant until "none" became
+	// the default; it is EffortInherit now.)
+	c := &ModelCompactor{Client: client, ReasoningEffort: EffortInherit}
 	got, err := c.CompactWithin([]model.Message{asst("older work")}, 600)
 	if err != nil || got != "a summary" {
 		t.Fatalf("CompactWithin = %q, %v", got, err)
@@ -450,10 +452,101 @@ func TestModelCompactorStatesTheTargetAndCapsTheOutput(t *testing.T) {
 
 	// Without a target nothing changes: the configured cap, no size line.
 	finish, content = "stop", "a summary"
-	if _, err := (&ModelCompactor{Client: client}).Compact([]model.Message{asst("older work")}); err != nil {
+	if _, err := (&ModelCompactor{Client: client, ReasoningEffort: EffortInherit}).Compact([]model.Message{asst("older work")}); err != nil {
 		t.Fatal(err)
 	}
 	if body.MaxTokens != 16384 || strings.Contains(body.Messages[0].Content, "tokens (about") {
 		t.Errorf("Compact without a target: max_tokens %d", body.MaxTokens)
+	}
+}
+
+// TestCompactionReasoningDefaultsToNoneAndFallsBackWhenRefused — with
+// nothing configured the compaction asks for reasoning_effort "none":
+// measured, that is 39.5 s -> 8.6 s on Ollama and 43.7 s -> 15.4 s on
+// FreeToken. An endpoint that validates the value and does not know this
+// one answers 400 (FreeToken does, to values it does not know); the
+// compaction is then repeated with the model's own effort, and the
+// refusal is remembered so the session pays for it once.
+func TestCompactionReasoningDefaultsToNoneAndFallsBackWhenRefused(t *testing.T) {
+	type seen struct {
+		effort    string
+		maxTokens int
+	}
+	var requests []seen
+	refuseNone := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			MaxTokens int    `json:"max_tokens"`
+			Reasoning string `json:"reasoning_effort"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		requests = append(requests, seen{body.Reasoning, body.MaxTokens})
+		if refuseNone && body.Reasoning == "none" {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error":{"message":"reasoning_effort must be one of low, medium, high; got 'none'"}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, `data: {"choices":[{"delta":{"content":"a summary"},"finish_reason":"stop"}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+	newClient := func() *model.Client {
+		return model.NewClient(model.Options{BaseURL: srv.URL, Model: "m", MaxOutputTokens: 16384,
+			ReasoningEffort: "medium", RequestTimeout: 2 * time.Second})
+	}
+	span := []model.Message{asst("older work")}
+	const capNone, capReasoning = 600 * SummaryCapFactor, 600*SummaryCapFactor + ReasoningAllowance
+
+	// Accepted: one request, "none", no reasoning allowance.
+	c := &ModelCompactor{Client: newClient()}
+	if _, err := c.CompactWithin(span, 600); err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 1 || requests[0] != (seen{"none", capNone}) {
+		t.Fatalf("default: requests %+v, want one with none and cap %d", requests, capNone)
+	}
+
+	// Refused: repeated with the model's own effort and the allowance;
+	// the inference is announced once, not once per attempt.
+	requests, refuseNone = nil, true
+	announced := 0
+	c = &ModelCompactor{Client: newClient(), OnRequest: func() { announced++ }}
+	got, err := c.CompactWithin(span, 600)
+	if err != nil || got != "a summary" {
+		t.Fatalf("fallback: %q, %v", got, err)
+	}
+	want := []seen{{"none", capNone}, {"medium", capReasoning}}
+	if len(requests) != 2 || requests[0] != want[0] || requests[1] != want[1] {
+		t.Fatalf("fallback: requests %+v, want %+v", requests, want)
+	}
+	if announced != 1 {
+		t.Errorf("OnRequest called %d times, want 1", announced)
+	}
+	// Remembered: the next compaction does not try "none" again.
+	requests = nil
+	if _, err := c.CompactWithin(span, 600); err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 1 || requests[0] != want[1] {
+		t.Errorf("after a refusal: requests %+v, want only %+v", requests, want[1])
+	}
+
+	// Configured explicitly: used as given, and a refusal is an error —
+	// a setting that does not work should say so, not be papered over.
+	requests = nil
+	c = &ModelCompactor{Client: newClient(), ReasoningEffort: "none"}
+	if _, err := c.CompactWithin(span, 600); err == nil || len(requests) != 1 {
+		t.Errorf("explicit none, refused: err %v, requests %+v; want an error after one request", err, requests)
+	}
+
+	// "inherit" is the model's own effort, with the allowance.
+	requests = nil
+	c = &ModelCompactor{Client: newClient(), ReasoningEffort: "inherit"}
+	if _, err := c.CompactWithin(span, 600); err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 1 || requests[0] != want[1] {
+		t.Errorf("inherit: requests %+v, want %+v", requests, want[1])
 	}
 }

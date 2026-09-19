@@ -91,7 +91,7 @@ context gets a bounded one.
     "keep_recent_turns": 8,
     "tool_result_pruning": true,
     "compaction": true,
-    "compaction_reasoning_effort": "none"
+    "compaction_reasoning_effort": "inherit"
   }
 }
 ```
@@ -101,8 +101,10 @@ context gets a bounded one.
 below); the reserves are derived when absent; `keep_recent_turns`
 defaults to 8; the booleans default to true.
 `compaction_reasoning_effort` is the `reasoning_effort` of the compaction
-request alone (absent = the same as `model.reasoning_effort`; see "What a
-compaction costs" below). `SIMPLE_HARNESS_CONTEXT_POLICY`,
+request alone: absent means `none`, falling back to
+`model.reasoning_effort` if the endpoint refuses the value; `inherit`
+means `model.reasoning_effort` from the start; any other value is sent as
+given (see "What a compaction costs" below). `SIMPLE_HARNESS_CONTEXT_POLICY`,
 `SIMPLE_HARNESS_CONTEXT_MODEL_LIMIT`, `SIMPLE_HARNESS_CONTEXT_PROBE_LIMIT`
 and `SIMPLE_HARNESS_CONTEXT_COMPACTION_REASONING_EFFORT` override from the
 environment.
@@ -364,7 +366,8 @@ one summary ran to 1 424 tokens and 35 s. Added 2026-09-19:
   effort is `none`. A summary cut off at the cap is refused rather than
   used, and one cut off before any text arrived says why.
 - `context.compaction_reasoning_effort` sets the compaction request's own
-  `reasoning_effort`, leaving the working turns alone.
+  `reasoning_effort`, leaving the working turns alone. Unset, it is
+  `none`.
 
 The allowance and the setting exist because of what the first version of
 the cap did. Measured on Ollama, `qwen3.6-27b`, a 3 981-token span
@@ -406,9 +409,14 @@ What the two runtimes do with the setting, measured with a plain
 
 FreeToken's `/v1/models` advertises `xhigh`, `medium` and `low` only, but
 the endpoint accepts `none`, `minimal`, `low`, `medium`, `high`, `xhigh`,
-`max` and `off` — and answers HTTP 400 to anything else. That 400 is why
-`none` is a setting and not the default: an endpoint that validates the
-value and does not know this one would fail every compaction. Neither
+`max` and `off` — and answers HTTP 400 to anything else. An endpoint that
+validates the value and does not know `none` would answer the same way,
+so the default comes with a fallback: a compaction refused with 400 or
+422 while asking for the default `none` is repeated at once with the
+model's own effort (and the reasoning allowance), the refusal is
+remembered for the rest of the session, and the inference is announced
+once. A value set explicitly is sent as given, and a refusal of it is
+reported as the compaction failure it is. Neither
 runtime reports reasoning tokens in its usage block, so the sidecar's
 `reasoning_tokens: 0` means "not reported", not "none spent".
 

@@ -2,8 +2,10 @@ package ctxlife
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/svend-blip/simple-harness/internal/model"
 )
@@ -29,12 +31,14 @@ type ModelCompactor struct {
 	Ctx context.Context
 	// ReasoningEffort is the compaction request's own
 	// reasoning_effort (config: context.compaction_reasoning_effort).
-	// Empty leaves it to the client's configuration. Measured on
-	// Ollama, qwen3.6-27b: a 57-word summary took 28.3 s with the
-	// model's default reasoning and 1.4 s with "none". It is a
-	// setting and not a default because "none" is not accepted by
-	// every OpenAI-compatible endpoint.
+	// Empty means "none", falling back to the model's own effort if
+	// the endpoint refuses the value; EffortInherit means the model's
+	// own from the start; anything else is sent as given. Measured
+	// with "none": 39.5 s -> 8.6 s on Ollama (qwen3.6-27b), 43.7 s ->
+	// 15.4 s on FreeToken (Qwen3.8-Flash-Next).
 	ReasoningEffort string
+	// noneRefused remembers that the endpoint refused "none".
+	noneRefused atomic.Bool
 	// OnRequest is called before each compaction inference and
 	// OnUsage with the usage the model reported, when it did. A
 	// compaction is an inference like any other; without these the
@@ -91,6 +95,21 @@ const (
 	ReasoningAllowance = 4096
 )
 
+// EffortInherit as ModelCompactor.ReasoningEffort means the model's own
+// configured effort, which is what an empty value meant before "none"
+// became the default.
+const EffortInherit = "inherit"
+
+// refusedAsInvalid reports whether the endpoint rejected the request as
+// malformed — the answer to a parameter value it does not accept.
+func refusedAsInvalid(err error) bool {
+	var me *model.ModelError
+	if !errors.As(err, &me) || me.Kind != model.ErrHTTP {
+		return false
+	}
+	return me.StatusCode == 400 || me.StatusCode == 422
+}
+
 // Compact implements Compactor.
 func (c *ModelCompactor) Compact(messages []model.Message) (string, error) {
 	return c.CompactWithin(messages, 0)
@@ -117,29 +136,64 @@ func (c *ModelCompactor) CompactWithin(messages []model.Message, target int) (st
 		{Role: "system", Content: instruction},
 		{Role: "user", Content: renderForCompaction(messages)},
 	}}
-	req.ReasoningEffort = c.ReasoningEffort
-	if target > 0 {
-		req.MaxTokens = target * SummaryCapFactor
-		if c.ReasoningEffort != "none" {
-			req.MaxTokens += ReasoningAllowance
+	// The reasoning effort of this request. Unset means "none", with
+	// one fallback: an endpoint that validates the value and does not
+	// know this one refuses the request (FreeToken answers 400 to
+	// values it does not know), and the compaction is then repeated
+	// with the model's own effort. The refusal is remembered, so a
+	// session pays for it once. A value set in the configuration is
+	// used as given, and a refusal of it is an error: a setting that
+	// does not work should say so.
+	effort, auto := c.ReasoningEffort, false
+	switch {
+	case effort == EffortInherit:
+		effort = ""
+	case effort == "":
+		auto = !c.noneRefused.Load()
+		if auto {
+			effort = "none"
 		}
 	}
+	shape := func(effort string) {
+		req.ReasoningEffort = effort
+		if target > 0 {
+			req.MaxTokens = target * SummaryCapFactor
+			if effort != "none" {
+				req.MaxTokens += ReasoningAllowance
+			}
+		}
+	}
+	shape(effort)
 
+	// Announced once: a refused attempt is answered in milliseconds
+	// and is not an inference, and an event stream with a
+	// model_request that never gets its usage misleads whoever pairs
+	// them.
 	if c.OnRequest != nil {
 		c.OnRequest()
 	}
 	var out strings.Builder
 	cutOff := false
-	err := c.Client.ChatStream(ctx, req, func(ev model.StreamEvent) error {
-		out.WriteString(ev.Delta)
-		if ev.FinishReason == "length" {
-			cutOff = true
-		}
-		if ev.Usage != nil && c.OnUsage != nil {
-			c.OnUsage(ev.Usage)
-		}
-		return nil
-	})
+	send := func() error {
+		out.Reset()
+		cutOff = false
+		return c.Client.ChatStream(ctx, req, func(ev model.StreamEvent) error {
+			out.WriteString(ev.Delta)
+			if ev.FinishReason == "length" {
+				cutOff = true
+			}
+			if ev.Usage != nil && c.OnUsage != nil {
+				c.OnUsage(ev.Usage)
+			}
+			return nil
+		})
+	}
+	err := send()
+	if err != nil && auto && refusedAsInvalid(err) {
+		c.noneRefused.Store(true)
+		shape("")
+		err = send()
+	}
 	if err != nil {
 		return "", fmt.Errorf("ctxlife: the compaction request failed: %w", err)
 	}
