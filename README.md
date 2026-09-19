@@ -328,6 +328,13 @@ retrieval can be attributed to the run that made it.
   shows it per profile in preflight; BridgeV002 takes it from the
   model-allocator alias's `context`. The harness still takes the smaller of
   this and what a local runtime reports.
+- A window says what the model can hold; a **context budget** says what a
+  role may use. On a 1,000,000-token window the window bounds nothing a run
+  will reach, and every turn resends the whole history. DPMtF-WebUI's role
+  editor has a Context Budget per role (`bridge_roles.context_budget`); the
+  smaller of window and budget goes to the harness, from BridgeV002 directly
+  and from FlowRunner through the binding's `context_budget`, which the
+  exporter fills in. Empty means the window.
 - Both launchers set the three position variables. FlowRunner sets them
   from the family run number, the handoff cycle and the FlowApp id.
   BridgeV002's role terminal sets them per delivered prompt — a pane
