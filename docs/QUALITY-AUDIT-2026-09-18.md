@@ -4,6 +4,13 @@ Executor: Fable 5.1. Scope: the "Existing Code Quality & Integrity
 Audit" addendum. Purpose: establish a trustworthy baseline before
 further Bounded Context Lifecycle work.
 
+Updated 2026-09-19 with what was found after the first report — by the
+live scope-mcp round trip it still owed, and by the Bounded Context
+Lifecycle measurements made on top of the audited baseline. Those
+findings are in the two addenda before "Readiness"; "Tests" and
+"Remaining risks" carry the current figures. Head at this update:
+`276f908`.
+
 ## Baseline
 
 - Starting commit `5a0f9dd` on `main`, working tree clean.
@@ -170,14 +177,22 @@ Severity per the addendum. All corrected unless marked.
 
 ## Tests
 
-- Regression tests added: 45 (`audit_regressions_test.go` in model,
-  loop, tools, builtins, path, perm, mcp, ctxlife, cmd; plus config).
-- Final: `go test ./...` 555 passing, 0 skipped, 15 packages;
-  `go test -race ./...` clean; `go vet`, `gofmt` clean.
+- Regression tests added: 45 in the first pass
+  (`audit_regressions_test.go` in model, loop, tools, builtins, path,
+  perm, mcp, ctxlife, cmd; plus config), 17 more with the two addenda
+  (mcp 4, ctxlife 7, model 2, config 2, loop 1, cmd 1): 62.
+- First report: `go test ./...` 555 passing, 0 skipped, 15 packages.
+  At `276f908`: 580 passing, 1 skipped — `TestLive_SizedCompaction`,
+  which needs a model endpoint and runs when
+  `SIMPLE_HARNESS_LIVE_BASE_URL` and `_MODEL` name one (run against
+  Ollama and FreeToken, passing). `go test -race ./...` clean;
+  `go vet`, `gofmt` clean.
 - Coverage: cmd 78 %, config 63 %, context 94 %, ctxlife 90 %,
   event 100 %, loop 77 %, mcp 84 %, model 81 %, path 81 %, perm 82 %,
   procgroup 75 %, session 71 %, skill 79 %, tools 92 %, builtins 86 %.
-- `scripts/smoketest-context.sh`: 12/12. `scripts/contract-check.sh`
+- `scripts/e2e-scope-mcp.sh` against the real scope-mcp: 7/7.
+- `scripts/smoketest-context.sh`: 12/12 at the first report, 14/14 now
+  (two criteria came with the runtime probe). `scripts/contract-check.sh`
   with a live endpoint: 5/5 (checks (c) and (d) corrected to measure
   stdout and to signal on the `model_request` event).
 - Live: headless run against Ollama `qwen3.6-27b-64k` with the live
@@ -187,6 +202,9 @@ Severity per the addendum. All corrected unless marked.
   full history in `messages.jsonl`.
 - harness-allocator: `test_simple_harness_adapter`, `test_terminal`,
   `test_launchspec`, `test_adapter_contract` — 330 passed.
+  Re-run at `276f908`, after the two addenda: 330 passed, and
+  `scripts/contract-check.sh` and `scripts/test.sh`, which drive the
+  rebuilt runtime binary, exit 0.
 
 ## FlowRunner / Harness Allocator compatibility
 
@@ -201,17 +219,9 @@ declaration is `read_only` and is unaffected. `run` still requires
 
 ## Remaining risks
 
-- The live scope-mcp round trip owed by the first pass was run the same
-  evening (`scripts/e2e-scope-mcp.sh`, 6/6) and found two defects the
-  SDK-modelled stubs had not, both corrected with regression tests —
-  see "Addendum: live scope-mcp round trip" below. scope-mcp is a stdio
-  server; "not running" was never the obstacle.
-- A stdio MCP server inherited the harness's cwd, not `--workspace`, so
-  scope-mcp put `.scope-mcp/state.db` wherever the harness was launched
-  from. Corrected after the report: the server starts in the workspace,
-  and an optional `cwd` on the stdio declaration overrides it (relative
-  to the workspace). `scripts/e2e-scope-mcp.sh` criterion 7 launches
-  the harness from elsewhere and is red against the code before it.
+- Owed by the first report and since settled: the live scope-mcp round
+  trip (first addendum below) and the stdio server's working directory
+  (second addendum).
 - MCP http: no re-initialize after a server restart (404 "Session not
   found" ends the session's MCP use); no `DELETE` on close.
 - Config: lenient env parsing (`0.7abc` → 0.7), negative
@@ -226,6 +236,24 @@ declaration is `read_only` and is unaffected. `run` still requires
   (documented; not a V1 requirement).
 - Compaction sends the whole reducible span in one request; a span
   that overflowed the window can overflow the compaction request.
+- The compaction default `reasoning_effort: "none"` falls back when an
+  endpoint refuses it with 400/422. The fallback is proven against a
+  stub answering as FreeToken answers a value it does not know; no
+  endpoint available here refuses `none`, so it has no live proof. An
+  endpoint that refuses with another status, or that accepts `none` and
+  mishandles it, is not covered.
+- Neither Ollama nor FreeToken reports reasoning tokens in its usage
+  block, so `reasoning_tokens: 0` in the sidecar and in
+  `scripts/benchmark-timing.py` means "not reported", not "none spent".
+  The harness passes on what it is given; the figure can mislead. Not
+  changed.
+- `MinSummaryRoom` (512) and `MaxSummaryTokens` (1 024) are constants
+  from measurements on two models and one kind of task; they are fields
+  on the manager, not configuration keys.
+- The GPU fault that aborted two benchmark runs on 2026-09-17/18 did not
+  recur after the machine was rebooted — two runs of the same Ollama
+  workload and every FreeToken and DeepSeek Harness run since, peak
+  566 W and 80 °C — and its cause was not established.
 - `max_tool_calls` / `max_execution_time` from SCOPE §3 remain
   unimplemented (documented as extension points).
 
@@ -266,11 +294,118 @@ pairing, a server-side `isError` reaching the model as a failure, a
 schema violation rejected before the server, and state written by one
 harness process read back by the next.
 
+## Addendum 2: found while measuring the Bounded Context Lifecycle
+
+The lifecycle was closed out on the audited baseline and then measured:
+twenty-four turns against Ollama, DeepSeek Harness as the behavioural
+reference, and the question of why the bounded arm was 2.9x slower than
+the unbounded one. Figures and method are in
+`docs/BOUNDED-CONTEXT-LIFECYCLE.md`; what follows is what the
+measurements found wrong, in the terms of this report.
+
+- **Medium — a stdio MCP server ran in the wrong directory.**
+  `cmd/simple-harness/mcp_init.go`, `internal/mcp/transport_stdio.go`,
+  `internal/config`. Observed: scope-mcp, which keeps its state under
+  its cwd, wrote `.scope-mcp/state.db` wherever the harness was launched
+  from; a second run from another directory saw an empty project.
+  Expected: state with the project. Root cause: the child inherited the
+  harness's cwd; `--workspace` was never applied to it. Correction: the
+  child starts in the workspace; an optional `cwd` on the stdio
+  declaration overrides it (relative to the workspace; a configuration
+  error on an http declaration). Tests:
+  `TestStdioTransportStartsTheChildInTheGivenDirectory`,
+  `TestMCP_StdioCwd_IsLoadedRenderedAndStdioOnly`, `TestMCPServerDir`;
+  `e2e-scope-mcp.sh` criterion 7, red against the code before it.
+  Commit `80044d5`.
+- **Medium — compaction inferences that could not pay.**
+  `internal/ctxlife/manager.go`. Observed: on a file-reading task, four
+  compaction calls of 22-29 s were 103 s of a 163 s run (Ollama access
+  log); reproduced on FreeToken, where three runs spent 14-28 % of their
+  wall time on compactions that saved ~6, ~8 and ~122 tokens. Expected:
+  an inference spent only where it can reduce the context. Root cause:
+  compaction ran whenever pruning had not reached the budget, without
+  regard to the reducible span — which on this kind of task is a few
+  hundred tokens of remarks and placeholders, while the deficit sits in
+  the recent window's tool results; the summaries came back no smaller
+  than the span and were mostly refused. Correction: compaction is
+  attempted only when the span, less the deficit, leaves room for a
+  summary (`MinSummaryRoom`); otherwise the free reductions go first and
+  compaction is tried after them. Same task and limit on FreeToken:
+  156-201 s before, 101-116 s after. Ollama, twenty-four turns: the
+  bounded arm went from 2.9x the baseline's time to 0.82x. Tests:
+  `TestCompactionIsNotAttemptedWhenItCannotCoverTheDeficit`,
+  `TestCompactionNeedsRoomForASummary`,
+  `TestCompactionStillRunsOnceCheaperReductionsHaveMadeItWorthwhile`.
+  Commit `470fecc`.
+- **Medium — a run failed that one more free reduction would have
+  fitted.** `internal/ctxlife/manager.go`. Observed: a 10.5k-token file
+  read into a 7k budget ended the run with exit 2, "the window will not
+  narrow below 2". Expected: the run continues. Root cause: narrowing
+  was tried while the oversized result was whole and could not succeed,
+  because that result sits inside the window's floor; after the result
+  was cut to an excerpt, narrowing was not tried again. The defect
+  predates the day's other change — the test fails identically against
+  the previous `manager.go` — and was exposed by model variation, not
+  caused by it. Correction: narrow again after a truncation. Test:
+  `TestNarrowingIsRetriedAfterAnOversizedResultIsCut`. Commit `470fecc`.
+- **Medium — the compaction request had no size target, no cap of its
+  own, and reasoned at length.** `internal/ctxlife/compactor.go`,
+  `internal/model/client.go`. Observed: summaries of 464-1 424 tokens,
+  one taking 35 s; on a reasoning model 1 500-2 300 output tokens of
+  reasoning ahead of a 500-token summary. Expected: a bounded, small
+  request. Correction: the manager hands a `SizedCompactor` the room it
+  has (at most `MaxSummaryTokens`), the instruction states it, and the
+  request carries its own `max_tokens` (`ChatRequest.MaxTokens`) and
+  `reasoning_effort` (`ChatRequest.ReasoningEffort`). A summary cut off
+  at the cap is refused. The compaction asks for `none` unless
+  `context.compaction_reasoning_effort` says otherwise, with a fallback
+  to the model's own effort when the endpoint refuses the value;
+  `inherit` restores the previous behaviour. Same span: 39.5 s to 8.6 s
+  on Ollama, 34.1 s to 16.7 s on FreeToken. Tests:
+  `TestARequestsOwnOutputCapIsSentWhenItIsTheSmaller`,
+  `TestARequestsOwnReasoningEffortOverridesTheConfigured`,
+  `TestTheCompactorIsToldHowLargeTheSummaryMayBe`,
+  `TestModelCompactorStatesTheTargetAndCapsTheOutput`,
+  `TestCompactionReasoningDefaultsToNoneAndFallsBackWhenRefused`,
+  `TestCompactionReasoningEffort_FileAndEnv`. Commits `bfd751e`,
+  `276f908`.
+- **Caught before it landed.** The first version of the output cap,
+  twice the target, passed every unit test and returned no summary at
+  all against a real reasoning model: the cap was spent on reasoning.
+  The stub it was tested against had no reasoning to spend. The
+  committed version carries a reasoning allowance, dropped only when the
+  request asks for no reasoning, and the live test that found this is in
+  the repository.
+
+One existing test was changed, deliberately:
+`TestModelCompactorStatesTheTargetAndCapsTheOutput` pinned an empty
+`ReasoningEffort` as "the model's own", which was the default until
+`276f908` made it `none` on the repository owner's instruction. It pins
+`inherit` to that behaviour now; nothing it asserted was weakened.
+
+Behaviour changes a caller may notice, all from the two addenda: MCP
+tool definitions are the server's full schemas, so they are larger on
+the wire and in the accounting; a stdio MCP server runs in the workspace,
+and a relative path inside its `command` resolves there (no stdio
+declaration exists in the ecosystem's configurations today); a
+compaction request asks for `reasoning_effort: "none"` by default.
+
 ## Readiness
 
-The baseline is technically ready for further Bounded Context
+The first report declared the baseline ready for further Bounded Context
 Lifecycle work: the agent loop, message history, request construction,
-tool-call/result representation, MCP behaviour, session persistence
-and context accounting are validated by the suite, the race detector,
-the conformance checker and live runs listed above. The items under
-Remaining risks are known and documented, none Critical or High.
+tool-call/result representation, MCP behaviour, session persistence and
+context accounting validated by the suite, the race detector, the
+conformance checker and the live runs listed above.
+
+That work has since been done on it, and measuring it is what produced
+the second addendum — four defects the suite did not hold, three of them
+in the lifecycle itself. All are corrected with regression coverage, and
+the full validation passes at `276f908`. No Critical or High finding is
+open. The items under Remaining risks are known and documented, none
+Critical or High.
+
+What the two addenda say about the first pass is worth keeping: both
+sets of defects were found by running the harness against the real thing
+— a server built on a different SDK, a reasoning model, a second
+runtime — after stubs modelled on the author's understanding had passed.
