@@ -319,6 +319,15 @@ retrieval can be attributed to the run that made it.
   preflight refuses a FlowApp that enables knowledge, runs simple-harness
   steps and declares no such server, instead of letting it run and
   retrieve nothing.
+- Both launchers hand simple-harness the model's context window, as its
+  configured limit (`SIMPLE_HARNESS_CONTEXT_MODEL_LIMIT`). The harness
+  bounds a run — pruning, compaction — only when it knows the window; it
+  asks the runtime, and a cloud API does not answer, so without this a
+  cloud run is unbounded. FlowRunner takes the value from `context_window`
+  in the FlowApp's model binding (DPMtF-WebUI's exporter fills it in) and
+  shows it per profile in preflight; BridgeV002 takes it from the
+  model-allocator alias's `context`. The harness still takes the smaller of
+  this and what a local runtime reports.
 - Both launchers set the three position variables. FlowRunner sets them
   from the family run number, the handoff cycle and the FlowApp id.
   BridgeV002's role terminal sets them per delivered prompt — a pane
