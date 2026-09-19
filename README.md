@@ -299,7 +299,7 @@ retrieval can be attributed to the run that made it.
   `simple-harness` gets whatever `simple-harness` resolves to on `PATH`
   at dispatch — so a rebuilt simple-harness is used by the next run with
   no change to FlowRunner. The Windows bundle carries its own
-  `simple-harness.exe`; `scripts/build-windows-bundle.sh` in FlowRunner
+  `simple-harness.exe`; FlowRunner's `build-windows-bundle.sh` script
   builds the three programs together and stamps the commits into
   `BUILD-INFO.txt`.
 - A FlowApp declares its MCP servers (`mcp_servers:` in `app.yaml`:
