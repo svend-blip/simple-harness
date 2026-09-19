@@ -104,3 +104,23 @@ func TestAConfigFileWithoutAContextSectionStillParses(t *testing.T) {
 		t.Fatal("an absent limit was invented")
 	}
 }
+
+// TestCompactionReasoningEffort_FileAndEnv — the compaction request's own
+// reasoning effort: absent means the model's configured one; the
+// environment wins over the file, as everywhere else.
+func TestCompactionReasoningEffort_FileAndEnv(t *testing.T) {
+	home, proj := t.TempDir(), t.TempDir()
+	cfg, err := loadFrom(home, proj, nil)
+	if err != nil || cfg.Context.CompactionReasoningEffort != "" {
+		t.Fatalf("default: %q, %v", cfg.Context.CompactionReasoningEffort, err)
+	}
+	writeConfig(t, proj, `{"context":{"compaction_reasoning_effort":"none"}}`)
+	cfg, err = loadFrom(home, proj, nil)
+	if err != nil || cfg.Context.CompactionReasoningEffort != "none" {
+		t.Fatalf("file: %q, %v", cfg.Context.CompactionReasoningEffort, err)
+	}
+	cfg, err = loadFrom(home, proj, []string{"SIMPLE_HARNESS_CONTEXT_COMPACTION_REASONING_EFFORT=low"})
+	if err != nil || cfg.Context.CompactionReasoningEffort != "low" {
+		t.Fatalf("env: %q, %v", cfg.Context.CompactionReasoningEffort, err)
+	}
+}

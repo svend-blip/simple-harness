@@ -105,6 +105,31 @@ type ChatRequest struct {
 	Messages   []Message        `json:"messages"`
 	Tools      []ToolDefinition `json:"tools,omitempty"`
 	ToolChoice any              `json:"tool_choice,omitempty"`
+	// MaxTokens is this request's own output cap. Zero means none.
+	// The smaller of it and Options.MaxOutputTokens goes on the wire
+	// as max_tokens: a caller can ask for less than the configured
+	// limit, never for more.
+	MaxTokens int `json:"-"`
+	// ReasoningEffort is this request's own reasoning_effort. Empty
+	// means the client's configured one. A compaction is a summary,
+	// and a reasoning model otherwise thinks its way to it at length.
+	ReasoningEffort string `json:"-"`
+}
+
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
+}
+
+// outputCap is the max_tokens a request goes out with: the smaller of
+// the configured limit and the request's own, where zero means unset.
+func outputCap(configured, requested int) int {
+	if requested > 0 && (configured <= 0 || requested < configured) {
+		return requested
+	}
+	return configured
 }
 
 // ToolCallFragment is one tool-call delta as carried in
@@ -468,8 +493,8 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, onDelta func(S
 		Model:       c.opts.Model,
 		Messages:    toWireMessages(req.Messages),
 		Temperature: c.opts.Temperature,
-		MaxTokens:   c.opts.MaxOutputTokens,
-		Reasoning:   c.opts.ReasoningEffort,
+		MaxTokens:   outputCap(c.opts.MaxOutputTokens, req.MaxTokens),
+		Reasoning:   firstNonEmpty(req.ReasoningEffort, c.opts.ReasoningEffort),
 		Thinking:    c.opts.EnableThinking,
 		Budget:      c.opts.ThinkingBudget,
 		StreamOpts:  streamOptions{IncludeUsage: true},

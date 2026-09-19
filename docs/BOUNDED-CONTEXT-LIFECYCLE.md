@@ -90,7 +90,8 @@ context gets a bounded one.
     "safety_reserve": 4096,
     "keep_recent_turns": 8,
     "tool_result_pruning": true,
-    "compaction": true
+    "compaction": true,
+    "compaction_reasoning_effort": "none"
   }
 }
 ```
@@ -98,9 +99,13 @@ context gets a bounded one.
 `policy` is `bounded` (default) or `unbounded` (turns the feature off);
 `model_limit` is the model's window (0 or absent = ask the runtime, see
 below); the reserves are derived when absent; `keep_recent_turns`
-defaults to 8; the booleans default to true. `SIMPLE_HARNESS_CONTEXT_POLICY`,
-`SIMPLE_HARNESS_CONTEXT_MODEL_LIMIT` and `SIMPLE_HARNESS_CONTEXT_PROBE_LIMIT`
-override from the environment.
+defaults to 8; the booleans default to true.
+`compaction_reasoning_effort` is the `reasoning_effort` of the compaction
+request alone (absent = the same as `model.reasoning_effort`; see "What a
+compaction costs" below). `SIMPLE_HARNESS_CONTEXT_POLICY`,
+`SIMPLE_HARNESS_CONTEXT_MODEL_LIMIT`, `SIMPLE_HARNESS_CONTEXT_PROBE_LIMIT`
+and `SIMPLE_HARNESS_CONTEXT_COMPACTION_REASONING_EFFORT` override from the
+environment.
 
 ## Where the limit comes from
 
@@ -345,10 +350,47 @@ Corrected in `internal/ctxlife`:
   2") that one more free pruning would have fitted. A 10.5k-token file
   read into a 7k budget, exit 2. It narrows again now.
 
-Not done, recommended: the compaction request carries no size target and
-no output cap, so one summary ran to 1 424 tokens and 35 s.
-`model.ChatRequest` has no per-request output limit; adding one is a
-change to the wire contract and was left out of this correction. Re-measured on Ollama with the correction (2026-09-19, same model, limit
+### What a compaction costs: size target, output cap, reasoning
+
+The compaction request carried no size target and no cap of its own, so
+one summary ran to 1 424 tokens and 35 s. Added 2026-09-19:
+
+- The manager tells the compactor how large the summary may be: the
+  reducible span less the deficit, at most `MaxSummaryTokens` (1 024).
+  The instruction states it in tokens and words.
+- The request carries its own `max_tokens` (`model.ChatRequest.MaxTokens`;
+  the smaller of it and `model.max_output_tokens` goes on the wire):
+  target x 2, plus 4 096 for reasoning unless the compaction's reasoning
+  effort is `none`. A summary cut off at the cap is refused rather than
+  used, and one cut off before any text arrived says why.
+- `context.compaction_reasoning_effort` sets the compaction request's own
+  `reasoning_effort`, leaving the working turns alone.
+
+The allowance and the setting exist because of what the first version of
+the cap did. Measured on Ollama, `qwen3.6-27b`, a 3 981-token span
+(`TestLive_SizedCompaction`, run with `SIMPLE_HARNESS_LIVE_BASE_URL` and
+`_MODEL` set):
+
+| compaction request | summary | output tokens | time |
+|---|---:|---:|---:|
+| no target (before) | 471 | 2 798 | 39.5 s |
+| target 600, cap 1 200 — first attempt | none: cut off | 1 200 | 18.1 s |
+| target 600, cap 1 200 + 4 096 | 507 | 1 994 | 29.1 s |
+| target 600, cap 1 200, reasoning `none` | 714 | 612 | 8.6 s |
+
+A reasoning model spends the output cap on reasoning before the summary
+begins: about 1 500-2 300 tokens of it here, for a summary of 500. That
+is where a compaction's time goes — the size target barely moved the
+summary, which was already under it — and a cap sized for the summary
+alone returned nothing. With reasoning off the same compaction takes a
+fifth of the time. `none` is a setting and not the default because not
+every OpenAI-compatible endpoint accepts the value; Ollama does, and
+ignores `enable_thinking` and `think` on `/v1`.
+
+### The benchmark after the corrections
+
+Re-measured on Ollama with compaction attempted only when it can pay
+(2026-09-19, before the size target was added; same model, limit
 and turn budget as the twenty-four-turn run above; peak 560 W, 79 °C, no
 fault):
 

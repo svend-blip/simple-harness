@@ -156,6 +156,9 @@ type ContextPolicy struct {
 	// DisableCompaction turns off §10 even when a client is
 	// available.
 	DisableCompaction bool
+	// CompactionReasoningEffort is the compaction request's own
+	// reasoning_effort. Empty means the client's configured one.
+	CompactionReasoningEffort string
 }
 
 // Run is a single-turn interactive loop session. It owns the model
@@ -216,7 +219,7 @@ func newContextManager(cfg Config, client *model.Client, em *event.Emitter) *ctx
 	}
 	m.PruneToolResults = !p.DisableToolResultPruning
 	if !p.DisableCompaction && client != nil {
-		c := &ctxlife.ModelCompactor{Client: client}
+		c := &ctxlife.ModelCompactor{Client: client, ReasoningEffort: p.CompactionReasoningEffort}
 		if em != nil {
 			// A compaction is an inference; it shows up in the
 			// event stream as one.

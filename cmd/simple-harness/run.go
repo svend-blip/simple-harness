@@ -932,6 +932,8 @@ func contextPolicyFrom(cc config.ContextConfig, flagLimit int) loop.ContextPolic
 		KeepRecentTurns:          cc.KeepRecentTurns,
 		DisableToolResultPruning: !cc.PruningEnabled(),
 		DisableCompaction:        !cc.CompactionEnabled(),
+
+		CompactionReasoningEffort: cc.CompactionReasoningEffort,
 	}
 }
 

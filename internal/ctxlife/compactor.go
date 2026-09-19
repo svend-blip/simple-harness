@@ -27,6 +27,14 @@ type ModelCompactor struct {
 	// Ctx is the context for the compaction request. Nil means
 	// context.Background().
 	Ctx context.Context
+	// ReasoningEffort is the compaction request's own
+	// reasoning_effort (config: context.compaction_reasoning_effort).
+	// Empty leaves it to the client's configuration. Measured on
+	// Ollama, qwen3.6-27b: a 57-word summary took 28.3 s with the
+	// model's default reasoning and 1.4 s with "none". It is a
+	// setting and not a default because "none" is not accepted by
+	// every OpenAI-compatible endpoint.
+	ReasoningEffort string
 	// OnRequest is called before each compaction inference and
 	// OnUsage with the usage the model reported, when it did. A
 	// compaction is an inference like any other; without these the
@@ -64,14 +72,34 @@ This summary is lossy working memory, not a project record. Do not restate
 project status as if it were authoritative, and do not invent anything that
 is not in the material below. Write only the summary.`
 
+// SummaryCapFactor and ReasoningAllowance make up the output cap of a
+// sized compaction request: target x SummaryCapFactor + ReasoningAllowance.
+//
+// The factor is for the summary itself: the target is stated to the
+// model in tokens it cannot count, and the harness's estimate runs below
+// the runtime's count (~9 % measured on code), so the cap bounds the cost
+// without cutting a summary that is merely a little long.
+//
+// The allowance is for reasoning, which a reasoning model spends out of
+// the same cap before the summary begins. Measured on qwen3.6-27b
+// through Ollama: ~1 500 reasoning tokens ahead of a 563-token summary,
+// and a cap of twice the target returned no summary at all. When the
+// compaction's own ReasoningEffort is "none" there is none to allow for,
+// and the allowance is dropped.
+const (
+	SummaryCapFactor   = 2
+	ReasoningAllowance = 4096
+)
+
 // Compact implements Compactor.
 func (c *ModelCompactor) Compact(messages []model.Message) (string, error) {
-	if c.Client == nil {
-		return "", fmt.Errorf("ctxlife: no model client to compact with")
-	}
-	if len(messages) == 0 {
-		return "", fmt.Errorf("ctxlife: nothing to compact")
-	}
+	return c.CompactWithin(messages, 0)
+}
+
+// CompactWithin implements SizedCompactor. A target above zero is stated
+// in the instruction and bounds the request's output at
+// SummaryCapFactor times itself.
+func (c *ModelCompactor) CompactWithin(messages []model.Message, target int) (string, error) {
 	instruction := c.Instruction
 	if instruction == "" {
 		instruction = CompactionInstruction
@@ -81,17 +109,32 @@ func (c *ModelCompactor) Compact(messages []model.Message) (string, error) {
 		ctx = context.Background()
 	}
 
+	if target > 0 {
+		instruction += fmt.Sprintf("\n\nThe whole summary must be at most %d tokens (about %d words). "+
+			"Leave a heading out when there is nothing to put under it.", target, target*3/4)
+	}
 	req := model.ChatRequest{Messages: []model.Message{
 		{Role: "system", Content: instruction},
 		{Role: "user", Content: renderForCompaction(messages)},
 	}}
+	req.ReasoningEffort = c.ReasoningEffort
+	if target > 0 {
+		req.MaxTokens = target * SummaryCapFactor
+		if c.ReasoningEffort != "none" {
+			req.MaxTokens += ReasoningAllowance
+		}
+	}
 
 	if c.OnRequest != nil {
 		c.OnRequest()
 	}
 	var out strings.Builder
+	cutOff := false
 	err := c.Client.ChatStream(ctx, req, func(ev model.StreamEvent) error {
 		out.WriteString(ev.Delta)
+		if ev.FinishReason == "length" {
+			cutOff = true
+		}
 		if ev.Usage != nil && c.OnUsage != nil {
 			c.OnUsage(ev.Usage)
 		}
@@ -99,6 +142,18 @@ func (c *ModelCompactor) Compact(messages []model.Message) (string, error) {
 	})
 	if err != nil {
 		return "", fmt.Errorf("ctxlife: the compaction request failed: %w", err)
+	}
+	if cutOff {
+		// A summary that stops mid-sentence at the output cap is
+		// missing whatever came last — by the instruction's order,
+		// the next step. It is refused rather than used.
+		if strings.TrimSpace(out.String()) == "" {
+			return "", fmt.Errorf("ctxlife: the compaction was cut off at the output cap "+
+				"(max_tokens %d) before any summary text arrived — a reasoning model "+
+				"spends the cap on reasoning first; context.compaction_reasoning_effort "+
+				"sets the compaction request's own effort", req.MaxTokens)
+		}
+		return "", fmt.Errorf("ctxlife: the compaction summary was cut off at the output cap (max_tokens %d)", req.MaxTokens)
 	}
 	summary := strings.TrimSpace(out.String())
 	if summary == "" {

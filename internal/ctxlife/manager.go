@@ -51,6 +51,19 @@ type Compactor interface {
 	Compact(messages []model.Message) (string, error)
 }
 
+// SizedCompactor is a Compactor that can be told how large the summary
+// may be. The manager knows the room — the reducible span less the
+// deficit — and a compactor that does not is left to produce whatever
+// the model feels like: 464 to 1 424 tokens were measured, the longest
+// taking 35 s to generate. The manager prefers this method when the
+// compactor has it.
+type SizedCompactor interface {
+	Compactor
+	// CompactWithin is Compact with a target: the summary should be
+	// at most target tokens.
+	CompactWithin(messages []model.Message, target int) (string, error)
+}
+
 // Stats is §16's observable surface. Every field is a count or a
 // token figure the manager actually produced, not a derived rate.
 type Stats struct {
@@ -126,6 +139,10 @@ type Manager struct {
 	// spent on it. Zero means DefaultMinSummaryRoom.
 	MinSummaryRoom int
 
+	// MaxSummaryTokens caps the size target handed to a
+	// SizedCompactor. Zero means DefaultMaxSummaryTokens.
+	MaxSummaryTokens int
+
 	// Compactor enables §10. Nil means conversation compaction is
 	// unavailable, which is reported rather than worked around.
 	Compactor Compactor
@@ -150,7 +167,10 @@ const (
 	// tokens (the instruction asks for six headings); the largest,
 	// 1 424.
 	DefaultMinSummaryRoom = 512
-	DefaultMinRecentTurns = 2
+	// DefaultMaxSummaryTokens is the most a summary is asked to be,
+	// however much room the span leaves: working memory, not a record.
+	DefaultMaxSummaryTokens = 1024
+	DefaultMinRecentTurns   = 2
 
 	// The placeholder that replaces a pruned tool result. It says
 	// what was there and how big it was, so a reader of the
@@ -411,7 +431,7 @@ func (m *Manager) Fit(messages []model.Message) ([]model.Message, Accounting, er
 	// — 28 % of the wall time against FreeToken, 63 % against Ollama —
 	// before narrowing the window did the actual work.
 	tryCompact := func() bool {
-		compacted, n, tokens, err := m.compact(working)
+		compacted, n, tokens, err := m.compact(working, m.summaryTarget(working, acct))
 		switch {
 		case err != nil:
 			m.Stats.CompactionFailures++
@@ -731,13 +751,28 @@ func (m *Manager) compactionCanPay(messages []model.Message, acct Accounting) bo
 	return m.reducibleTokens(messages)-(acct.Total-acct.Budget) >= room
 }
 
+// summaryTarget is how large a summary may be and still bring the
+// context within budget — the reducible span less the deficit — capped
+// at MaxSummaryTokens.
+func (m *Manager) summaryTarget(messages []model.Message, acct Accounting) int {
+	ceiling := m.MaxSummaryTokens
+	if ceiling <= 0 {
+		ceiling = DefaultMaxSummaryTokens
+	}
+	room := m.reducibleTokens(messages) - (acct.Total - acct.Budget)
+	if room > ceiling {
+		return ceiling
+	}
+	return room
+}
+
 // compact replaces the reducible span with one summary message.
 //
 // The summary is a system message placed where the span was, so the
 // order of the conversation is preserved: pinned instructions, then
 // what happened earlier in compact form, then recent turns verbatim,
 // then the current task. §10's sketch, in message form.
-func (m *Manager) compact(messages []model.Message) ([]model.Message, int, int, error) {
+func (m *Manager) compact(messages []model.Message, target int) ([]model.Message, int, int, error) {
 	prios := m.Classify(messages)
 	var span []model.Message
 	var spanStart = -1
@@ -753,7 +788,13 @@ func (m *Manager) compact(messages []model.Message) ([]model.Message, int, int, 
 		return messages, 0, 0, nil
 	}
 
-	summary, err := m.Compactor.Compact(span)
+	var summary string
+	var err error
+	if sized, ok := m.Compactor.(SizedCompactor); ok && target > 0 {
+		summary, err = sized.CompactWithin(span, target)
+	} else {
+		summary, err = m.Compactor.Compact(span)
+	}
 	if err != nil {
 		return messages, 0, 0, fmt.Errorf("ctxlife: compaction failed: %w", err)
 	}

@@ -2,6 +2,7 @@ package ctxlife
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -326,5 +327,133 @@ func TestCompactionNeedsRoomForASummary(t *testing.T) {
 	}
 	if c.calls != 0 {
 		t.Errorf("the compactor was called %d times with no room for a summary", c.calls)
+	}
+}
+
+// sizedCompactor records the target it was given.
+type sizedCompactor struct {
+	fixedCompactor
+	targets []int
+}
+
+func (c *sizedCompactor) CompactWithin(msgs []model.Message, target int) (string, error) {
+	c.targets = append(c.targets, target)
+	return c.Compact(msgs)
+}
+
+// TestTheCompactorIsToldHowLargeTheSummaryMayBe — the compaction request
+// carried no size target, so the summary's size was whatever the model
+// produced: 464 to 1 424 tokens, one of them 35 s of generation. The
+// manager knows the room (span less deficit) and passes it on, capped
+// at MaxSummaryTokens.
+func TestTheCompactorIsToldHowLargeTheSummaryMayBe(t *testing.T) {
+	// run builds a span of spanTokens and a recent message sized so
+	// that the deficit is spanTokens-room, and returns the target.
+	run := func(spanTokens, room int) int {
+		t.Helper()
+		c := &sizedCompactor{fixedCompactor: fixedCompactor{summary: "objective: x."}}
+		m := New(4096)
+		m.KeepRecentTurns = 2
+		m.Compactor = c
+		budget := m.Account(nil).Budget
+		in := []model.Message{sys("instructions")}
+		for i := 0; i < spanTokens/120; i++ {
+			in = append(in, asst(filler(120)))
+		}
+		in = append(in, asst(filler(budget-room)), user("continue"))
+		before := m.Account(in)
+		gotRoom := m.reducibleTokens(in) - (before.Total - before.Budget)
+		if _, _, err := m.Fit(in); err != nil {
+			t.Fatal(err)
+		}
+		if len(c.targets) != 1 {
+			t.Fatalf("CompactWithin called %d times, want 1 (room %d)", len(c.targets), gotRoom)
+		}
+		want := gotRoom
+		if want > DefaultMaxSummaryTokens {
+			want = DefaultMaxSummaryTokens
+		}
+		if c.targets[0] != want {
+			t.Errorf("target %d, want %d (room %d)", c.targets[0], want, gotRoom)
+		}
+		return c.targets[0]
+	}
+	if got := run(3600, 2400); got != DefaultMaxSummaryTokens {
+		t.Errorf("a large room: target %d, want the ceiling %d", got, DefaultMaxSummaryTokens)
+	}
+	if got := run(1200, 700); got >= DefaultMaxSummaryTokens || got < DefaultMinSummaryRoom {
+		t.Errorf("a small room: target %d, want it between the floor and the ceiling", got)
+	}
+}
+
+// TestModelCompactorStatesTheTargetAndCapsTheOutput — what the target
+// becomes on the wire. The cap is on all output, and a reasoning model
+// spends output before the summary begins: measured on qwen3.6-27b,
+// ~1 500 reasoning tokens ahead of a 563-token summary, so a cap of
+// twice the target produced no summary at all. Hence the allowance,
+// which is dropped only when the compaction's own reasoning effort says
+// there will be none.
+func TestModelCompactorStatesTheTargetAndCapsTheOutput(t *testing.T) {
+	var body struct {
+		MaxTokens int    `json:"max_tokens"`
+		Reasoning string `json:"reasoning_effort"`
+		Messages  []struct{ Role, Content string }
+	}
+	finish, content := "stop", "a summary"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body.Reasoning = ""
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, `data: {"choices":[{"delta":{"content":%q},"finish_reason":%q}]}`+"\n\n", content, finish)
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+	client := model.NewClient(model.Options{
+		BaseURL: srv.URL, Model: "m", MaxOutputTokens: 16384, RequestTimeout: 2 * time.Second})
+
+	// Reasoning left to the client's configuration: allowance included.
+	c := &ModelCompactor{Client: client}
+	got, err := c.CompactWithin([]model.Message{asst("older work")}, 600)
+	if err != nil || got != "a summary" {
+		t.Fatalf("CompactWithin = %q, %v", got, err)
+	}
+	if want := 600*SummaryCapFactor + ReasoningAllowance; body.MaxTokens != want {
+		t.Errorf("max_tokens = %d, want %d", body.MaxTokens, want)
+	}
+	if body.Reasoning != "" {
+		t.Errorf("reasoning_effort = %q, want it left to the client", body.Reasoning)
+	}
+	if len(body.Messages) == 0 || !strings.Contains(body.Messages[0].Content, "600 tokens") {
+		t.Errorf("the instruction does not state the target: %+v", body.Messages)
+	}
+
+	// Reasoning switched off for the compaction: no allowance.
+	c = &ModelCompactor{Client: client, ReasoningEffort: "none"}
+	if _, err := c.CompactWithin([]model.Message{asst("older work")}, 600); err != nil {
+		t.Fatal(err)
+	}
+	if body.MaxTokens != 600*SummaryCapFactor || body.Reasoning != "none" {
+		t.Errorf("reasoning off: max_tokens %d, reasoning_effort %q", body.MaxTokens, body.Reasoning)
+	}
+
+	// Cut off at the cap: refused, and an empty one names the likely cause.
+	finish = "length"
+	if _, err := c.CompactWithin([]model.Message{asst("older work")}, 600); err == nil ||
+		!strings.Contains(err.Error(), "cut off") {
+		t.Errorf("a summary cut off at the cap: err = %v, want it refused", err)
+	}
+	content = ""
+	if _, err := c.CompactWithin([]model.Message{asst("older work")}, 600); err == nil ||
+		!strings.Contains(err.Error(), "compaction_reasoning_effort") {
+		t.Errorf("the cap spent before any summary: err = %v, want it to name the setting", err)
+	}
+
+	// Without a target nothing changes: the configured cap, no size line.
+	finish, content = "stop", "a summary"
+	if _, err := (&ModelCompactor{Client: client}).Compact([]model.Message{asst("older work")}); err != nil {
+		t.Fatal(err)
+	}
+	if body.MaxTokens != 16384 || strings.Contains(body.Messages[0].Content, "tokens (about") {
+		t.Errorf("Compact without a target: max_tokens %d", body.MaxTokens)
 	}
 }

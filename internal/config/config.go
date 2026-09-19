@@ -87,6 +87,12 @@ type ContextConfig struct {
 	// reliable"). Nil means on. A configured ModelLimit and a probed
 	// one are reconciled by taking the smaller.
 	ProbeLimit *bool `json:"probe_limit,omitempty"`
+	// CompactionReasoningEffort is the reasoning_effort of the
+	// compaction request alone; the working turns keep
+	// model.reasoning_effort. Empty means the same as theirs. On a
+	// reasoning model "none" (where the endpoint accepts it) turns a
+	// half-minute compaction into a second or two.
+	CompactionReasoningEffort string `json:"compaction_reasoning_effort,omitempty"`
 }
 
 // ProbeEnabled resolves the tri-state pointer. Absent means on.
@@ -472,6 +478,8 @@ func setEnvField(cfg *Config, field, val string) error {
 		default:
 			return fmt.Errorf("invalid context_probe_limit %q: want true or false", val)
 		}
+	case "context_compaction_reasoning_effort":
+		cfg.Context.CompactionReasoningEffort = strings.TrimSpace(val)
 	case "context_model_limit":
 		n, err := strconv.Atoi(val)
 		if err != nil || n < 0 {
@@ -745,6 +753,8 @@ type contextOverlay struct {
 	ToolResultPruning *bool   `json:"tool_result_pruning"`
 	Compaction        *bool   `json:"compaction"`
 	ProbeLimit        *bool   `json:"probe_limit"`
+
+	CompactionReasoningEffort *string `json:"compaction_reasoning_effort"`
 }
 
 type modelOverlay struct {
@@ -845,6 +855,9 @@ func applyOverlay(cfg *Config, overlay configOverlay, modelPresent map[string]st
 		if c.ProbeLimit != nil {
 			v := *c.ProbeLimit
 			cfg.Context.ProbeLimit = &v
+		}
+		if c.CompactionReasoningEffort != nil {
+			cfg.Context.CompactionReasoningEffort = *c.CompactionReasoningEffort
 		}
 	}
 	if overlay.Model == nil && overlay.MCPServers == nil && !mcpServersPresent {

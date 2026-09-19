@@ -252,9 +252,11 @@ environment variables. Keys: `model` (`base_url`, `model`, `api_key`,
 `reasoning_effort`, `enable_thinking`, `thinking_budget`),
 `shell_timeout`, `context` (`policy`, `model_limit`,
 `generation_reserve`, `safety_reserve`, `keep_recent_turns`,
-`tool_result_pruning`, `compaction`, `probe_limit`; `policy`,
-`model_limit` and `probe_limit` also as `SIMPLE_HARNESS_CONTEXT_POLICY` /
-`_CONTEXT_MODEL_LIMIT` / `_CONTEXT_PROBE_LIMIT`)
+`tool_result_pruning`, `compaction`, `probe_limit`,
+`compaction_reasoning_effort`; `policy`, `model_limit`, `probe_limit` and
+`compaction_reasoning_effort` also as `SIMPLE_HARNESS_CONTEXT_POLICY` /
+`_CONTEXT_MODEL_LIMIT` / `_CONTEXT_PROBE_LIMIT` /
+`_CONTEXT_COMPACTION_REASONING_EFFORT`)
 and `mcp_servers`. The `mcp_servers` config key (V2) lists
 configuration-pinned MCP servers the harness connects to at session
 start — see `docs/examples/mcp-light.json` for a reference config and
