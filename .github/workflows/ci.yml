@@ -35,6 +35,12 @@ jobs:
         with:
           go-version: stable
       - run: go version
+      # Two acceptance tests run pytest on the workspace the harness patched;
+      # without it they skip and say so.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --quiet pytest
       - run: go vet ./...
       - name: go test
         run: go test ./...

@@ -3019,7 +3019,21 @@ func copyFixtureInto(projectRoot, targetDir string) error {
 //	      041's additive event types).
 //	(iv) the JSONL stream carries a completed event with
 //	     exit_code 0.
+
+// requirePytest skips a test whose acceptance criterion is "pytest passes on
+// the workspace" on a machine that has no pytest. The suite's first run on a
+// clean machine (CI, 2026-09-21) failed here: a Go repository whose
+// `go test ./...` needed a Python package nothing declared. CI installs it,
+// so the two tests run there; elsewhere the skip says what is missing.
+func requirePytest(t *testing.T) {
+	t.Helper()
+	if out, err := exec.Command("python3", "-m", "pytest", "--version").CombinedOutput(); err != nil {
+		t.Skipf("needs python3 with pytest (python3 -m pip install pytest): %v: %s", err, strings.TrimSpace(string(out)))
+	}
+}
+
 func TestE2E_AcceptanceRunner_HappyPath_HarnessDrivesPatch(t *testing.T) {
+	requirePytest(t)
 	savedReg := globalRegistry
 	t.Cleanup(func() { globalRegistry = savedReg })
 	freshReg := tools.NewRegistry()
@@ -3183,6 +3197,7 @@ func TestE2E_AcceptanceRunner_HappyPath_HarnessDrivesPatch(t *testing.T) {
 // exists when the script's `cp -r example-project/. $WORKSPACE/`
 // pre-populates it).
 func TestE2E_AcceptanceRunner_HappyPath_ScriptInvokesHarness(t *testing.T) {
+	requirePytest(t)
 	projectRoot := repoRoot
 
 	overrideWorkspace := filepath.Join(t.TempDir(), "ws")
