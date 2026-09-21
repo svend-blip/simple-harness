@@ -2,9 +2,11 @@
 
 `go test ./...` first ran on Windows on 2026-09-21 (CI, `windows-latest`). On
 Windows the gate is `go vet ./...` — every package and its tests compile — and
-the live scope-mcp round trip (`scripts/e2e-scope-mcp.sh`). The full suite
+the live scope-mcp round trip (`scripts/e2e-scope-mcp.sh`), which passes there
+7/7: simple-harness.exe as an MCP client of scope-mcp under node, two harness
+processes sharing one state file. The full suite
 runs there too and is shown, but does not block: 13 tests failed on the first
-run, and they are listed here until each is either fixed or moved behind a
+run and 12 on the second (the policy fix below), and they are listed here until each is either fixed or moved behind a
 build tag with a reason. Linux is a full gate, with `-race`.
 
 ## Fixed

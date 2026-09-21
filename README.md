@@ -419,6 +419,13 @@ directly. See the Quick start section above for examples.
 
 ## Testing
 
+[![ci](https://github.com/svend-blip/simple-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/svend-blip/simple-harness/actions/workflows/ci.yml)
+
+Every push runs `go vet`, the suite (with `-race` on Linux) and the live scope-mcp round trip
+(`scripts/e2e-scope-mcp.sh`) on Linux and on Windows. On Windows the gate is vet plus the round trip; the
+full suite is shown but does not block yet — `docs/WINDOWS-TESTS.md` lists what fails there and why. Two
+acceptance tests need `python3 -m pytest` and skip with the install command when it is missing.
+
 Run `./scripts/test.sh` for the full test suite (every package, mocked
 models) and `./scripts/contract-check.sh` for the model-free V1
 contract conformance checker. Live acceptance runners
