@@ -21,6 +21,7 @@ package perm
 import (
 	"context"
 	"fmt"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -247,15 +248,26 @@ func looksLikePathish(name, value string) bool {
 	}
 	// Also check the value itself: any relative path starting with
 	// ".." or containing a separator is path-shaped.
-	if strings.HasPrefix(value, "../") || strings.HasPrefix(value, ".."+string(filepath.Separator)) {
-		return true
-	}
-	return false
+	// By value, only what can be nothing but a path: a leading ".." segment,
+	// in either spelling. Anything broader would read a `content` argument
+	// that begins "/* ..." as a path and refuse the write.
+	return value == ".." || strings.HasPrefix(value, "../") || strings.HasPrefix(value, `..\`)
 }
 
 // pathEscapes returns true iff the string s, when treated as a path
-// relative to wsRoot, resolves outside wsRoot. Mirrors the segment-
-// boundary-safe logic in internal/path.Normalize.
+// relative to wsRoot, resolves outside wsRoot.
+//
+// A relative path is judged by where it ends up, with BOTH separators read
+// as separators on every platform. It used to be judged by whether it began
+// with ".." followed by the platform's separator: on Windows "../escape" -
+// the form a model writes, and one Windows accepts - was allowed, and
+// "sub/../../escape" was allowed everywhere (found when the suite first ran
+// on Windows, CI 2026-09-21; internal/path.Normalize still refused the
+// write). Reading a backslash as a separator on POSIX refuses a file that
+// is really named `..\x`; a fence may be too high there.
+//
+// A path that starts with a separator but is not absolute is Windows'
+// "rooted on the current drive" (\Windows, /etc): outside any workspace.
 func pathEscapes(s, wsRoot string) bool {
 	if filepath.IsAbs(s) {
 		cleaned := filepath.Clean(s)
@@ -265,7 +277,12 @@ func pathEscapes(s, wsRoot string) bool {
 		}
 		return rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
 	}
-	return s == ".." || strings.HasPrefix(s, ".."+string(filepath.Separator))
+	slashed := strings.ReplaceAll(s, "\\", "/")
+	if strings.HasPrefix(slashed, "/") {
+		return true
+	}
+	cleaned := path.Clean(slashed)
+	return cleaned == ".." || strings.HasPrefix(cleaned, "../")
 }
 
 // Compile-time assertion that Policy satisfies tools.Policy.

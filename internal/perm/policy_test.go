@@ -199,3 +199,37 @@ func TestIsMutationTool(t *testing.T) {
 // keep Decide call sites compact in the matrix tests above (the
 // Decision logic does not consult the context).
 func nilTestCtx() context.Context { return context.Background() }
+
+// Found when the suite first ran on Windows (CI, 2026-09-21): the policy
+// looked for ".." followed by the PLATFORM's separator, so on Windows
+// "../escape" - the form a model writes, and one Windows accepts - was
+// Allowed. The same prefix test let "sub/../../escape" through everywhere.
+// The tool's own Normalize still refused the write, so this was one of two
+// fences down, not an open gate; the fence is for both separators, on both
+// platforms, and looks at where the path ends up, not how it begins.
+func TestPolicy_WORKSPACE_WRITE_RejectsEscapeInEitherSpelling(t *testing.T) {
+	ws := tempWorkspaceForPolicy(t)
+	p := NewPolicy(WORKSPACE_WRITE)
+	for _, bad := range []string{
+		"../escape", `..\escape`, "..", "sub/../../escape", `sub\..\..\escape`,
+		"./../escape", "a/b/../../../escape", "/etc/passwd", `\Windows\system.ini`,
+	} {
+		call := tools.Call{Name: "write_file", Arguments: map[string]any{"path": bad}}
+		if d := p.Decide(nilTestCtx(), call, ws); d.Allowed || d.Reason != "workspace-write-rejects-escape" {
+			t.Errorf("path %q: Allowed=%v Reason=%q, want the escape refused", bad, d.Allowed, d.Reason)
+		}
+	}
+	// what is written INTO a file is not a path, whatever it begins with
+	for _, content := range []string{"/* a C comment */\nint main(){}", "#!/bin/sh\necho hi\n", "see ./notes/../index"} {
+		call := tools.Call{Name: "write_file", Arguments: map[string]any{"path": "src/main.c", "content": content}}
+		if d := p.Decide(nilTestCtx(), call, ws); !d.Allowed {
+			t.Errorf("content %q: refused (%s), want allowed", content, d.Reason)
+		}
+	}
+	for _, good := range []string{"file.txt", "sub/file.txt", `sub\file.txt`, "sub/../file.txt", "./file.txt", "..file", "a..b/c"} {
+		call := tools.Call{Name: "write_file", Arguments: map[string]any{"path": good}}
+		if d := p.Decide(nilTestCtx(), call, ws); !d.Allowed {
+			t.Errorf("path %q: refused (%s), want allowed", good, d.Reason)
+		}
+	}
+}
