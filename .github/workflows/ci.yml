@@ -1,0 +1,57 @@
+# The suite, and the live scope-mcp round trip, on Linux and on Windows.
+# The Windows code (shell_windows.go, the stdio transport's process handling)
+# had only ever been cross-compiled: FlowRunner bundles simple-harness.exe,
+# and its first run on Windows was going to be at somebody's desk.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - run: go version
+      - run: go vet ./...
+      - name: go test
+        run: go test ./...
+      - name: go test -race
+        if: runner.os == 'Linux'
+        run: go test -race ./...
+
+      # The harness as an MCP client of a real server: scope-mcp on stdio,
+      # a scripted model, two harness processes sharing one state file.
+      - uses: actions/checkout@v4
+        with:
+          repository: svend-blip/scope-mcp
+          path: _scope-mcp
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: _scope-mcp
+      - name: live scope-mcp round trip
+        run: scripts/e2e-scope-mcp.sh "$GITHUB_WORKSPACE/_scope-mcp/src/server.js"

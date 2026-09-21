@@ -24,7 +24,17 @@ SERVER="${1:?usage: e2e-scope-mcp.sh <path-to-scope-mcp/src/server.js>}"
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 
+# Runs on Windows too (Git Bash, as in CI): python may be `python`, a built
+# binary needs its .exe, the harness finds its user config through
+# USERPROFILE rather than HOME, and a path handed to a native program inside
+# a file or a variable must be a Windows path - only arguments are translated.
+PY="$(command -v python3 || command -v python)"
+EXE="$(go env GOEXE)"
 TMP="$(mktemp -d)"
+if command -v cygpath >/dev/null 2>&1; then
+    TMP="$(cygpath -m "$TMP")"
+    SERVER="$(cygpath -m "$SERVER")"
+fi
 MOCK_PID=""
 cleanup() {
     [ -n "$MOCK_PID" ] && kill "$MOCK_PID" 2>/dev/null || true
@@ -32,7 +42,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-BIN="$TMP/simple-harness"
+BIN="$TMP/simple-harness$EXE"
 go build -o "$BIN" ./cmd/simple-harness
 
 WS="$TMP/ws"
@@ -40,7 +50,7 @@ WS="$TMP/ws"
 # upward from the harness's cwd, and the harness is launched from
 # $TMP/elsewhere on purpose.
 mkdir -p "$WS" "$TMP/home/.simple-harness" "$TMP/elsewhere"
-python3 - "$SERVER" >"$TMP/home/.simple-harness/config.json" <<'PY'
+"$PY" - "$SERVER" >"$TMP/home/.simple-harness/config.json" <<'PY'
 import json, sys
 print(json.dumps({"mcp_servers": [{"name": "scope-mcp", "transport": "stdio",
       "command": ["node", sys.argv[1]], "permission": "workspace_write"}]}))
@@ -49,10 +59,10 @@ echo "do the scope work" >"$WS/prompt.md"
 
 run() { # run <label> <script.json>
     local label="$1" script="$2" rc=0
-    python3 -u "$ROOT/scripts/scripted-model.py" "$TMP/$label.port" "$TMP/$label.req" "$script" &
+    "$PY" -u "$ROOT/scripts/scripted-model.py" "$TMP/$label.port" "$TMP/$label.req" "$script" &
     MOCK_PID=$!
     for _ in $(seq 1 25); do [ -f "$TMP/$label.port" ] && break; sleep 0.2; done
-    (cd "$TMP/elsewhere" && HOME="$TMP/home" "$BIN" run \
+    (cd "$TMP/elsewhere" && HOME="$TMP/home" USERPROFILE="$TMP/home" "$BIN" run \
         --base-url "http://127.0.0.1:$(cat "$TMP/$label.port")/v1" --model scripted \
         --workspace "$WS" --permission workspace_write \
         --prompt-file "$WS/prompt.md" --output jsonl --max-turns 10 \
@@ -80,4 +90,4 @@ JSON
 
 run r1 "$TMP/s1.json"
 run r2 "$TMP/s2.json"
-python3 "$ROOT/scripts/e2e-scope-mcp-check.py" "$TMP"
+"$PY" "$ROOT/scripts/e2e-scope-mcp-check.py" "$TMP"
